@@ -153,6 +153,38 @@ data_vis:
 # ============================================================
 model:
 
+  # DINOv3 ViT-B/16 视觉骨干（全程冻结 + eval），逐帧输出 patch 网格特征
+  dinov3_backbone:
+    model_dir: model/dinov3-vitb16-pretrain-lvd1689m  # 本地权重目录（相对仓库根）
+    patch_size: 16            # ViT patch 边长；768×384 输入 → 48×24 patch 网格
+    hidden_dim: 768           # 骨干输出通道（师生头共享的特征维度）
+    num_register_tokens: 4    # DINOv3 ViT-B 的 register token 数（序列切片下界校验用）
+
+  # 时序主干：DINO 逐帧特征堆成 5 帧时序后，6 层 ConvNeXt 风格 3D 卷积块
+  temporal_trunk:
+    channels: 768             # 与骨干 hidden_dim 对齐，主干内不改变通道
+    num_blocks: 6             # ConvNeXt 3D 块层数
+    temporal_kernel: 3        # 深度可分离卷积时间核（T 方向），pad=(k-1)/2 保持 5 帧
+    spatial_kernel: 5         # 深度可分离卷积空间核（H/W 方向，5×5）
+    expansion: 2              # 1×1×1 逐点卷积的通道膨胀率
+
+  # 三头解码：各含 1 层 3D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
+  heads:
+    reduce_channels: 128      # 残差块后 1×1×1 把 768 压到的头内起始通道 C0
+    up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（24×48 → 384×768）
+    num_classes: 29           # 语义分割类别数（CARLA CityScapes tag 0..28）
+    semantic_out: 29          # 语义头输出通道（= num_classes logits）
+    flow_out: 2               # 光流头输出通道（图像平面速度 vx,vy 的 scale·symlog）
+    depth_out: 2              # 深度头输出通道（ch0=深度 scale·symlog，ch1=范围内 BCE logit）
+
+  # 物理量监督口径：Symlog 空间 + 缩放，深度范围裁剪，光流→速度换算
+  physics:
+    symlog_scale: 0.14285714  # 目标 = symlog_scale · symlog(x)，symlog(x)=sign(x)·ln(1+|x|)
+    depth_max_m: 128.0        # 深度检测上限（米）；超出记为超范围，仅监督二分类
+    flow_dt_s: 0.1            # 光流换算速度用的时间步 = 仿真 fixed_delta_seconds（每 tick 渲染）
+    flow_ndc_pixel_scale: [384.0, 192.0]  # 归一化光流→像素位移的有符号缩放 [W/2, H/2]
+    semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
+
   # 目标点嵌入层：ego 目标点 → 栅格向量场 → 三层卷积下采样 → 目标导航点 Token
   target_point_embedding:
     coordinate_dim: 2          # 目标点坐标维度，固定为 ego 平面 [x, y]
@@ -180,3 +212,38 @@ model:
     hidden_dim: 768            # 每个目标导航点 Token 维度（对齐视觉编码器 768）
     flatten_order: channel_height_width   # 卷积输出展平顺序（当前仅 channel_height_width）
     dtype: float32             # 目标点嵌入层强制运行精度（当前仅 float32）
+
+# ============================================================
+# data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
+# ============================================================
+data:
+
+  # 感知模型的时序开窗数据集：只读消费 carla_collector 落盘的场景
+  dataset:
+    scene_root: data/carla_data_collector/dataset/scenes  # 场景目录搜索根（含 scene_XXXXXX/）
+    camera: front             # 使用的相机名（当前数据集单相机）
+    window_size: 5            # 每个样本的历史帧数（时序长度 T）
+    window_stride: 5          # 相邻窗口起点间隔（=window_size 即不重叠）
+    # DINOv3 ImageNet 归一化（RGB 先除 255 到 [0,1] 再标准化）；本地无 preprocessor_config，故写此处
+    dino_mean: [0.485, 0.456, 0.406]
+    dino_std: [0.229, 0.224, 0.225]
+
+# ============================================================
+# train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
+# ============================================================
+train:
+  device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
+  epochs: 10
+  batch_size: 2
+  num_workers: 4
+  lr: 0.00005                # 5e-5
+  weight_decay: 0.00001      # 1e-5
+  grad_clip_norm: 1.0        # 梯度裁剪上限（0 表示不裁剪）
+  log_every: 20              # 每多少步打印一次损失
+  ckpt_dir: train/checkpoints   # 权重保存目录（相对仓库根）
+  # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度范围 BCE / 光流 SmoothL1
+  loss_weights:
+    semantic: 1.0
+    depth: 1.0
+    depth_range: 1.0
+    flow: 1.0

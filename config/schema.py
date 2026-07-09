@@ -237,8 +237,85 @@ class TargetPointEmbeddingCfg:
 
 
 @dataclass
+class DinoV3BackboneCfg:
+    model_dir: str
+    patch_size: int
+    hidden_dim: int
+    num_register_tokens: int
+
+
+@dataclass
+class TemporalTrunkCfg:
+    channels: int
+    num_blocks: int
+    temporal_kernel: int
+    spatial_kernel: int
+    expansion: int
+
+
+@dataclass
+class HeadsCfg:
+    reduce_channels: int
+    up_channels: List[int]
+    num_classes: int
+    semantic_out: int
+    flow_out: int
+    depth_out: int
+
+
+@dataclass
+class PhysicsCfg:
+    symlog_scale: float
+    depth_max_m: float
+    flow_dt_s: float
+    flow_ndc_pixel_scale: List[float]
+    semantic_ignore_index: int
+
+
+@dataclass
 class ModelCfg:
+    dinov3_backbone: DinoV3BackboneCfg
+    temporal_trunk: TemporalTrunkCfg
+    heads: HeadsCfg
+    physics: PhysicsCfg
     target_point_embedding: TargetPointEmbeddingCfg
+
+
+@dataclass
+class DatasetCfg:
+    scene_root: str
+    camera: str
+    window_size: int
+    window_stride: int
+    dino_mean: List[float]
+    dino_std: List[float]
+
+
+@dataclass
+class DataCfg:
+    dataset: DatasetCfg
+
+
+@dataclass
+class LossWeightsCfg:
+    semantic: float
+    depth: float
+    depth_range: float
+    flow: float
+
+
+@dataclass
+class TrainCfg:
+    device: str
+    epochs: int
+    batch_size: int
+    num_workers: int
+    lr: float
+    weight_decay: float
+    grad_clip_norm: float
+    log_every: int
+    ckpt_dir: str
+    loss_weights: LossWeightsCfg
 
 
 @dataclass
@@ -246,6 +323,8 @@ class Config:
     carla_collector: CarlaCollectorCfg
     data_vis: DataVisCfg
     model: ModelCfg
+    data: DataCfg
+    train: TrainCfg
 
 
 # ---------- 由 dict 构造 ----------
@@ -347,6 +426,8 @@ def validate_config(cfg):
 
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
+    _validate_data(cfg.data)
+    _validate_train(cfg.train)
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
@@ -360,7 +441,74 @@ _TPE_DTYPES = {"float32"}
 
 def _validate_model(model):
     """校验对象: cfg.model —— 网络结构参数。"""
+    _validate_dinov3_backbone(model.dinov3_backbone)
+    _validate_temporal_trunk(model.temporal_trunk)
+    _validate_heads(model.heads)
+    _validate_physics(model.physics)
     _validate_target_point_embedding(model.target_point_embedding)
+
+
+def _validate_dinov3_backbone(bb):
+    """校验对象: cfg.model.dinov3_backbone —— 骨干结构参数。"""
+    assert bb.patch_size > 0, "model.dinov3_backbone.patch_size 必须 > 0"
+    assert bb.hidden_dim > 0, "model.dinov3_backbone.hidden_dim 必须 > 0"
+    assert bb.num_register_tokens >= 0, "model.dinov3_backbone.num_register_tokens 必须 >= 0"
+
+
+def _validate_temporal_trunk(tt):
+    """校验对象: cfg.model.temporal_trunk —— 3D ConvNeXt 主干参数。"""
+    for name in ("channels", "num_blocks", "temporal_kernel", "spatial_kernel", "expansion"):
+        assert getattr(tt, name) > 0, "model.temporal_trunk.{} 必须 > 0".format(name)
+    # 深度可分离卷积须能对称 padding 保持时序/空间尺寸，故核为奇数
+    assert tt.temporal_kernel % 2 == 1, "model.temporal_trunk.temporal_kernel 必须为奇数"
+    assert tt.spatial_kernel % 2 == 1, "model.temporal_trunk.spatial_kernel 必须为奇数"
+    # 逐点膨胀后须能整除回原通道（1×1×1 升维 channels·expansion 再降回 channels，天然成立），
+    # 且膨胀通道须为正
+    assert tt.channels * tt.expansion > 0, "model.temporal_trunk 膨胀通道必须 > 0"
+
+
+def _validate_heads(hd):
+    """校验对象: cfg.model.heads —— 三头解码结构参数。"""
+    assert hd.reduce_channels > 0, "model.heads.reduce_channels 必须 > 0"
+    assert len(hd.up_channels) > 0, "model.heads.up_channels 至少一级"
+    # 每级像素洗牌前 Conv2d 升到 C_out·4，PixelShuffle(2) 折回 C_out：C_out 须为正整数即可
+    assert all(isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in hd.up_channels), \
+        "model.heads.up_channels 每级必须为正整数"
+    for name in ("num_classes", "semantic_out", "flow_out", "depth_out"):
+        assert getattr(hd, name) > 0, "model.heads.{} 必须 > 0".format(name)
+    # 语义头输出通道即类别数，须一致（下游 CE 依赖）
+    assert hd.semantic_out == hd.num_classes, \
+        "model.heads.semantic_out 必须等于 num_classes"
+
+
+def _validate_physics(ph):
+    """校验对象: cfg.model.physics —— 物理量监督口径参数。"""
+    assert ph.symlog_scale > 0, "model.physics.symlog_scale 必须 > 0"
+    assert ph.depth_max_m > 0, "model.physics.depth_max_m 必须 > 0"
+    assert ph.flow_dt_s > 0, "model.physics.flow_dt_s 必须 > 0"
+    assert len(ph.flow_ndc_pixel_scale) == 2, \
+        "model.physics.flow_ndc_pixel_scale 必须为 2 元 [sx, sy]"
+    # semantic_ignore_index 允许为负（如 -100 表示不忽略任何类），故不校验符号
+
+
+def _validate_data(data):
+    """校验对象: cfg.data —— 数据加载参数。"""
+    ds = data.dataset
+    assert ds.window_size > 0, "data.dataset.window_size 必须 > 0"
+    assert ds.window_stride > 0, "data.dataset.window_stride 必须 > 0"
+    assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
+        "data.dataset.dino_mean/std 必须为 3 通道"
+    assert all(s > 0 for s in ds.dino_std), "data.dataset.dino_std 每通道必须 > 0"
+
+
+def _validate_train(train):
+    """校验对象: cfg.train —— 训练超参数。"""
+    for name in ("epochs", "batch_size", "num_workers", "log_every"):
+        assert getattr(train, name) >= (1 if name != "num_workers" else 0), \
+            "train.{} 取值非法".format(name)
+    assert train.lr > 0, "train.lr 必须 > 0"
+    assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
+    assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
 
 
 def _validate_target_point_embedding(tpe):
