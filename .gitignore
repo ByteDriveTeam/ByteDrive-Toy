@@ -1,0 +1,122 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+py37_venv/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Distribution / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Type checker / linter / formatter caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+visualization/outputs/
+vis/feature_pca/outputs/
+
+# SQLite / database files
+*.sqlite3
+*.sqlite
+*.db
+
+# Local config
+config.local.*
+settings.local.*
+local_settings.py
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Celery / Django / Flask common files
+celerybeat-schedule
+celerybeat.pid
+instance/
+.webassets-cache/
+
+# Django
+*.pot
+*.mo
+db.sqlite3
+media/
+
+# Flask
+instance/
+
+# FastAPI / general uploads
+uploads/
+tmp/
+temp/
+
+# Model / data files, optional
+datasets/
+data/preprocessed/
+models/
+checkpoints/
+dinov3-vitb16-pretrain-lvd1689m/
+dataset/
+*.h5
+*.pt
+*.pth
+*.onnx
+*.ckpt

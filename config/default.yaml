@@ -1,0 +1,182 @@
+# ByteDrive 全部参数默认值（唯一数据来源）。
+# 实现文件只读本文件，不得二次声明默认值。换实验/环境只改这里或用 <env>.yaml 覆盖。
+
+# ============================================================
+# carla_collector —— Carla 合成数据采集模块
+# ============================================================
+carla_collector:
+
+  # Py37 worker 子进程与 Carla 服务端连接
+  worker:
+    python_exe: data/carla_data_collector/py37_venv/Scripts/python.exe  # 派生 Py37 子进程的解释器
+    carla_host: 127.0.0.1
+    carla_port: 2000
+    startup_timeout_s: 60.0    # 等待 worker 就绪 / 连上 Carla 的上限
+    command_timeout_s: 120.0   # 单条控制命令的响应上限（加载地图较慢，故放宽）
+
+  # 跨进程数据面：匿名共享内存 arena（既是传输通道也是场景内存缓冲）
+  ipc:
+    arena_name: bytedrive_carla_arena  # Windows mmap tagname 前缀
+    arena_size_mb: 1024                # 单段（一次 flush）的内存批大小；写满即落一段并清空续采，不再是场景帧上限
+    slot_count: 1000                   # 预留字段，当前 BumpAllocator 不使用（vestigial）
+
+  # 仿真世界
+  simulation:
+    map: Town01_Opt          # 仅支持 Opt 地图
+    fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
+    warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
+
+  # 路线队列：可达点两两组合，按直线距离过滤后去重
+  route:
+    min_distance_m: 80.0
+    max_distance_m: 300.0
+    max_scenes: 0              # 限制路线（行驶）条数上限，0 表示遍历全部合法组合；注意每条行驶可能切成多个场景段
+    queue_seed: 20260617       # 组合随机排序的种子（保证队列可复现）
+
+  # 交通流（TrafficManager 控制）
+  traffic:
+    num_vehicles: 30
+    num_walkers: 20
+    vehicle_filter: vehicle.*
+    walker_filter: walker.pedestrian.*
+    walker_running_pct: 0.1          # 行人奔跑比例
+    walker_arrival_radius_m: 2.0     # 行人到目标点的判定半径，进入即重派新目标（持续漫游）
+    tm_port: 8000
+
+  # 天气
+  weather:
+    randomize: false
+
+  # 主车（BehaviorAgent 控制）
+  ego:
+    behavior: normal           # cautious / normal / aggressive
+    vehicle_filter: vehicle.lincoln.mkz_2020
+
+  # 相机阵列：分辨率全局共享；rig 决定相机数量，并分别配置各视角的 FOV 与外参
+  cameras:
+    width: 768
+    height: 384
+    # 各相机模态开关：关闭即不创建对应相机、不落盘。同视角各模态共享 FOV/位姿、像素逐点对齐。
+    modalities:
+      rgb: true            # RGB 相机 → mp4；关闭则该场景无视频文件
+      depth: true          # 深度相机（BGR 编码）→ 解码为米存 LMDB
+      semantic: true       # 语义分割相机 → 单通道标签存 LMDB
+      optical_flow: true   # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
+    rig:                       # 默认 6 视；fov/yaw 为度，x 前向、y 右向、z 上向（米）
+      - {name: front,       fov: 90.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
+      # - {name: front_far,   fov: 60.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
+      # - {name: front_left,  fov: 90.0, x: 1.2,  y: -0.5, z: 1.6, roll: 0.0, pitch: 0.0, yaw: -45.0}
+      # - {name: front_right, fov: 90.0, x: 1.2,  y: 0.5,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 45.0}
+      # - {name: left,        fov: 90.0, x: 0.0, y: -1.0, z: 1.6, roll: 0.0, pitch: 0.0, yaw: -120.0}
+      # - {name: right,       fov: 90.0, x: 0.0, y: 1.0, z: 1.6, roll: 0.0, pitch: 0.0, yaw: 120.0}
+      # - {name: back,        fov: 120.0, x: -1.8, y: 0.0, z: 1.6, roll: 0.0, pitch: 0.0, yaw: 180.0}
+
+  # 语义分割 Lidar（sensor.lidar.ray_cast_semantic）
+  lidar:
+    enabled: false              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
+    channels: 64
+    range_m: 100.0
+    points_per_second: 1300000
+    rotation_frequency: 10.0   # 与 1/fixed_delta_seconds 对齐，保证每帧一整圈
+    upper_fov: 10.0
+    lower_fov: -30.0
+    x: 0.0
+    y: 0.0
+    z: 1.8
+
+  # 单次行驶采集控制
+  collection:
+    max_frames_per_scene: 2048   # 整次行驶的总帧上限（跨多段累计）；达到即结束行驶。单段大小由 ipc.arena_size_mb 决定
+    capture_every_n_ticks: 5     # 每多少个仿真步采一帧
+
+  # 碰撞重试
+  collision:
+    max_retries_per_route: 0   # 同一路线换种子重试上限；超限则跳过该路线
+
+  # 落盘输出（每个场景一个自包含目录 scenes/scene_XXXXXX/：7 个 mp4 + 独立 lmdb/）
+  output:
+    root: data/carla_data_collector/dataset
+    lmdb_map_size_gb: 64       # 单场景 LMDB 的增长上限（按需增长，初始仅 64MB；非全量上限）
+    video_codec: libx265       # H.265
+    video_crf: 23
+    video_fps: 2               # mp4 帧率（通常 = 1/fixed_delta_seconds）
+
+# ============================================================
+# data_vis —— 采集数据集可视化（vis 模块下的数据可视化子模块）
+# 只读消费 carla_collector 的输出。注意：vis 模块下其余渲染/日志部分尚未开发，
+# 故本节配置仅针对 data_vis 子模块，不代表整个 vis 模块。
+# ============================================================
+data_vis:
+  scene_root: data/carla_data_collector/dataset/scenes  # 场景目录的默认搜索根（含 scene_XXXXXX/）
+
+  display:
+    scale: 0.6                 # 合成画布整体缩放（多相机横排很宽，缩小便于单屏查看）
+    play_fps: 2                # 自动播放帧率（默认对齐采集 fps，可调快慢）
+    window_name: ByteDrive 数据可视化
+
+  traffic_lights:
+    nearest_count: 3           # HUD 除全场状态统计外，显示距主车最近的 N 盏灯；0 表示只显示统计
+
+  # 3D 包围框投影到 RGB 的样式
+  bbox:
+    thickness: 2
+    max_distance_m: 100.0      # 距相机超过此值的框不画，抑制远处线框堆叠
+    draw_static: false         # 静态环境框数量极大（近千），默认关；按 's' 临时开
+    colors:                    # 语义 -> BGR（仅这几类需手调，故进 config）
+      ego:        [0, 255, 255]
+      vehicle:    [0, 200, 0]
+      pedestrian: [0, 128, 255]
+      env:        [160, 160, 160]
+
+  # 深度图着色
+  depth:
+    max_display_m: 80.0        # 着色量程上限（米），超过即截断到最远色
+    colormap: turbo            # 取值见 vis/draw.py 的 colormap 表（turbo/jet/magma/viridis）
+
+  # 光流着色（色相编码方向、亮度编码幅值）
+  optical_flow:
+    max_flow: 0.0              # 满亮度对应的光流幅值（CARLA 光流单位）；0=按帧自适应（取幅值 99 分位）
+
+  # 鸟瞰图（以主车为中心的俯视）
+  bev:
+    range_m: 50.0              # 可视半边长（米）：画面覆盖主车四周 ±range_m
+    size_px: 600               # BEV 方形边长（像素）
+    point_radius: 1            # lidar 点绘制半径
+    color_by: tag              # tag(按语义) / height(按高度)
+    bg: [20, 20, 20]           # 背景 BGR
+
+  lidar:
+    max_points_draw: 200000    # BEV 单帧最多绘制点数（超出则等距下采样，保护渲染帧率）
+
+# ============================================================
+# model —— 网络结构参数（model/ 实现文件只读本节，不得二次声明默认值）
+# ============================================================
+model:
+
+  # 目标点嵌入层：ego 目标点 → 栅格向量场 → 三层卷积下采样 → 目标导航点 Token
+  target_point_embedding:
+    coordinate_dim: 2          # 目标点坐标维度，固定为 ego 平面 [x, y]
+    grid_height: 64            # 栅格高度，对应 x 前后方向格数
+    grid_width: 64             # 栅格宽度，对应 y 左右方向格数
+    x_min_m: -32.0             # 栅格后向边界（米）
+    x_max_m: 32.0              # 栅格前向边界（米）
+    y_min_m: -32.0             # 栅格右向边界（米）
+    y_max_m: 32.0              # 栅格左向边界（米）
+    vector_order: grid_minus_target   # 向量场方向：栅格中心 - 目标点
+    vector_transform: symlog          # 送入卷积前对米制向量的变换（当前仅 symlog）
+    feature_channels: 64       # 卷积中间通道数
+    conv1_kernel_size: [3, 3]  # 第一层卷积核 [H, W]
+    conv1_stride: [2, 2]
+    conv1_padding: [1, 1]
+    conv2_kernel_size: [3, 3]  # 第二层卷积核 [H, W]
+    conv2_stride: [2, 2]
+    conv2_padding: [1, 1]
+    downsample_kernel_size: [3, 3]   # 下采样卷积核 [H, W]
+    downsample_stride: [2, 2]
+    downsample_padding: [1, 1]
+    output_height: 8           # 三层卷积后栅格高度（由上面卷积参数推导，schema 加载期校验一致）
+    output_width: 8            # 三层卷积后栅格宽度
+    goal_token_count: 2        # 输出目标导航点 Token 数
+    hidden_dim: 768            # 每个目标导航点 Token 维度（对齐视觉编码器 768）
+    flatten_order: channel_height_width   # 卷积输出展平顺序（当前仅 channel_height_width）
+    dtype: float32             # 目标点嵌入层强制运行精度（当前仅 float32）
