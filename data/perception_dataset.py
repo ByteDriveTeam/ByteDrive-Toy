@@ -9,6 +9,7 @@
 对外接口:
     - PerceptionDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]   # rgb / semantic / depth_target / depth_inrange / flow_target
+        .window_index -> list[(Path, int)]    # (场景目录, 窗口起始帧)，供可视化按场景筛选
 说明: 复用 vis.data_vis.reader.SceneReader（DRY，共用 unpack_array 与 LMDB 键逻辑）读取逐帧数据；
       索引期仅用 LMDB 轻量读 num_frames，避免为每个场景预建 VideoCapture。窗口在场景内连续取 window_size
       帧、步长 window_stride（=size 即不重叠）。RGB 由 BGR→RGB、/255、DINO ImageNet 归一化，保持原生分辨率
@@ -68,6 +69,11 @@ class PerceptionDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._index)
+
+    @property
+    def window_index(self) -> List[Tuple[Path, int]]:
+        """只读暴露 (场景目录, 窗口起始帧) 列表，供可视化按场景筛选窗口。"""
+        return self._index
 
     def _reader(self, scene_dir: Path) -> SceneReader:
         """惰性构造并缓存该场景的 SceneReader（每 worker 一份，避免跨进程共享解码器）。"""

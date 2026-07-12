@@ -78,7 +78,7 @@ class _LossMeter:
 
     def update(self, components: Dict[str, torch.Tensor], n: int) -> None:
         for name, value in components.items():
-            self._sums[name] = self._sums.get(name, 0.0) + float(value) * n
+            self._sums[name] = self._sums.get(name, 0.0) + value.detach().item() * n
         self._count += n
 
     def averages(self) -> Dict[str, float]:
@@ -87,4 +87,4 @@ class _LossMeter:
 
 
 def _format(components: Dict[str, torch.Tensor]) -> str:
-    return "  ".join("{}={:.4f}".format(k, float(v)) for k, v in components.items())
+    return "  ".join("{}={:.4f}".format(k, v.detach().item()) for k, v in components.items())

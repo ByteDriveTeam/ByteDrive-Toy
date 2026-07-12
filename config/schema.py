@@ -315,7 +315,21 @@ class TrainCfg:
     grad_clip_norm: float
     log_every: int
     ckpt_dir: str
+    resume: bool
     loss_weights: LossWeightsCfg
+
+
+@dataclass
+class PredVisCfg:
+    checkpoint: str
+    scene: str
+    max_windows: int
+    save_dir: str
+    show_ground_truth: bool
+    display_scale: float
+    depth_colormap: str
+    depth_max_display_m: float
+    flow_max_display: float
 
 
 @dataclass
@@ -325,6 +339,7 @@ class Config:
     model: ModelCfg
     data: DataCfg
     train: TrainCfg
+    pred_vis: PredVisCfg
 
 
 # ---------- 由 dict 构造 ----------
@@ -428,6 +443,7 @@ def validate_config(cfg):
     _validate_model(cfg.model)
     _validate_data(cfg.data)
     _validate_train(cfg.train)
+    _validate_pred_vis(cfg.pred_vis)
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
@@ -604,3 +620,13 @@ def _validate_data_vis(dv):
 def _is_bgr(c):
     """是否为合法 BGR 颜色：长度 3、各分量 0..255。"""
     return len(c) == 3 and all(0 <= v <= 255 for v in c)
+
+
+def _validate_pred_vis(pv):
+    """校验对象: cfg.pred_vis —— 感知模型预测可视化参数。"""
+    assert pv.max_windows >= 0, "pred_vis.max_windows 必须 >= 0（0=全部）"
+    assert pv.display_scale > 0, "pred_vis.display_scale 必须 > 0"
+    assert pv.depth_colormap in _DATA_VIS_COLORMAPS, \
+        "pred_vis.depth_colormap 须取值 {}".format(sorted(_DATA_VIS_COLORMAPS))
+    assert pv.depth_max_display_m > 0, "pred_vis.depth_max_display_m 必须 > 0"
+    assert pv.flow_max_display >= 0, "pred_vis.flow_max_display 必须 >= 0（0=自适应）"

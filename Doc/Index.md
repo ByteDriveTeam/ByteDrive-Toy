@@ -85,3 +85,9 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [vis/data_vis/palette.py](../vis/data_vis/palette.py) — CARLA 语义标签到颜色的调色板与向量化映射
 - [vis/data_vis/draw.py](../vis/data_vis/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、lidar+框 鸟瞰图、多面板合成与 HUD
 - [vis/data_vis/viewer.py](../vis/data_vis/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
+
+### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）
+
+- [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染三头预测与 GT 对照
+- [vis/pred_vis/render.py](../vis/pred_vis/render.py) — 渲染：把感知模型三头预测（及可选 GT）着色并合成多帧多模态对照画布
+- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐窗推理 → 渲染预测与 GT 对照并保存
