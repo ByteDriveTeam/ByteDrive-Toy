@@ -246,6 +246,7 @@ class DinoV3BackboneCfg:
 
 @dataclass
 class TemporalTrunkCfg:
+    in_channels: int
     channels: int
     num_blocks: int
     temporal_kernel: int
@@ -472,8 +473,8 @@ def _validate_dinov3_backbone(bb):
 
 
 def _validate_temporal_trunk(tt):
-    """校验对象: cfg.model.temporal_trunk —— 3D ConvNeXt 主干参数。"""
-    for name in ("channels", "num_blocks", "temporal_kernel", "spatial_kernel", "expansion"):
+    """校验对象: cfg.model.temporal_trunk —— 输入投影 + 3D ConvNeXt 主干参数。"""
+    for name in ("in_channels", "channels", "num_blocks", "temporal_kernel", "spatial_kernel", "expansion"):
         assert getattr(tt, name) > 0, "model.temporal_trunk.{} 必须 > 0".format(name)
     # 深度可分离卷积须能对称 padding 保持时序/空间尺寸，故核为奇数
     assert tt.temporal_kernel % 2 == 1, "model.temporal_trunk.temporal_kernel 必须为奇数"

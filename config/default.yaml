@@ -160,9 +160,10 @@ model:
     hidden_dim: 768           # 骨干输出通道（师生头共享的特征维度）
     num_register_tokens: 4    # DINOv3 ViT-B 的 register token 数（序列切片下界校验用）
 
-  # 时序主干：DINO 逐帧特征堆成 5 帧时序后，6 层 ConvNeXt 风格 3D 卷积块
+  # 时序主干：DINO 逐帧特征先 1×1×1 投影降维，再堆成 5 帧时序过 6 层 ConvNeXt 风格 3D 卷积块
   temporal_trunk:
-    channels: 768             # 与骨干 hidden_dim 对齐，主干内不改变通道
+    in_channels: 768          # 主干输入通道（= 骨干 hidden_dim），投影前的维度
+    channels: 384             # 投影后 ConvNeXt 工作通道；主干内此维恒定，也是喂给三头的输出维
     num_blocks: 6             # ConvNeXt 3D 块层数
     temporal_kernel: 3        # 深度可分离卷积时间核（T 方向），pad=(k-1)/2 保持 5 帧
     spatial_kernel: 5         # 深度可分离卷积空间核（H/W 方向，5×5）
@@ -170,7 +171,7 @@ model:
 
   # 三头解码：各含 1 层 3D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
   heads:
-    reduce_channels: 128      # 残差块后 1×1×1 把 768 压到的头内起始通道 C0
+    reduce_channels: 128      # 残差块后 1×1×1 把主干输出 384 压到的头内起始通道 C0
     up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（12×24 → 192×384）
     num_classes: 29           # 语义分割类别数（CARLA CityScapes tag 0..28）
     semantic_out: 29          # 语义头输出通道（= num_classes logits）

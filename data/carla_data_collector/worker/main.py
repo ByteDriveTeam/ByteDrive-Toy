@@ -27,11 +27,11 @@ import numpy as np
 from config.schema import build_config
 from common import protocol as P
 from common.protocol import read_message, write_message, make_response
-from common.protocol_checks import check_command
+from common.protocol.checks.protocol_checks import check_command
 from common.shm import Arena, BumpAllocator
 from worker import actors, collect, session
 from worker.geometry import compute_intrinsics
-from worker.main_checks import check_init_args
+from worker.checks.main_checks import check_init_args
 from worker.sensors import SensorRig
 
 

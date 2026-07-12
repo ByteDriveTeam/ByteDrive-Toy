@@ -3,7 +3,7 @@
 模块: vis/pred_vis/run.py
 依赖: argparse, pathlib, cv2, numpy, torch, config.load_config,
       model.perception_model.PerceptionModel, data.perception_dataset.PerceptionDataset,
-      data.target_encoding.physics_decode, vis.pred_vis.render, vis.pred_vis.run_checks
+      data.target_encoding.physics_decode, vis.pred_vis.render, vis.pred_vis.checks.run_checks
 读取配置:
     pred_vis.checkpoint / scene / max_windows / save_dir / show_ground_truth
     pred_vis.display_scale / depth_colormap / depth_max_display_m / flow_max_display
@@ -30,7 +30,7 @@ from data.perception_dataset import PerceptionDataset
 from data.target_encoding import physics_decode
 from model.perception_model import PerceptionModel
 from vis.pred_vis import render
-from vis.pred_vis.run_checks import check_scene_windows
+from vis.pred_vis.checks.run_checks import check_scene_windows
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

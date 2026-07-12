@@ -2,7 +2,7 @@
 
 模块: train/run.py
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
-      data.perception_dataset.PerceptionDataset, train.optimizer, train.loop, train.run_checks
+      data.perception_dataset.PerceptionDataset, train.optimizer, train.loop, train.checks.run_checks
 读取配置:
     train.device / epochs / batch_size / num_workers / ckpt_dir / resume
     （其余训练/模型/数据参数由各构造件各自读取）
@@ -28,7 +28,7 @@ from data.perception_dataset import PerceptionDataset
 from model.perception_model import PerceptionModel
 from train.loop import train_one_epoch
 from train.optimizer import build_optimizer
-from train.run_checks import check_runtime
+from train.checks.run_checks import check_runtime
 
 _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
 
