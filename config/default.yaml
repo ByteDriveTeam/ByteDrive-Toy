@@ -153,37 +153,31 @@ data_vis:
 # ============================================================
 model:
 
-  # DINOv3 ViT-B/16 视觉骨干（全程冻结 + eval），逐帧输出 patch 网格特征
+  # DINOv3 ViT-B/16 视觉骨干（全程冻结 + eval），逐帧输出多层 patch 网格特征
   dinov3_backbone:
     model_dir: model/dinov3-vitb16-pretrain-lvd1689m  # 本地权重目录（相对仓库根）
     patch_size: 16            # ViT patch 边长；384×192 输入 → 24×12 patch 网格
-    hidden_dim: 768           # 骨干输出通道（师生头共享的特征维度）
+    hidden_dim: 768           # 骨干单层输出通道（师生头共享的特征维度）
     num_register_tokens: 4    # DINOv3 ViT-B 的 register token 数（序列切片下界校验用）
+    feature_layers: [3, 6, 12]  # 取 output_hidden_states 的第 3/6/12 层（12=ViT-B/16 末层），供多层融合
 
-  # 时序主干：DINO 逐帧特征先 1×1×1 投影降维，再堆成 5 帧时序过 6 层 ConvNeXt 风格 3D 卷积块
-  temporal_trunk:
-    in_channels: 768          # 主干输入通道（= 骨干 hidden_dim），投影前的维度
-    channels: 384             # 投影后 ConvNeXt 工作通道；主干内此维恒定，也是喂给三头的输出维
-    num_blocks: 6             # ConvNeXt 3D 块层数
-    temporal_kernel: 3        # 深度可分离卷积时间核（T 方向），pad=(k-1)/2 保持 5 帧
-    spatial_kernel: 5         # 深度可分离卷积空间核（H/W 方向，5×5）
-    expansion: 2              # 1×1×1 逐点卷积的通道膨胀率
+  # 单帧特征主干：多层 DINO 特征经 feature_fusion 融合到 channels 后，过 6 层 2D 瓶颈残差块提炼空间表征
+  feature_trunk:
+    channels: 384             # 残差块工作通道（= feature_fusion 输出维）；主干内此维恒定，也是喂给双头的输出维
+    num_blocks: 6             # 2D 瓶颈残差块层数
 
-  # 三头解码：各含 1 层 3D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
+  # 双头解码：各含 1 层 2D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
   heads:
-    reduce_channels: 128      # 残差块后 1×1×1 把主干输出 384 压到的头内起始通道 C0
+    reduce_channels: 128      # 残差块后 1×1 把主干输出 384 压到的头内起始通道 C0
     up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（12×24 → 192×384）
     num_classes: 29           # 语义分割类别数（CARLA CityScapes tag 0..28）
     semantic_out: 29          # 语义头输出通道（= num_classes logits）
-    flow_out: 2               # 光流头输出通道（图像平面速度 vx,vy 的 scale·symlog）
     depth_out: 2              # 深度头输出通道（ch0=深度 scale·symlog，ch1=范围内 BCE logit）
 
-  # 物理量监督口径：Symlog 空间 + 缩放，深度范围裁剪，光流→速度换算
+  # 物理量监督口径：Symlog 空间 + 缩放，深度范围裁剪
   physics:
     symlog_scale: 0.14285714  # 目标 = symlog_scale · symlog(x)，symlog(x)=sign(x)·ln(1+|x|)
     depth_max_m: 128.0        # 深度检测上限（米）；超出记为超范围，仅监督二分类
-    flow_dt_s: 0.1            # 光流换算速度用的时间步 = 仿真 fixed_delta_seconds（每 tick 渲染）
-    flow_ndc_pixel_scale: [192.0, 96.0]  # 归一化光流→像素位移的有符号缩放 [W/2, H/2]
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
   # 目标点嵌入层：ego 目标点 → 栅格向量场⊕栅格中心坐标（各 Symlog 拼接）→ 16×16 卷积降采样 → 2×残差块 → 1×1 升维
@@ -211,12 +205,10 @@ model:
 # ============================================================
 data:
 
-  # 感知模型的时序开窗数据集：只读消费 carla_collector 落盘的场景
+  # 感知模型的单帧数据集：只读消费 carla_collector 落盘的场景，逐帧独立成样本（采用所有帧）
   dataset:
     scene_root: data/carla_data_collector/dataset/scenes  # 场景目录搜索根（含 scene_XXXXXX/）
     camera: front             # 使用的相机名（当前数据集单相机）
-    window_size: 5            # 每个样本的历史帧数（时序长度 T）
-    window_stride: 5          # 相邻窗口起点间隔（=window_size 即不重叠）
     # DINOv3 ImageNet 归一化（RGB 先除 255 到 [0,1] 再标准化）；本地无 preprocessor_config，故写此处
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
@@ -235,12 +227,12 @@ train:
   log_every: 20              # 每多少步打印一次损失
   ckpt_dir: train/checkpoints   # 权重保存目录（相对仓库根）
   resume: true               # 断点续训：为真则自动从 ckpt_dir 下最新检查点恢复（模型+优化器+epoch）
-  # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度范围 BCE / 光流 SmoothL1
+  # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度梯度 SmoothL1 / 深度范围 BCE
   loss_weights:
-    semantic: 1.0
+    semantic: 0.3
     depth: 1.0
-    depth_range: 1.0
-    flow: 1.0
+    depth_grad: 1.0          # 深度空间梯度（相邻像素差）SmoothL1，监督边界/结构，不加距离权
+    depth_range: 0.5
 
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
@@ -248,7 +240,7 @@ train:
 pred_vis:
   checkpoint: train/checkpoints/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）
   scene: ''                  # 指定场景目录名（如 scene_000000）；空=取 scene_root 下第一个
-  max_windows: 4             # 最多渲染多少个窗口（0=全部）
+  max_frames: 4              # 单张对照画布最多并排多少帧（0=全部）
   save_dir: vis/pred_vis/out # 渲染结果保存目录（相对仓库根）
   show_ground_truth: true    # 是否并列渲染 GT 行，便于与预测对照
   display_scale: 0.5         # 合成画布整体缩放（多帧多模态很大，缩小便于查看）
@@ -256,4 +248,3 @@ pred_vis:
   depth_max_display_m: 128.0 # 深度着色量程上限（米），对齐检测范围
   depth_min_display_m: 1.0   # 对数深度着色近端下限（米），量程 [min,max] 映射到整个色带
   depth_log: true            # 深度按对数量程着色（放大近处细节）；false=线性归一
-  flow_max_display: 0.0      # 光流(速度)满亮度幅值（m/s）；0=按帧幅值 99 分位自适应

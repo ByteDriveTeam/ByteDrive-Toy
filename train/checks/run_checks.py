@@ -6,4 +6,4 @@ def check_runtime(model, dataset):
     if sum(1 for _ in model.trainable_parameters()) == 0:
         raise ValueError("模型无可训练参数，训练无意义。")
     if len(dataset) == 0:
-        raise ValueError("数据集为空，检查 data.dataset.scene_root 与窗口配置。")
+        raise ValueError("数据集为空，检查 data.dataset.scene_root（场景是否存在、LMDB 是否可读）。")

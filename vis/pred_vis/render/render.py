@@ -1,4 +1,4 @@
-"""渲染：把感知模型三头预测（及可选 GT）着色并合成多帧多模态对照画布。
+"""渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布。
 
 模块: vis/pred_vis/render/render.py
 依赖: cv2, numpy, vis.data_vis.palette.tag_to_bgr, vis.pred_vis.render.checks.render_checks
@@ -7,17 +7,16 @@
     - to_display_bgr(rgb01) -> np.ndarray                    # [3,H,W] 归一化前 RGB(0..1) -> BGR uint8
     - colorize_semantic(tag_map) -> np.ndarray               # [H,W] 语义标签 -> BGR（复用 CityScapes 调色板）
     - colorize_depth(depth_m, colormap, max_m, min_m, log_scale) -> np.ndarray # [H,W] 深度(米) -> 伪彩 BGR
-    - colorize_flow(velocity, max_disp) -> np.ndarray        # [2,H,W] 速度 -> 光流经典配色 BGR
     - render_grid(rows) -> np.ndarray                        # rows=[(label,[panels])] 合成对照画布
-说明: 语义复用 vis.data_vis.palette 的官方调色板（DRY）；深度/光流着色与 data_vis 同法但作用于「解码回
-      物理量」的预测/GT（深度=米、光流=速度 m/s），故物理口径一致、预测与 GT 可直接对照。每行一种模态、
+说明: 语义复用 vis.data_vis.palette 的官方调色板（DRY）；深度着色与 data_vis 同法但作用于「解码回
+      物理量」的预测/GT（深度=米），故物理口径一致、预测与 GT 可直接对照。每行一种模态、
       每列一帧，行首标注来源（pred/gt + 模态）。合成为纯 numpy/cv2，无 torch 依赖。
 """
 
 import cv2
 import numpy as np
 
-from vis.data_vis.palette import flow_to_bgr, tag_to_bgr
+from vis.data_vis.palette import tag_to_bgr
 from vis.pred_vis.render.checks.render_checks import check_grid_rows
 
 # colormap 名 -> OpenCV 常量（须与 config/schema._DATA_VIS_COLORMAPS 一致）
@@ -55,14 +54,6 @@ def colorize_depth(depth_m: np.ndarray, colormap: str, max_m: float,
         norm = np.clip(depth_m / max_m, 0.0, 1.0)
     gray = (norm * 255.0).astype(np.uint8)
     return cv2.applyColorMap(gray, _COLORMAPS[colormap])
-
-
-def colorize_flow(velocity: np.ndarray, max_disp: float) -> np.ndarray:
-    """[2,H,W] 速度矢量 -> BGR：委托 palette.flow_to_bgr（与 data_vis 共用唯一配色实现）。
-
-    max_disp>0 时以该幅值(m/s)为满亮度基准；=0 则按本帧幅值 99 分位自适应。
-    """
-    return flow_to_bgr(velocity[0], velocity[1], max_disp)
 
 
 def render_grid(rows) -> np.ndarray:

@@ -10,6 +10,8 @@
         forward(x) -> Tensor   # encode 后接 decode 的完整通路
 说明: 每级为 Conv2d(C->C_out·4, 3×3) + PixelShuffle(2) + GELU：卷积升到 4 倍通道，洗牌把通道折进
       空间得 2× 分辨率、通道折回 C_out。通道随分辨率翻四倍而逐级减半，抑制高分辨率显存。
+      相邻上采样级之间插入一个 2D 瓶颈残差块（ResidualBlock），在该级分辨率下细化特征后再进入下一级；
+      共 len(up_channels)-1 个（每两个分辨率层级间一个），全部位于 encode 段（末级上采样前）。
       encode/decode 的切分让调用方把「最后一次上采样 + 最终解码」单独置于 FP32：末级上采样与
       decode 卷积在 decode() 内，故外层只需对 encode 结果 .float() 再调 decode（规范：混精边界外置）。
       GELU 使级联非线性（否则纯线性洗牌可折叠）；最终解码卷积后不加激活，直接产出 logits/回归值。
@@ -23,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from model.pixel_shuffle_upsampler.checks.pixel_shuffle_upsampler_checks import check_upsampler_args, check_upsampler_input
+from model.residual_block.residual_block import ResidualBlock
 
 
 __all__ = ["PixelShuffleUpsampler"]
@@ -57,13 +60,23 @@ class PixelShuffleUpsampler(nn.Module):
             ))
             current = out_c
         self.stages = nn.ModuleList(stages)
+
+        # 相邻上采样级之间的 2D 残差块：第 i 级输出 up_channels[i] 通道，在该分辨率下
+        # 细化后再进入第 i+1 级。共 len(up_channels)-1 个（每两个分辨率层级间一个）。
+        self.res_blocks = nn.ModuleList(ResidualBlock(c) for c in up_channels[:-1])
+
         self.decode_conv = nn.Conv2d(up_channels[-1], out_channels, kernel_size=3, padding=1)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """前 N-1 级上采样（末级与解码留给 decode，便于外层单独置 FP32）。"""
+        """前 N-1 级上采样（末级与解码留给 decode，便于外层单独置 FP32）。
+
+        每级上采样后接一个 2D 残差块，在该分辨率下细化特征再进入下一级。
+        stages[:-1] 与 res_blocks 长度均为 len(up_channels)-1，zip 一一对应。
+        """
         check_upsampler_input(x, self.in_channels)
-        for stage in self.stages[:-1]:
+        for stage, res in zip(self.stages[:-1], self.res_blocks):
             x = stage(x)
+            x = res(x)
         return x
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:

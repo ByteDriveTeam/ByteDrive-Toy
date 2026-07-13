@@ -14,6 +14,18 @@ def check_backbone_cfg(cfg):
         raise ValueError(
             "dinov3_backbone.num_register_tokens 必须非负，实际为 {}。".format(cfg.num_register_tokens)
         )
+    if len(cfg.feature_layers) == 0:
+        raise ValueError("dinov3_backbone.feature_layers 至少需选一层。")
+
+
+def check_feature_layers(num_hidden_states, feature_layers):
+    """校验对象: cfg.feature_layers vs 骨干 hidden_states —— 每个层索引须落在可取范围内。"""
+    if max(feature_layers) >= num_hidden_states:
+        raise ValueError(
+            "feature_layers 含索引 {} 超出 hidden_states 数量 {}（索引范围 0..{}）。".format(
+                max(feature_layers), num_hidden_states, num_hidden_states - 1
+            )
+        )
 
 
 def check_backbone_frames(frames, patch_size):

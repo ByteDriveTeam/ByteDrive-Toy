@@ -18,8 +18,8 @@
 ## data/ — 数据读取与预处理
 
 - [data/__init__.py](../data/__init__.py) — 数据读取与预处理包标识：只读消费 config 与已落盘数据集
-- [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码、光流→图像平面速度的纯函数
-- [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型时序开窗数据集：把落盘场景切成 5 帧窗口，产出归一化 RGB 与四任务监督目标
+- [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
+- [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -57,17 +57,18 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — 通用 SwiGLU 激活模块（沿维度二等分为 value/gate）
 - [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — 通用 3D RoPE 旋转位置编码（只消费调用方传入的三维坐标，全程 FP32）
 - [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 3D ConvNeXt 块）
-- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-B 视觉骨干：全程冻结 + eval，逐帧输出 patch 网格特征
-- [model/temporal_trunk/temporal_trunk.py](../model/temporal_trunk/temporal_trunk.py) — 时序主干：DINO 逐帧特征先 1×1×1 投影降维，堆成时序后经多层 3D ConvNeXt 块提炼时空表征
+- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-B 视觉骨干：全程冻结 + eval，逐帧输出多层 patch 网格特征
+- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层特征融合：对选定层逐层 RMSNorm 后沿通道拼接，再 1×1 卷积降到特征主干工作维
+- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 特征主干：已融合到工作维的单帧特征，经多层 2D 瓶颈残差块提炼空间表征
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
-- [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：3D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务时序感知模型：冻结 DINOv3 骨干 + 3D 时序主干 + 语义/光流/深度三头
+- [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 2D 特征主干 + 语义/深度双头
 - [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：把 ego 坐标系目标点编码为目标导航特征图
 
 ## train/ — 训练 / 评估循环
 
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：语义 CE + 深度 SmoothL1(掩码) + 深度范围 BCE + 光流 SmoothL1(掩码)
+- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：语义 CE + 深度 SmoothL1(掩码+距离加权) + 深度梯度 SmoothL1(掩码) + 深度范围 BCE
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化可训练参数（主干+三头），骨干冻结不纳入
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：前向 → 多任务损失 → 反向 → 梯度裁剪 → 步进，并聚合日志
 - [train/run.py](../train/run.py) — 训练入口 CLI：加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重
@@ -88,6 +89,6 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 
 ### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）
 
-- [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染三头预测与 GT 对照
-- [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型三头预测（及可选 GT）着色并合成多帧多模态对照画布
-- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐窗推理 → 渲染预测与 GT 对照并保存
+- [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染双头预测与 GT 对照
+- [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
+- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存

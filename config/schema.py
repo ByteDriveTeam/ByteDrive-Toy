@@ -234,16 +234,13 @@ class DinoV3BackboneCfg:
     patch_size: int
     hidden_dim: int
     num_register_tokens: int
+    feature_layers: List[int]
 
 
 @dataclass
-class TemporalTrunkCfg:
-    in_channels: int
+class FeatureTrunkCfg:
     channels: int
     num_blocks: int
-    temporal_kernel: int
-    spatial_kernel: int
-    expansion: int
 
 
 @dataclass
@@ -252,7 +249,6 @@ class HeadsCfg:
     up_channels: List[int]
     num_classes: int
     semantic_out: int
-    flow_out: int
     depth_out: int
 
 
@@ -260,15 +256,13 @@ class HeadsCfg:
 class PhysicsCfg:
     symlog_scale: float
     depth_max_m: float
-    flow_dt_s: float
-    flow_ndc_pixel_scale: List[float]
     semantic_ignore_index: int
 
 
 @dataclass
 class ModelCfg:
     dinov3_backbone: DinoV3BackboneCfg
-    temporal_trunk: TemporalTrunkCfg
+    feature_trunk: FeatureTrunkCfg
     heads: HeadsCfg
     physics: PhysicsCfg
     target_point_embedding: TargetPointEmbeddingCfg
@@ -278,8 +272,6 @@ class ModelCfg:
 class DatasetCfg:
     scene_root: str
     camera: str
-    window_size: int
-    window_stride: int
     dino_mean: List[float]
     dino_std: List[float]
 
@@ -293,8 +285,8 @@ class DataCfg:
 class LossWeightsCfg:
     semantic: float
     depth: float
+    depth_grad: float
     depth_range: float
-    flow: float
 
 
 @dataclass
@@ -316,7 +308,7 @@ class TrainCfg:
 class PredVisCfg:
     checkpoint: str
     scene: str
-    max_windows: int
+    max_frames: int
     save_dir: str
     show_ground_truth: bool
     display_scale: float
@@ -324,7 +316,6 @@ class PredVisCfg:
     depth_max_display_m: float
     depth_min_display_m: float
     depth_log: bool
-    flow_max_display: float
 
 
 @dataclass
@@ -451,7 +442,7 @@ _TPE_VECTOR_TRANSFORMS = {"symlog"}
 def _validate_model(model):
     """校验对象: cfg.model —— 网络结构参数。"""
     _validate_dinov3_backbone(model.dinov3_backbone)
-    _validate_temporal_trunk(model.temporal_trunk)
+    _validate_feature_trunk(model.feature_trunk)
     _validate_heads(model.heads)
     _validate_physics(model.physics)
     _validate_target_point_embedding(model.target_point_embedding)
@@ -462,18 +453,17 @@ def _validate_dinov3_backbone(bb):
     assert bb.patch_size > 0, "model.dinov3_backbone.patch_size 必须 > 0"
     assert bb.hidden_dim > 0, "model.dinov3_backbone.hidden_dim 必须 > 0"
     assert bb.num_register_tokens >= 0, "model.dinov3_backbone.num_register_tokens 必须 >= 0"
+    # 融合层索引取自 output_hidden_states（含 embedding 于索引 0），须非空且为非负整数
+    assert len(bb.feature_layers) > 0, "model.dinov3_backbone.feature_layers 至少选一层"
+    assert all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in bb.feature_layers), \
+        "model.dinov3_backbone.feature_layers 每项必须为非负整数（hidden_states 索引）"
 
 
-def _validate_temporal_trunk(tt):
-    """校验对象: cfg.model.temporal_trunk —— 输入投影 + 3D ConvNeXt 主干参数。"""
-    for name in ("in_channels", "channels", "num_blocks", "temporal_kernel", "spatial_kernel", "expansion"):
-        assert getattr(tt, name) > 0, "model.temporal_trunk.{} 必须 > 0".format(name)
-    # 深度可分离卷积须能对称 padding 保持时序/空间尺寸，故核为奇数
-    assert tt.temporal_kernel % 2 == 1, "model.temporal_trunk.temporal_kernel 必须为奇数"
-    assert tt.spatial_kernel % 2 == 1, "model.temporal_trunk.spatial_kernel 必须为奇数"
-    # 逐点膨胀后须能整除回原通道（1×1×1 升维 channels·expansion 再降回 channels，天然成立），
-    # 且膨胀通道须为正
-    assert tt.channels * tt.expansion > 0, "model.temporal_trunk 膨胀通道必须 > 0"
+def _validate_feature_trunk(ft):
+    """校验对象: cfg.model.feature_trunk —— 2D 残差块单帧主干参数（输入维已由 feature_fusion 对齐）。"""
+    # 2D 瓶颈残差块 C→C/2→C 需二分通道，故 channels 至少为 2
+    assert ft.channels >= 2, "model.feature_trunk.channels 必须 >= 2（瓶颈残差块需二分通道）"
+    assert ft.num_blocks > 0, "model.feature_trunk.num_blocks 必须 > 0"
 
 
 def _validate_heads(hd):
@@ -483,7 +473,7 @@ def _validate_heads(hd):
     # 每级像素洗牌前 Conv2d 升到 C_out·4，PixelShuffle(2) 折回 C_out：C_out 须为正整数即可
     assert all(isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in hd.up_channels), \
         "model.heads.up_channels 每级必须为正整数"
-    for name in ("num_classes", "semantic_out", "flow_out", "depth_out"):
+    for name in ("num_classes", "semantic_out", "depth_out"):
         assert getattr(hd, name) > 0, "model.heads.{} 必须 > 0".format(name)
     # 语义头输出通道即类别数，须一致（下游 CE 依赖）
     assert hd.semantic_out == hd.num_classes, \
@@ -494,17 +484,12 @@ def _validate_physics(ph):
     """校验对象: cfg.model.physics —— 物理量监督口径参数。"""
     assert ph.symlog_scale > 0, "model.physics.symlog_scale 必须 > 0"
     assert ph.depth_max_m > 0, "model.physics.depth_max_m 必须 > 0"
-    assert ph.flow_dt_s > 0, "model.physics.flow_dt_s 必须 > 0"
-    assert len(ph.flow_ndc_pixel_scale) == 2, \
-        "model.physics.flow_ndc_pixel_scale 必须为 2 元 [sx, sy]"
     # semantic_ignore_index 允许为负（如 -100 表示不忽略任何类），故不校验符号
 
 
 def _validate_data(data):
     """校验对象: cfg.data —— 数据加载参数。"""
     ds = data.dataset
-    assert ds.window_size > 0, "data.dataset.window_size 必须 > 0"
-    assert ds.window_stride > 0, "data.dataset.window_stride 必须 > 0"
     assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
         "data.dataset.dino_mean/std 必须为 3 通道"
     assert all(s > 0 for s in ds.dino_std), "data.dataset.dino_std 每通道必须 > 0"
@@ -611,11 +596,10 @@ def _is_bgr(c):
 
 def _validate_pred_vis(pv):
     """校验对象: cfg.pred_vis —— 感知模型预测可视化参数。"""
-    assert pv.max_windows >= 0, "pred_vis.max_windows 必须 >= 0（0=全部）"
+    assert pv.max_frames >= 0, "pred_vis.max_frames 必须 >= 0（0=全部）"
     assert pv.display_scale > 0, "pred_vis.display_scale 必须 > 0"
     assert pv.depth_colormap in _DATA_VIS_COLORMAPS, \
         "pred_vis.depth_colormap 须取值 {}".format(sorted(_DATA_VIS_COLORMAPS))
     assert pv.depth_max_display_m > 0, "pred_vis.depth_max_display_m 必须 > 0"
     assert 0 < pv.depth_min_display_m < pv.depth_max_display_m, \
         "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
-    assert pv.flow_max_display >= 0, "pred_vis.flow_max_display 必须 >= 0（0=自适应）"
