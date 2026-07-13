@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from vis.data_vis import geometry as g
-from vis.data_vis.palette import tag_to_bgr
+from vis.data_vis.palette import flow_to_bgr, tag_to_bgr
 
 # colormap 名 -> OpenCV 常量（须与 config/schema._DATA_VIS_COLORMAPS 保持一致）
 _COLORMAPS = {"turbo": cv2.COLORMAP_TURBO, "jet": cv2.COLORMAP_JET, "magma": cv2.COLORMAP_MAGMA,
@@ -158,19 +158,8 @@ def _colorize_depth(depth_m, dcfg):
 # ---------- 光流着色 ----------
 
 def _colorize_flow(flow, fcfg):
-    """光流 (H,W,2) 运动矢量 -> BGR：色相编码方向、亮度编码幅值（经典光流配色）。
-
-    max_flow>0 时以该幅值为满亮度基准；=0 则按本帧幅值 99 分位自适应，免去对 CARLA 光流单位的先验假设。
-    """
-    fx, fy = flow[..., 0].astype(np.float32), flow[..., 1].astype(np.float32)
-    mag = np.sqrt(fx * fx + fy * fy)
-    ang = np.arctan2(fy, fx)  # [-pi, pi]
-    denom = fcfg.max_flow if fcfg.max_flow > 0 else float(np.percentile(mag, 99)) + 1e-6
-    hsv = np.empty(flow.shape[:2] + (3,), dtype=np.uint8)
-    hsv[..., 0] = np.minimum((ang + np.pi) * (90.0 / np.pi), 179.0).astype(np.uint8)  # 方向->色相
-    hsv[..., 1] = 255
-    hsv[..., 2] = (np.clip(mag / denom, 0.0, 1.0) * 255.0).astype(np.uint8)            # 幅值->亮度
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    """光流 (H,W,2) 运动矢量 -> BGR：委托 palette.flow_to_bgr（与 pred_vis 共用唯一配色实现）。"""
+    return flow_to_bgr(flow[..., 0], flow[..., 1], fcfg.max_flow)
 
 
 # ---------- 鸟瞰图（主车系俯视）----------

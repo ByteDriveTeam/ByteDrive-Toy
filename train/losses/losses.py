@@ -1,16 +1,18 @@
-"""多任务监督损失：语义 CE + 深度 SmoothL1(掩码) + 深度范围 BCE + 光流 SmoothL1(掩码)。
+"""多任务监督损失：语义 CE + 深度 SmoothL1(掩码+距离加权) + 深度范围 BCE + 光流 SmoothL1(掩码+距离加权)。
 
 模块: train/losses/losses.py
-依赖: torch, config.schema.Config, train.losses.checks.losses_checks
+依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
 读取配置:
-    model.physics.semantic_ignore_index
+    model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_range / flow
 对外接口:
     - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])   # 总损失与各分量（供日志）
 说明: outputs 为模型三头输出（[B,C,T,H,W]，FP32），targets 为数据集监督目标（batch 后 [B,T,H,W] 等）。
       深度 ch0 回归 scale·symlog(depth)、仅在范围内像素计损；ch1 以 BCE 监督范围内/超范围二分类（全像素）。
       光流回归 scale·symlog(速度)，同样掩到范围内（超范围如天空无稳定物理速度）。语义 CE 忽略 Unlabeled。
-      掩码归一用「有效像素数」而非全像素，避免超范围占比波动改变有效学习率。
+      深度/光流回归再叠「距离加权」：按 GT 深度(米)线性从近处 1 递减到远处 _DIST_WEIGHT_MIN，近距误差权重更高；
+      权重并入掩码（分子分母同乘）得加权均值，不改变整体损失量级。范围二分类不加权（其目标即判定量程内外）。
+      掩码归一用「有效（加权）像素数」而非全像素，避免超范围占比波动改变有效学习率。
 """
 
 from __future__ import annotations
@@ -21,12 +23,14 @@ import torch
 import torch.nn.functional as F
 
 from config.schema import Config
+from data.target_encoding import physics_decode
 from train.losses.checks.losses_checks import check_losses_io
 
 
 __all__ = ["compute_losses"]
 
 _MASK_EPS = 1.0  # 掩码归一分母下限：一帧全超范围时避免除零，且不放大极少数有效像素的损失
+_DIST_WEIGHT_MIN = 0.1  # 距离加权下限：depth=depth_max_m 处的权重，近处线性升至 1
 
 
 def compute_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor],
@@ -34,27 +38,42 @@ def compute_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Te
     """计算多任务加权总损失与各分量。"""
     check_losses_io(outputs, targets)
     weights = cfg.train.loss_weights
+    physics = cfg.model.physics
     inrange = targets["depth_inrange"]  # [B,T,H,W]，1=范围内
+
+    # 距离加权：解回 GT 深度(米)，按 depth_max_m 线性从近处 1 递减到远处 _DIST_WEIGHT_MIN，突出近距监督。
+    # 权重乘进范围掩码，回归即对「范围内且按距离加权」的像素取加权均值（分子分母同乘，量级不变）。
+    depth_m = physics_decode(targets["depth_target"], physics.symlog_scale)
+    weighted_mask = inrange * _distance_weight(depth_m, physics.depth_max_m)  # [B,T,H,W]
 
     # 语义：logits [B,C,T,H,W] 与 long 标签 [B,T,H,W]，cross_entropy 原生支持多维
     semantic = F.cross_entropy(
         outputs["semantic"], targets["semantic"],
-        ignore_index=cfg.model.physics.semantic_ignore_index)
+        ignore_index=physics.semantic_ignore_index)
 
-    # 深度回归：ch0 对 scale·symlog(depth)，仅范围内像素
+    # 深度回归：ch0 对 scale·symlog(depth)，仅范围内像素、按距离加权
     depth_pred = outputs["depth"][:, 0]  # [B,T,H,W]
-    depth = _masked_smooth_l1(depth_pred, targets["depth_target"], inrange)
-    # 深度范围二分类：ch1 logit 对 in_range，全像素 BCE
+    depth = _masked_smooth_l1(depth_pred, targets["depth_target"], weighted_mask)
+    # 深度范围二分类：ch1 logit 对 in_range，全像素 BCE（不加距离权：目标即判定量程内外）
     depth_range = F.binary_cross_entropy_with_logits(outputs["depth"][:, 1], inrange)
 
-    # 光流回归：[B,2,T,H,W] 对速度目标，掩到范围内（掩码在通道维广播）
-    flow = _masked_smooth_l1(outputs["flow"], targets["flow_target"], inrange.unsqueeze(1))
+    # 光流回归：[B,2,T,H,W] 对速度目标，掩到范围内并按距离加权（掩码在通道维广播）
+    flow = _masked_smooth_l1(outputs["flow"], targets["flow_target"], weighted_mask.unsqueeze(1))
 
     total = (weights.semantic * semantic + weights.depth * depth
              + weights.depth_range * depth_range + weights.flow * flow)
     components = {"semantic": semantic, "depth": depth, "depth_range": depth_range,
                   "flow": flow, "total": total}
     return total, components
+
+
+def _distance_weight(depth_m: torch.Tensor, depth_max_m: float) -> torch.Tensor:
+    """按 GT 深度线性递减的距离权重：depth=0→1、depth=depth_max_m→_DIST_WEIGHT_MIN，钳到 [MIN, 1]。
+
+    近处误差权重高、远处低（远处像素多、深度不确定性大）。超范围像素虽会被范围掩码乘零，仍钳下限防越界。
+    """
+    weight = 1.0 - (1.0 - _DIST_WEIGHT_MIN) * (depth_m / depth_max_m)
+    return weight.clamp(_DIST_WEIGHT_MIN, 1.0)
 
 
 def _masked_smooth_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

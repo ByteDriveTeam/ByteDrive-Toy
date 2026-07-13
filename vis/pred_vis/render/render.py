@@ -6,7 +6,7 @@
 对外接口:
     - to_display_bgr(rgb01) -> np.ndarray                    # [3,H,W] 归一化前 RGB(0..1) -> BGR uint8
     - colorize_semantic(tag_map) -> np.ndarray               # [H,W] 语义标签 -> BGR（复用 CityScapes 调色板）
-    - colorize_depth(depth_m, colormap, max_m) -> np.ndarray # [H,W] 深度(米) -> 伪彩 BGR
+    - colorize_depth(depth_m, colormap, max_m, min_m, log_scale) -> np.ndarray # [H,W] 深度(米) -> 伪彩 BGR
     - colorize_flow(velocity, max_disp) -> np.ndarray        # [2,H,W] 速度 -> 光流经典配色 BGR
     - render_grid(rows) -> np.ndarray                        # rows=[(label,[panels])] 合成对照画布
 说明: 语义复用 vis.data_vis.palette 的官方调色板（DRY）；深度/光流着色与 data_vis 同法但作用于「解码回
@@ -17,7 +17,7 @@
 import cv2
 import numpy as np
 
-from vis.data_vis.palette import tag_to_bgr
+from vis.data_vis.palette import flow_to_bgr, tag_to_bgr
 from vis.pred_vis.render.checks.render_checks import check_grid_rows
 
 # colormap 名 -> OpenCV 常量（须与 config/schema._DATA_VIS_COLORMAPS 一致）
@@ -41,27 +41,28 @@ def colorize_semantic(tag_map: np.ndarray) -> np.ndarray:
     return tag_to_bgr(tag_map.reshape(-1)).reshape(height, width, 3)
 
 
-def colorize_depth(depth_m: np.ndarray, colormap: str, max_m: float) -> np.ndarray:
-    """[H,W] 深度(米) -> 伪彩：按 max_m 归一截断后套 colormap。"""
-    norm = np.clip(depth_m / max_m, 0.0, 1.0)
+def colorize_depth(depth_m: np.ndarray, colormap: str, max_m: float,
+                   min_m: float, log_scale: bool) -> np.ndarray:
+    """[H,W] 深度(米) -> 伪彩 BGR，按量程归一后套 colormap。
+
+    log_scale=True 时对 [min_m, max_m] 取对数映射到 [0,1]：深度感知呈几何递增，线性着色会把近处
+    挤进极窄色带；对数量程令近处占据更多色带、细节更清晰。=False 退回线性归一截断。
+    """
+    if log_scale:
+        clipped = np.clip(depth_m, min_m, max_m)
+        norm = np.log(clipped / min_m) / np.log(max_m / min_m)
+    else:
+        norm = np.clip(depth_m / max_m, 0.0, 1.0)
     gray = (norm * 255.0).astype(np.uint8)
     return cv2.applyColorMap(gray, _COLORMAPS[colormap])
 
 
 def colorize_flow(velocity: np.ndarray, max_disp: float) -> np.ndarray:
-    """[2,H,W] 速度矢量 -> BGR：色相编码方向、亮度编码幅值（经典光流配色）。
+    """[2,H,W] 速度矢量 -> BGR：委托 palette.flow_to_bgr（与 data_vis 共用唯一配色实现）。
 
     max_disp>0 时以该幅值(m/s)为满亮度基准；=0 则按本帧幅值 99 分位自适应。
     """
-    vx, vy = velocity[0].astype(np.float32), velocity[1].astype(np.float32)
-    mag = np.sqrt(vx * vx + vy * vy)
-    ang = np.arctan2(vy, vx)
-    denom = max_disp if max_disp > 0 else float(np.percentile(mag, 99)) + 1e-6
-    hsv = np.empty(vx.shape + (3,), dtype=np.uint8)
-    hsv[..., 0] = np.minimum((ang + np.pi) * (90.0 / np.pi), 179.0).astype(np.uint8)
-    hsv[..., 1] = 255
-    hsv[..., 2] = (np.clip(mag / denom, 0.0, 1.0) * 255.0).astype(np.uint8)
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return flow_to_bgr(velocity[0], velocity[1], max_disp)
 
 
 def render_grid(rows) -> np.ndarray:

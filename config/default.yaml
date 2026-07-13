@@ -254,4 +254,6 @@ pred_vis:
   display_scale: 0.5         # 合成画布整体缩放（多帧多模态很大，缩小便于查看）
   depth_colormap: turbo      # 深度着色 colormap（turbo/jet/magma/viridis/plasma/inferno）
   depth_max_display_m: 128.0 # 深度着色量程上限（米），对齐检测范围
+  depth_min_display_m: 1.0   # 对数深度着色近端下限（米），量程 [min,max] 映射到整个色带
+  depth_log: true            # 深度按对数量程着色（放大近处细节）；false=线性归一
   flow_max_display: 0.0      # 光流(速度)满亮度幅值（m/s）；0=按帧幅值 99 分位自适应

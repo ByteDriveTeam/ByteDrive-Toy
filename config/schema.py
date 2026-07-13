@@ -322,6 +322,8 @@ class PredVisCfg:
     display_scale: float
     depth_colormap: str
     depth_max_display_m: float
+    depth_min_display_m: float
+    depth_log: bool
     flow_max_display: float
 
 
@@ -614,4 +616,6 @@ def _validate_pred_vis(pv):
     assert pv.depth_colormap in _DATA_VIS_COLORMAPS, \
         "pred_vis.depth_colormap 须取值 {}".format(sorted(_DATA_VIS_COLORMAPS))
     assert pv.depth_max_display_m > 0, "pred_vis.depth_max_display_m 必须 > 0"
+    assert 0 < pv.depth_min_display_m < pv.depth_max_display_m, \
+        "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
     assert pv.flow_max_display >= 0, "pred_vis.flow_max_display 必须 >= 0（0=自适应）"

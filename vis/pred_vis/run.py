@@ -6,9 +6,11 @@
       data.target_encoding.physics_decode, vis.pred_vis.render, vis.pred_vis.checks.run_checks
 读取配置:
     pred_vis.checkpoint / scene / max_windows / save_dir / show_ground_truth
-    pred_vis.display_scale / depth_colormap / depth_max_display_m / flow_max_display
+    pred_vis.display_scale / depth_colormap / depth_max_display_m / depth_min_display_m
+    pred_vis.depth_log / flow_max_display
     data.dataset.dino_mean / dino_std（RGB 去归一化展示）
     model.physics.symlog_scale（预测/GT 由 Symlog 空间解码回物理量）
+    model.physics.depth_max_m（深度按范围二分类掩码：超范围像素置此值平铺展示）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 PerceptionDataset 枚举窗口并取归一化 RGB 与 GT 目标（同一编码/解码路径，保证预测与 GT 物理口径
@@ -88,25 +90,37 @@ def _modality_rows(tag: str, maps, pv):
     return [
         ("{} seg".format(tag), [render.colorize_semantic(sem[t]) for t in range(frames)]),
         ("{} depth".format(tag),
-         [render.colorize_depth(depth_m[t], pv.depth_colormap, pv.depth_max_display_m)
+         [render.colorize_depth(depth_m[t], pv.depth_colormap, pv.depth_max_display_m,
+                                pv.depth_min_display_m, pv.depth_log)
           for t in range(frames)]),
         ("{} flow".format(tag),
          [render.colorize_flow(velocity[:, t], pv.flow_max_display) for t in range(frames)]),
     ]
 
 
-def _predictions(outputs, scale: float):
-    """把模型输出解码为可着色的物理量（语义标签 / 深度米 / 速度）。"""
+def _predictions(outputs, scale: float, depth_max_m: float):
+    """把模型输出解码为可着色的物理量（语义标签 / 深度米 / 速度）。
+
+    深度仅在预测「范围内」的像素展示回归值：以深度头 ch1（范围二分类 logit>0 ⇔ sigmoid>0.5）
+    为掩码，超范围像素直接置 depth_max_m（如 128m），避免未受监督的超范围回归值污染显示。
+    """
     semantic = outputs["semantic"][0].argmax(dim=0).cpu().numpy()          # [T,H,W]
     depth = _decode_scalar_map(outputs["depth"][0, 0], scale)              # [T,H,W]
+    in_range = (outputs["depth"][0, 1] > 0.0).cpu().numpy()               # 预测范围内掩码
+    depth = np.where(in_range, depth, depth_max_m)
     velocity = physics_decode(outputs["flow"][0], scale).cpu().numpy()     # [2,T,H,W]
     return {"semantic": semantic, "depth": depth, "flow": velocity}
 
 
-def _ground_truth(sample, scale: float):
-    """把数据集 GT 目标解码为与预测同口径的物理量。"""
+def _ground_truth(sample, scale: float, depth_max_m: float):
+    """把数据集 GT 目标解码为与预测同口径的物理量。
+
+    深度同预测口径：GT 超范围像素（depth_inrange==0）直接置 depth_max_m，使 pred/gt 两行可直接对照。
+    """
     semantic = sample["semantic"].numpy()                                  # [T,H,W]
     depth = _decode_scalar_map(sample["depth_target"], scale)              # [T,H,W]
+    in_range = sample["depth_inrange"].numpy() > 0.5                        # GT 范围内掩码
+    depth = np.where(in_range, depth, depth_max_m)
     velocity = physics_decode(sample["flow_target"], scale).numpy()        # [2,T,H,W]
     return {"semantic": semantic, "depth": depth, "flow": velocity}
 
@@ -123,6 +137,7 @@ def main(argv=None) -> None:
     pv = cfg.pred_vis
     device = _resolve_device()
     scale = cfg.model.physics.symlog_scale
+    depth_max_m = cfg.model.physics.depth_max_m  # 超范围像素按此值(如128m)平铺展示
     mean = np.asarray(cfg.data.dataset.dino_mean, dtype=np.float32)
     std = np.asarray(cfg.data.dataset.dino_std, dtype=np.float32)
 
@@ -137,8 +152,9 @@ def main(argv=None) -> None:
         sample = dataset[dataset_index]
         with torch.no_grad():
             outputs = model(sample["rgb"].unsqueeze(0).to(device))
-        gt = _ground_truth(sample, scale) if pv.show_ground_truth else None
-        rows = _build_rows(sample["rgb"], _predictions(outputs, scale), gt, pv, mean, std, scale)
+        gt = _ground_truth(sample, scale, depth_max_m) if pv.show_ground_truth else None
+        rows = _build_rows(sample["rgb"], _predictions(outputs, scale, depth_max_m),
+                           gt, pv, mean, std, scale)
         canvas = render.render_grid(rows)
         if pv.display_scale != 1.0:
             canvas = cv2.resize(canvas, None, fx=pv.display_scale, fy=pv.display_scale)

@@ -116,12 +116,18 @@ def _resolve(path) -> Path:
     return p if p.is_absolute() else Path(__file__).resolve().parents[2] / p
 
 
+def _writable_contiguous(arr: np.ndarray) -> np.ndarray:
+    """确保 C 连续且可写：只读数组（如 np.frombuffer 读 LMDB）会被拷贝，避免 torch.from_numpy 警告。"""
+    arr = np.ascontiguousarray(arr)
+    return arr if arr.flags.writeable else arr.copy()
+
+
 def _to_float(arr: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(np.ascontiguousarray(arr)).float()
+    return torch.from_numpy(_writable_contiguous(arr)).float()
 
 
 def _to_long(arr: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(np.ascontiguousarray(arr)).long()
+    return torch.from_numpy(_writable_contiguous(arr)).long()
 
 
 def _scene_num_frames(scene_dir: Path) -> int:
