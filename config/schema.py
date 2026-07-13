@@ -349,6 +349,8 @@ class DrivingDatasetCfg:
     map_name_template: str        # 地图文件名模板，如 "{map}_HD_map.npz"
     dist_sigma_m: float           # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: float      # 车道中心线缓冲半宽（栅格可行驶区域用）
+    target_min_m: float           # 目标点采样距离窗口下界（沿未来轨迹搜近端引导点）
+    target_max_m: float           # 目标点采样距离窗口上界
 
 
 @dataclass
@@ -602,6 +604,8 @@ def _validate_data(data):
         "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
     assert "{map}" in dr.map_name_template, \
         "data.driving.map_name_template 必须含 {map} 占位（按场景地图名解析 HD 地图文件）"
+    assert 0 < dr.target_min_m < dr.target_max_m, \
+        "data.driving 需满足 0 < target_min_m < target_max_m（目标点采样窗口）"
 
 
 def _validate_train(train):

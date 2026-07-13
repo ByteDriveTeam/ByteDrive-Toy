@@ -223,7 +223,7 @@ model:
     # BEV 编码器：交叉注意力查询图像特征 + ConvNeXt2D 提炼
     bev_encoder:
       cross_layers: 2            # BEV 查询 ← 图像特征 级联交叉注意力层数
-      num_convnext_blocks: 6     # ConvNeXt2D 层数
+      num_convnext_blocks: 8     # ConvNeXt2D 层数
       convnext_spatial_kernel: 7 # 深度可分离空间核（奇数）
       convnext_expansion: 2      # 逐点卷积膨胀率
 
@@ -265,6 +265,8 @@ data:
     map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town01_HD_map.npz）
     dist_sigma_m: 1.0         # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
+    target_min_m: 16.0        # 目标点：沿未来自车轨迹搜距当前 16~32m 的点随机取一，作近端导航引导（增强鲁棒性）
+    target_max_m: 32.0
 
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）

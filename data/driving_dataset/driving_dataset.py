@@ -5,6 +5,7 @@
       data.driving_targets, data.hd_map.HdMap, vis.data_vis.geometry, data.driving_dataset.checks.*
 读取配置:
     data.driving.scene_root / camera / map_dir / map_name_template / dist_sigma_m / lane_half_width_m
+    data.driving.target_min_m / target_max_m（目标点采样距离窗口）
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
@@ -15,9 +16,11 @@
         __getitem__(i) -> dict[str, Tensor]
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界
       位姿经 world_to_ego 变到当前 ego 系（帧间隔即采集节拍）；自车速度由世界速度旋转到 ego 系（前向 vx、右向
-      vy）；目标点取路线终点变到 ego 系作导航意图。风险场由 GT 深度反投影，可行驶场由 HD 地图按位姿栅格化，
-      分布场由 GT 航点高斯软化，视场掩码为常量（构造期预算）。场分辨率与模型上采样输出一致（Hb·2^L）。HD 地图
-      按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影全部复用 vis.data_vis.geometry / data.driving_targets。
+      vy）；目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
+      风险场由 GT 深度反投影包络，可行驶场由 HD 地图按位姿栅格化，分布场由 GT 航点高斯软化，视场掩码为常量
+      （构造期预算）。全帧 ego 位姿按场景缓存（[F,6]），供轨迹与目标点复用、避免逐样本重复读 LMDB。场分辨率与
+      模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
+      vis.data_vis.geometry / data.driving_targets。
 """
 
 from __future__ import annotations
@@ -55,9 +58,12 @@ class DrivingDataset(SingleFrameSceneBase):
         self._num_waypoints = cfg.model.driving.trajectory.num_waypoints
         self._num_modes = cfg.model.driving.trajectory.num_modes
         self._depth_max_m = cfg.model.physics.depth_max_m  # 风险场包络排除超范围/天空像素
+        self._target_min = drv_data.target_min_m
+        self._target_max = drv_data.target_max_m
         self._map_dir = resolve_repo_path(drv_data.map_dir)
         self._inview = torch.from_numpy(dt.inview_mask(self._bev, self._fov))  # 常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
+        self._pose_cache: Dict[str, np.ndarray] = {}  # 每场景全帧 ego 位姿 [F,6]，供轨迹/目标点复用
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         scene_dir, frame_idx = self.frame_index[i]
@@ -75,9 +81,10 @@ class DrivingDataset(SingleFrameSceneBase):
         world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
         ego_vel = (world_to_ego(pose)[:3, :3] @ world_vel)[:2]        # 世界速度 → ego 系 (前, 右)
 
-        waypoints, valid = self._trajectory(reader, frame_idx, pose)
+        poses = self._scene_poses(scene_dir, reader)                  # [F,6] 全帧位姿（缓存）
+        waypoints, valid = self._trajectory(poses, frame_idx, pose)
         sector = dt.sector_of(waypoints, valid, self._fov, self._num_modes)
-        target_point = self._target_point(meta, pose)
+        target_point = self._target_point(poses, frame_idx, pose, meta)
 
         depth = np.ascontiguousarray(frame["depth"][cam]).astype(np.float32)
         risk = dt.risk_field(depth, intrinsics4, extrinsic6, self._bev, self._fov, self._depth_max_m)
@@ -99,17 +106,35 @@ class DrivingDataset(SingleFrameSceneBase):
             "inview": self._inview,
         }
 
-    def _trajectory(self, reader, frame_idx: int, pose):
+    def _scene_poses(self, scene_dir, reader) -> np.ndarray:
+        """惰性缓存本场景全帧 ego 世界位姿 `[F,6]`（轻量读 LMDB，不解码视频），供轨迹/目标点复用。"""
+        key = str(scene_dir)
+        if key not in self._pose_cache:
+            self._pose_cache[key] = np.array(
+                [reader.frame_meta(j)["ego"]["transform"] for j in range(reader.num_frames)],
+                dtype=np.float64)
+        return self._pose_cache[key]
+
+    def _trajectory(self, poses: np.ndarray, frame_idx: int, pose):
         """取同场景未来 num_waypoints 帧 ego 世界位姿，变到当前 ego 系得航点与有效掩码。"""
-        last = min(frame_idx + 1 + self._num_waypoints, reader.num_frames)
-        future = [reader.frame_meta(j)["ego"]["transform"] for j in range(frame_idx + 1, last)]
+        future = list(poses[frame_idx + 1: frame_idx + 1 + self._num_waypoints])
         return dt.trajectory_targets(future, pose, self._num_waypoints)
 
-    def _target_point(self, meta, pose):
-        """路线终点（世界）变到当前 ego 系，取 xy 作导航目标点。"""
-        end = meta["route"]["end"]
-        ego_end = transform_points(np.array([end[:3]], dtype=np.float64), world_to_ego(pose))
-        return ego_end[0, :2].astype(np.float32)
+    def _target_point(self, poses: np.ndarray, frame_idx: int, pose, meta):
+        """沿未来自车轨迹搜距当前 [target_min, target_max]m 的点随机取一作近端导航目标（变到当前 ego 系）。
+
+        近端引导比「整条路线终点」更明确，且窗口内随机选点增强对目标位置扰动的鲁棒性。无点落入窗口（临近场景
+        末尾/慢行）时取最远未来点；无未来帧（场景末帧）时退回路线终点。
+        """
+        future = poses[frame_idx + 1:]                               # [m,6]
+        if len(future) == 0:
+            end = np.array([meta["route"]["end"][:3]], dtype=np.float64)
+            return transform_points(end, world_to_ego(pose))[0, :2].astype(np.float32)
+        dist = np.hypot(future[:, 0] - pose[0], future[:, 1] - pose[1])
+        within = np.nonzero((dist >= self._target_min) & (dist <= self._target_max))[0]
+        j = int(np.random.choice(within)) if len(within) > 0 else int(np.argmax(dist))
+        ego_pt = transform_points(future[j:j + 1, :3], world_to_ego(pose))
+        return ego_pt[0, :2].astype(np.float32)
 
     def _hd_map(self, map_name: str) -> HdMap:
         """按场景 map 名（去 _Opt 后缀）惰性加载并缓存 HD 地图。"""
