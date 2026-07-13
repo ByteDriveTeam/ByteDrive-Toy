@@ -208,24 +208,88 @@ class DataVisCfg:
 # ---------- model —— 网络结构参数（model/ 只读，不含默认值声明） ----------
 
 @dataclass
-class TargetPointEmbeddingCfg:
-    coordinate_dim: int
-    grid_height: int
-    grid_width: int
+class BevGeometryCfg:
+    """BEV（ego 前向单目）几何：坐标量程、工作网格分辨率、视场角、z 采样。
+
+    这是驾驶系统 BEV 几何的**单一来源**：目标点嵌入（初始查询）、frustum 视场掩码、
+    数据侧场 GT 栅格化都从这里取量程，避免多处各写一份坐标范围。
+    """
     x_min_m: float
     x_max_m: float
     y_min_m: float
     y_max_m: float
-    vector_order: str
-    vector_transform: str
-    stem_channels: int
-    stem_kernel_size: List[int]
-    stem_stride: List[int]
-    stem_padding: List[int]
-    num_residual_blocks: int
-    output_channels: int
-    output_height: int
-    output_width: int
+    height: int          # Hb：BEV 工作网格前向(x)格数（= 初始查询分辨率）
+    width: int           # Wb：BEV 工作网格左右(y)格数
+    fov_deg: float       # 前向视场角（视场内监督）
+    z_min_m: float       # 目标点嵌入垂直采样下界
+    z_max_m: float
+    z_step_m: float
+
+
+@dataclass
+class QueryEmbeddingCfg:
+    """初始 BEV 查询嵌入（由 target_point_embedding 产）的模块参数（几何取自 BevGeometryCfg）。"""
+    coord_symlog_scale: float   # symlog(坐标)·scale 归一到[-1,1]
+    mlp_hidden: int             # 逐 cell 列 MLP 隐藏维
+    vector_order: str           # 目标点相对向量方向
+
+
+@dataclass
+class FrustumCfg:
+    """深度 frustum 位置编码参数（每 patch 中心+四角×深度采样的候选 3D 坐标）。"""
+    depth_min_m: float
+    depth_max_m: float
+    step_near_m: float          # 近处深度采样步长
+    step_far_m: float           # 远处深度采样步长（步长在量程内线性增长）
+    coord_symlog_scale: float
+    mlp_hidden: int
+
+
+@dataclass
+class DrivingAttentionCfg:
+    num_heads: int
+    mlp_ratio: int
+
+
+@dataclass
+class BevEncoderCfg:
+    cross_layers: int              # BEV 查询 ← 图像特征 交叉注意力层数
+    num_convnext_blocks: int
+    convnext_spatial_kernel: int
+    convnext_expansion: int
+
+
+@dataclass
+class FieldsCfg:
+    reduce_channels: int           # 上采样前 1×1 压缩到的通道
+    up_channels: List[int]         # 各级 2× 像素洗牌输出通道（Hb·2^L = 场分辨率）
+    feature_channels: int          # 共享上采样输出特征通道（再由各场 1×1 头解码）
+
+
+@dataclass
+class TrajectoryCfg:
+    num_modes: int                 # 前向扇区数 = 多模态轨迹条数
+    num_waypoints: int             # 每条轨迹航点数 T_wp
+    token_mlp_hidden: int          # 扇区 Token 输入编码 MLP 隐藏维
+    cross_layers: int              # Token ← BEV 特征 交叉注意力层数
+    self_layers: int               # Token 自注意力层数
+    num_heads: int
+    velocity_norm_mps: float       # 自车速度归一尺度（m/s）
+
+
+@dataclass
+class DrivingCfg:
+    """驾驶系统（复用感知主干 → BEV → 三场 + 多模态轨迹）网络参数。"""
+    work_dim: int                  # 工作维 D（neck 融合输出、注意力、BEV 全程）
+    freeze_perception: bool        # 是否冻结感知主干（复用其预训练表征）
+    neck_num_residual_blocks: int  # driving_neck 融合后 2D 残差块层数
+    bev: BevGeometryCfg
+    query: QueryEmbeddingCfg
+    frustum: FrustumCfg
+    attention: DrivingAttentionCfg
+    bev_encoder: BevEncoderCfg
+    fields: FieldsCfg
+    trajectory: TrajectoryCfg
 
 
 @dataclass
@@ -265,7 +329,7 @@ class ModelCfg:
     feature_trunk: FeatureTrunkCfg
     heads: HeadsCfg
     physics: PhysicsCfg
-    target_point_embedding: TargetPointEmbeddingCfg
+    driving: DrivingCfg
 
 
 @dataclass
@@ -277,8 +341,20 @@ class DatasetCfg:
 
 
 @dataclass
+class DrivingDatasetCfg:
+    """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
+    scene_root: str
+    camera: str
+    map_dir: str                  # HD 地图目录
+    map_name_template: str        # 地图文件名模板，如 "{map}_HD_map.npz"
+    dist_sigma_m: float           # 轨迹分布场高斯软标签标准差（米）
+    lane_half_width_m: float      # 车道中心线缓冲半宽（栅格可行驶区域用）
+
+
+@dataclass
 class DataCfg:
     dataset: DatasetCfg
+    driving: DrivingDatasetCfg
 
 
 @dataclass
@@ -287,6 +363,15 @@ class LossWeightsCfg:
     depth: float
     depth_grad: float
     depth_range: float
+
+
+@dataclass
+class DrivingLossWeightsCfg:
+    trajectory: float             # WTA 多模态轨迹回归
+    confidence: float             # 模态置信度分类
+    distribution: float           # 轨迹分布场
+    risk: float                   # 风险场
+    drivable: float               # 可行驶区域场
 
 
 @dataclass
@@ -301,7 +386,9 @@ class TrainCfg:
     log_every: int
     ckpt_dir: str
     resume: bool
+    perception_lr_scale: float     # 驾驶训练时感知子模块（融合+trunk+双头）相对 lr 的缩放（DINOv3 仍冻结）
     loss_weights: LossWeightsCfg
+    driving_loss_weights: DrivingLossWeightsCfg
 
 
 @dataclass
@@ -319,6 +406,21 @@ class PredVisCfg:
 
 
 @dataclass
+class DrivingVisCfg:
+    checkpoint: str
+    scene: str
+    max_frames: int
+    save_dir: str
+    show_ground_truth: bool
+    display_scale: float
+    field_colormap: str            # 风险/可行驶/分布场热力图 colormap
+    depth_colormap: str
+    depth_max_display_m: float
+    depth_min_display_m: float
+    depth_log: bool
+
+
+@dataclass
 class Config:
     carla_collector: CarlaCollectorCfg
     data_vis: DataVisCfg
@@ -326,6 +428,7 @@ class Config:
     data: DataCfg
     train: TrainCfg
     pred_vis: PredVisCfg
+    driving_vis: DrivingVisCfg
 
 
 # ---------- 由 dict 构造 ----------
@@ -430,13 +533,13 @@ def validate_config(cfg):
     _validate_data(cfg.data)
     _validate_train(cfg.train)
     _validate_pred_vis(cfg.pred_vis)
+    _validate_driving_vis(cfg.driving_vis)
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
 
-# 目标点嵌入层受支持的枚举取值（须与 model/target_point_embedding.py 的分支一致）
+# 目标点相对向量方向枚举（须与 model/target_point_embedding.py 的分支一致）
 _TPE_VECTOR_ORDERS = {"grid_minus_target", "target_minus_grid"}
-_TPE_VECTOR_TRANSFORMS = {"symlog"}
 
 
 def _validate_model(model):
@@ -445,7 +548,7 @@ def _validate_model(model):
     _validate_feature_trunk(model.feature_trunk)
     _validate_heads(model.heads)
     _validate_physics(model.physics)
-    _validate_target_point_embedding(model.target_point_embedding)
+    _validate_driving(model.driving)
 
 
 def _validate_dinov3_backbone(bb):
@@ -493,6 +596,12 @@ def _validate_data(data):
     assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
         "data.dataset.dino_mean/std 必须为 3 通道"
     assert all(s > 0 for s in ds.dino_std), "data.dataset.dino_std 每通道必须 > 0"
+    # 校验对象: data.driving —— 高斯软标签/车道半宽为正，地图模板含 {map} 占位
+    dr = data.driving
+    assert dr.dist_sigma_m > 0 and dr.lane_half_width_m > 0, \
+        "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
+    assert "{map}" in dr.map_name_template, \
+        "data.driving.map_name_template 必须含 {map} 占位（按场景地图名解析 HD 地图文件）"
 
 
 def _validate_train(train):
@@ -503,52 +612,65 @@ def _validate_train(train):
     assert train.lr > 0, "train.lr 必须 > 0"
     assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
+    assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
+    # 校验对象: train.driving_loss_weights —— 各权重非负
+    dw = train.driving_loss_weights
+    assert all(getattr(dw, n) >= 0 for n in
+               ("trajectory", "confidence", "distribution", "risk", "drivable")), \
+        "train.driving_loss_weights.* 必须 >= 0"
 
 
-def _validate_target_point_embedding(tpe):
-    """校验对象: cfg.model.target_point_embedding —— 目标点嵌入层结构参数。"""
-    # 校验对象: coordinate_dim —— 固定为 2（ego 平面 [x, y]）
-    assert tpe.coordinate_dim == 2, "model.target_point_embedding.coordinate_dim 必须为 2"
-    # 校验对象: 正整数尺寸字段
-    for name in ("grid_height", "grid_width", "stem_channels", "num_residual_blocks",
-                 "output_channels", "output_height", "output_width"):
-        assert getattr(tpe, name) > 0, "model.target_point_embedding.{} 必须 > 0".format(name)
-    # 校验对象: stem_channels —— 残差块瓶颈 mid=channels/2，须为偶数
-    assert tpe.stem_channels % 2 == 0, "model.target_point_embedding.stem_channels 必须为偶数"
-    # 校验对象: 栅格边界 —— min 必须严格小于 max
-    assert tpe.x_min_m < tpe.x_max_m, "model.target_point_embedding 需满足 x_min_m < x_max_m"
-    assert tpe.y_min_m < tpe.y_max_m, "model.target_point_embedding 需满足 y_min_m < y_max_m"
-    # 校验对象: 枚举字段 —— 取值受实现分支支持集合限制
-    assert tpe.vector_order in _TPE_VECTOR_ORDERS, \
-        "model.target_point_embedding.vector_order 仅支持 {}".format(sorted(_TPE_VECTOR_ORDERS))
-    assert tpe.vector_transform in _TPE_VECTOR_TRANSFORMS, \
-        "model.target_point_embedding.vector_transform 仅支持 {}".format(sorted(_TPE_VECTOR_TRANSFORMS))
-    # 校验对象: 降采样卷积核/步长为正、padding 非负（均为 2 元 [H, W]）
-    _check_2d_int(tpe.stem_kernel_size, "model.target_point_embedding.stem_kernel_size", allow_zero=False)
-    _check_2d_int(tpe.stem_stride, "model.target_point_embedding.stem_stride", allow_zero=False)
-    _check_2d_int(tpe.stem_padding, "model.target_point_embedding.stem_padding", allow_zero=True)
-    # 校验对象: 降采样卷积推导的输出空间尺寸须与 output_height/width 一致（残差块与 1×1 卷积保持尺寸不变）
-    shape = _conv2d_out((tpe.grid_height, tpe.grid_width),
-                        tpe.stem_kernel_size, tpe.stem_stride, tpe.stem_padding)
-    assert shape == (tpe.output_height, tpe.output_width), \
-        "model.target_point_embedding 降采样推导尺寸 {} 与 output_height/width {} 不一致".format(
-            shape, (tpe.output_height, tpe.output_width))
+def _validate_driving(dv):
+    """校验对象: cfg.model.driving —— 驾驶系统网络参数。"""
+    assert dv.work_dim >= 2 and dv.work_dim % 2 == 0, \
+        "model.driving.work_dim 必须为 >=2 的偶数（残差块瓶颈需二分通道）"
+    assert dv.neck_num_residual_blocks > 0, "model.driving.neck_num_residual_blocks 必须 > 0"
+    _validate_bev_geometry(dv.bev)
+    # 校验对象: query —— 尺度为正、MLP 隐藏维为正、向量方向枚举合法
+    assert dv.query.coord_symlog_scale > 0 and dv.query.mlp_hidden > 0, \
+        "model.driving.query.coord_symlog_scale / mlp_hidden 必须 > 0"
+    assert dv.query.vector_order in _TPE_VECTOR_ORDERS, \
+        "model.driving.query.vector_order 仅支持 {}".format(sorted(_TPE_VECTOR_ORDERS))
+    # 校验对象: frustum —— 深度量程与步长为正、近步长 <= 远步长
+    fr = dv.frustum
+    assert 0 < fr.depth_min_m < fr.depth_max_m, "model.driving.frustum 需 0 < depth_min_m < depth_max_m"
+    assert 0 < fr.step_near_m <= fr.step_far_m, "model.driving.frustum 需 0 < step_near_m <= step_far_m"
+    assert fr.coord_symlog_scale > 0 and fr.mlp_hidden > 0, \
+        "model.driving.frustum.coord_symlog_scale / mlp_hidden 必须 > 0"
+    # 校验对象: attention —— D 须能被头数整除
+    assert dv.attention.num_heads > 0 and dv.work_dim % dv.attention.num_heads == 0, \
+        "model.driving.attention.num_heads 必须 > 0 且整除 work_dim"
+    assert dv.attention.mlp_ratio > 0, "model.driving.attention.mlp_ratio 必须 > 0"
+    # 校验对象: bev_encoder —— 层数/核为正
+    be = dv.bev_encoder
+    assert be.cross_layers > 0 and be.num_convnext_blocks > 0, \
+        "model.driving.bev_encoder.cross_layers / num_convnext_blocks 必须 > 0"
+    assert be.convnext_spatial_kernel % 2 == 1 and be.convnext_spatial_kernel > 0, \
+        "model.driving.bev_encoder.convnext_spatial_kernel 必须为正奇数"
+    assert be.convnext_expansion > 0, "model.driving.bev_encoder.convnext_expansion 必须 > 0"
+    # 校验对象: fields —— 通道为正、每级像素洗牌通道为正整数
+    assert dv.fields.reduce_channels > 0 and dv.fields.feature_channels > 0, \
+        "model.driving.fields.reduce_channels / feature_channels 必须 > 0"
+    assert len(dv.fields.up_channels) > 0 and all(
+        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in dv.fields.up_channels), \
+        "model.driving.fields.up_channels 每级必须为正整数"
+    # 校验对象: trajectory —— 模态/航点/层数为正、D 须能被头数整除
+    tj = dv.trajectory
+    for name in ("num_modes", "num_waypoints", "token_mlp_hidden", "cross_layers", "self_layers"):
+        assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
+    assert tj.num_heads > 0 and dv.work_dim % tj.num_heads == 0, \
+        "model.driving.trajectory.num_heads 必须 > 0 且整除 work_dim"
+    assert tj.velocity_norm_mps > 0, "model.driving.trajectory.velocity_norm_mps 必须 > 0"
 
 
-def _check_2d_int(values, name, allow_zero):
-    """校验对象: 2 元整数配置项（卷积核/步长/padding）—— 长度、类型与下限。"""
-    assert len(values) == 2, "{} 必须为 2 元列表，实际为 {}".format(name, values)
-    lower_ok = (lambda v: v >= 0) if allow_zero else (lambda v: v > 0)
-    assert all(isinstance(v, int) and not isinstance(v, bool) and lower_ok(v) for v in values), \
-        "{} 每项必须为{}整数".format(name, "非负" if allow_zero else "正")
-
-
-def _conv2d_out(shape, kernel, stride, padding):
-    """由输入尺寸与卷积参数推导输出 [H, W]；非正即判为非法配置。"""
-    h = (shape[0] + 2 * padding[0] - kernel[0]) // stride[0] + 1
-    w = (shape[1] + 2 * padding[1] - kernel[1]) // stride[1] + 1
-    assert h > 0 and w > 0, "卷积配置产生非正输出尺寸: {}".format((h, w))
-    return (h, w)
+def _validate_bev_geometry(bev):
+    """校验对象: cfg.model.driving.bev —— BEV 几何量程/分辨率/视场/z 采样。"""
+    assert bev.x_min_m < bev.x_max_m, "model.driving.bev 需满足 x_min_m < x_max_m"
+    assert bev.y_min_m < bev.y_max_m, "model.driving.bev 需满足 y_min_m < y_max_m"
+    assert bev.height > 0 and bev.width > 0, "model.driving.bev.height/width 必须 > 0"
+    assert 0 < bev.fov_deg < 180, "model.driving.bev.fov_deg 必须在 (0,180)"
+    assert bev.z_min_m < bev.z_max_m and bev.z_step_m > 0, \
+        "model.driving.bev 需满足 z_min_m < z_max_m 且 z_step_m > 0"
 
 
 # data_vis 着色支持的 OpenCV colormap 名（须与 vis/data_vis/draw.py 的映射表一致）
@@ -603,3 +725,16 @@ def _validate_pred_vis(pv):
     assert pv.depth_max_display_m > 0, "pred_vis.depth_max_display_m 必须 > 0"
     assert 0 < pv.depth_min_display_m < pv.depth_max_display_m, \
         "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
+
+
+def _validate_driving_vis(dv):
+    """校验对象: cfg.driving_vis —— 驾驶模型可视化参数。"""
+    assert dv.max_frames >= 0, "driving_vis.max_frames 必须 >= 0（0=全部）"
+    assert dv.display_scale > 0, "driving_vis.display_scale 必须 > 0"
+    assert dv.field_colormap in _DATA_VIS_COLORMAPS, \
+        "driving_vis.field_colormap 须取值 {}".format(sorted(_DATA_VIS_COLORMAPS))
+    assert dv.depth_colormap in _DATA_VIS_COLORMAPS, \
+        "driving_vis.depth_colormap 须取值 {}".format(sorted(_DATA_VIS_COLORMAPS))
+    assert dv.depth_max_display_m > 0, "driving_vis.depth_max_display_m 必须 > 0"
+    assert 0 < dv.depth_min_display_m < dv.depth_max_display_m, \
+        "driving_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"

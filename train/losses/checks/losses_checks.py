@@ -3,6 +3,9 @@
 _REQUIRED_OUTPUTS = ("semantic", "depth")
 _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 
+_DRIVING_OUTPUTS = ("risk", "drivable", "distribution", "trajectories", "confidence")
+_DRIVING_TARGETS = ("risk", "drivable", "distribution", "inview", "trajectory", "traj_valid", "sector")
+
 
 def check_losses_io(outputs, targets):
     """校验对象: compute_losses 入参 —— 双头输出与三目标齐备且深度头有 2 通道。"""
@@ -15,3 +18,13 @@ def check_losses_io(outputs, targets):
     if int(outputs["depth"].shape[1]) < 2:
         raise ValueError("depth 头须至少 2 通道（回归+范围二分类），实际 {}。".format(
             int(outputs["depth"].shape[1])))
+
+
+def check_driving_losses_io(outputs, targets):
+    """校验对象: compute_driving_losses 入参 —— 三场+轨迹+置信度输出与对应 GT 齐备。"""
+    missing_o = [k for k in _DRIVING_OUTPUTS if k not in outputs]
+    missing_t = [k for k in _DRIVING_TARGETS if k not in targets]
+    if missing_o:
+        raise KeyError("driving outputs 缺少键: {}".format(missing_o))
+    if missing_t:
+        raise KeyError("driving targets 缺少键: {}".format(missing_t))

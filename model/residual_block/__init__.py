@@ -6,11 +6,12 @@
 对外接口:
     - RMSNorm1d / RMSNorm2d / RMSNorm3d -> nn.Module   # 各维度 RMSNorm
     - ResidualBlock1d / ResidualBlock / ResidualBlock3d -> nn.Module   # 瓶颈残差块
-    - ConvNeXtBlock3d -> nn.Module                       # 3D ConvNeXt 块
+    - ConvNeXtBlock2d / ConvNeXtBlock3d -> nn.Module     # 2D/3D ConvNeXt 块
 说明: 跨模块统一 `from model.residual_block import ...`；实现见 residual_block.py，入参校验见 checks/。
 """
 
 from model.residual_block.residual_block import (
+    ConvNeXtBlock2d,
     ConvNeXtBlock3d,
     RMSNorm1d,
     RMSNorm2d,
@@ -27,5 +28,6 @@ __all__ = [
     "ResidualBlock1d",
     "ResidualBlock",
     "ResidualBlock3d",
+    "ConvNeXtBlock2d",
     "ConvNeXtBlock3d",
 ]

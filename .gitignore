@@ -20,6 +20,7 @@ py37_venv/
 .env
 .env.*
 !.env.example
+.claude
 
 # Distribution / packaging
 build/
@@ -120,3 +121,4 @@ dataset/
 *.pth
 *.onnx
 *.ckpt
+map/

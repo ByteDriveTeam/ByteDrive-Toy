@@ -74,6 +74,20 @@ class PerceptionModel(nn.Module):
         modules = (self.fusion, self.trunk, self.semantic_head, self.depth_head)
         return (p for m in modules for p in m.parameters())
 
+    def extract_features(self, frames: torch.Tensor):
+        """供下游驾驶系统复用的中段表征：返回 (trunk 末端特征, DINOv3 原始特征)。
+
+        trunk 末端特征 `[B, channels, gh, gw]` 是双头共享部分的最后一层输出（融合→主干后）；
+        DINOv3 原始特征取骨干末选层 patch 网格 `[B, hidden, gh, gw]`。二者在 BF16 段计算，
+        供驾驶 neck 各自 RMSNorm 后 1×1 融合（混精边界由本段 autocast 控制）。
+        """
+        check_input_frames(frames, self.patch_size)
+        with self._autocast(frames.device, enabled=True):
+            feat = self.backbone(frames)     # [B, L, hidden, gh, gw]，冻结叶子
+            dino_raw = feat[:, -1]           # 末选层原始特征 [B, hidden, gh, gw]
+            trunk_feat = self.trunk(self.fusion(feat))  # [B, channels, gh, gw]
+        return trunk_feat, dino_raw
+
     def forward(self, frames: torch.Tensor) -> Dict[str, torch.Tensor]:
         """单帧提特征 → 特征主干 → 双头上采样解码，返回双任务输出。"""
         check_input_frames(frames, self.patch_size)

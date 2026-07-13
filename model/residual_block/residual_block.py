@@ -10,9 +10,10 @@
     - ResidualBlock1d(channels) -> nn.Module               # 1D 无瓶颈残差卷积块
     - ResidualBlock(channels) -> nn.Module                 # 2D 瓶颈残差卷积块
     - ResidualBlock3d(channels) -> nn.Module               # 3D 瓶颈残差卷积块
+    - ConvNeXtBlock2d(channels, spatial_kernel=7, expansion=2) -> nn.Module      # 2D ConvNeXt 块
     - ConvNeXtBlock3d(channels, temporal_kernel=3, spatial_kernel=5, expansion=2) -> nn.Module  # 3D ConvNeXt 块
 说明: RMSNorm 只做均方根归一化不做中心化；瓶颈残差块为 1x1→3x3→GELU→1x1 结构 + 残差；
-      ConvNeXt 3D 块为 深度可分离(kT×kH×kW)→RMSNorm→1x1x1 升维→GELU→1x1x1 降维 + 残差。
+      ConvNeXt 2D/3D 块为 深度可分离(kH×kW / kT×kH×kW)→RMSNorm→1×1 升维→GELU→1×1 降维 + 残差。
       RMSNorm 的均方根统计量恒在 FP32 计算再回落输入精度（BF16 下方差噪声更小；FP32 路径行为不变）。
       构造入参校验下沉到 residual_block_checks（规范 §7.1）。
 """
@@ -21,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from model.residual_block.checks.residual_block_checks import (
+    check_convnext_block2d,
     check_convnext_block3d,
     check_residual_channels,
     check_residual_channels_1d,
@@ -35,6 +37,7 @@ __all__ = [
     "ResidualBlock1d",
     "ResidualBlock",
     "ResidualBlock3d",
+    "ConvNeXtBlock2d",
     "ConvNeXtBlock3d",
 ]
 
@@ -301,6 +304,58 @@ class ResidualBlock3d(nn.Module):
         out = self.conv2(out)
         out = self.act(out)
         out = self.conv3(out)
+
+        return out + identity
+
+
+class ConvNeXtBlock2d(nn.Module):
+    """2D ConvNeXt 风格卷积块（BEV 主干的基本单元）。
+
+    与瓶颈残差块不同：先用深度可分离大核卷积（逐通道、kH×kW）在低算力下扩大空间
+    感受野，再以 1×1 逐点卷积升维 GELU 降维做通道混合，通道全程不变、便于堆叠。
+
+    结构:
+        深度可分离 Conv2d(C->C, groups=C, kH×kW)
+        -> RMSNorm2d -> 1×1 Conv(C->C·r) -> GELU -> 1×1 Conv(C·r->C) + 残差连接
+
+    Args:
+        channels: 输入输出通道数（深度可分离卷积逐通道，故 in=out=C）。
+        spatial_kernel: 空间维核 kH=kW（奇数，对称 padding 保持 H/W）。
+        expansion: 逐点卷积的通道膨胀率 r。
+
+    Shape:
+        输入: [N, C, H, W]
+        输出: [N, C, H, W]
+    """
+
+    def __init__(self, channels: int, spatial_kernel: int = 7, expansion: int = 2) -> None:
+        super().__init__()
+        check_convnext_block2d(channels, spatial_kernel, expansion)
+        mid_channels = channels * expansion
+
+        # 深度可分离：groups=channels 使每通道独立卷积；对称 padding 保持空间尺寸
+        self.dwconv = nn.Conv2d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=spatial_kernel,
+            stride=1,
+            padding=spatial_kernel // 2,
+            groups=channels,
+        )
+        self.norm = RMSNorm2d(channels)
+        self.pwconv1 = nn.Conv2d(channels, mid_channels, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv2d(mid_channels, channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """执行 2D ConvNeXt 卷积块。"""
+        identity = x
+
+        out = self.dwconv(x)
+        out = self.norm(out)
+        out = self.pwconv1(out)
+        out = self.act(out)
+        out = self.pwconv2(out)
 
         return out + identity
 

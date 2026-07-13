@@ -31,3 +31,13 @@ def check_convnext_block3d(channels, temporal_kernel, spatial_kernel, expansion)
         raise ValueError("spatial_kernel 必须为正奇数，实际为 {}。".format(spatial_kernel))
     if expansion < 1:
         raise ValueError("expansion 必须不小于 1，实际为 {}。".format(expansion))
+
+
+def check_convnext_block2d(channels, spatial_kernel, expansion):
+    """校验对象: ConvNeXtBlock2d 构造入参 —— 深度可分离逐通道，空间核须奇数、膨胀率为正。"""
+    if channels < 1:
+        raise ValueError("channels 必须不小于 1，实际为 {}。".format(channels))
+    if spatial_kernel < 1 or spatial_kernel % 2 == 0:
+        raise ValueError("spatial_kernel 必须为正奇数，实际为 {}。".format(spatial_kernel))
+    if expansion < 1:
+        raise ValueError("expansion 必须不小于 1，实际为 {}。".format(expansion))

@@ -180,25 +180,68 @@ model:
     depth_max_m: 128.0        # 深度检测上限（米）；超出记为超范围，仅监督二分类
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
-  # 目标点嵌入层：ego 目标点 → 栅格向量场⊕栅格中心坐标（各 Symlog 拼接）→ 16×16 卷积降采样 → 2×残差块 → 1×1 升维
-  target_point_embedding:
-    coordinate_dim: 2          # 目标点坐标维度，固定为 ego 平面 [x, y]
-    grid_height: 256           # 栅格高度，对应 x 前后方向格数
-    grid_width: 256            # 栅格宽度，对应 y 左右方向格数
-    x_min_m: 0.0               # 栅格后向边界（米）
-    x_max_m: 64.0              # 栅格前向边界（米）
-    y_min_m: -32.0             # 栅格右向边界（米）
-    y_max_m: 32.0              # 栅格左向边界（米）
-    vector_order: grid_minus_target   # 向量场方向：栅格中心 - 目标点
-    vector_transform: symlog          # 送入卷积前对米制向量/坐标的变换（当前仅 symlog）
-    stem_channels: 256         # 16×16 降采样卷积输出通道；须为偶数（残差块瓶颈 mid=channels/2）
-    stem_kernel_size: [16, 16] # 降采样卷积核 [H, W]
-    stem_stride: [16, 16]      # 步长与核同尺寸即 16 倍降采样
-    stem_padding: [0, 0]
-    num_residual_blocks: 2     # 降采样后堆叠的 2D 残差卷积块层数
-    output_channels: 384       # 末端 1×1 卷积升维后的输出通道
-    output_height: 16           # 降采样后栅格高度（由 grid 与 stem 卷积推导，schema 加载期校验一致）
-    output_width: 16            # 降采样后栅格宽度
+  # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → BEV 交叉注意力
+  # → ConvNeXt → 风险/可行驶/轨迹分布三场 + 8 扇区多模态轨迹。感知 = 本驾驶系统的前端子任务。
+  driving:
+    work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
+    freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
+    neck_num_residual_blocks: 2  # driving_neck 融合+frustum 后的 2D 残差块层数
+
+    # BEV（ego 前向单目）几何——坐标量程/分辨率/视场/z 采样的单一来源，供模型与数据侧共用
+    bev:
+      x_min_m: 0.0               # 前向下界（自车所在，BEV 下沿）
+      x_max_m: 64.0              # 前向上界（BEV 上沿）
+      y_min_m: -32.0             # 左右下界
+      y_max_m: 32.0              # 左右上界
+      height: 32                 # Hb：BEV 工作网格前向格数（= 初始查询分辨率）
+      width: 32                  # Wb：BEV 工作网格左右格数
+      fov_deg: 90.0              # 前向视场角（仅监督视场内）
+      z_min_m: -3.0              # 目标点嵌入垂直采样下界
+      z_max_m: 8.0               # 垂直采样上界
+      z_step_m: 0.1              # 垂直采样步长（[-3,8]@0.1 → 111 层）
+
+    # 初始 BEV 查询嵌入（xyz 逐列 MLP + z 聚合；几何取自 bev）
+    query:
+      coord_symlog_scale: 0.24   # symlog(坐标)·scale 归一到[-1,1]（max~64m: 1/ln(65)≈0.24）
+      mlp_hidden: 256            # 逐 cell 垂直列 MLP 隐藏维
+      vector_order: grid_minus_target  # 目标点相对向量方向：栅格中心 - 目标点
+
+    # 深度 frustum 位置编码：每 patch 中心+四角 × 深度采样的候选 3D 坐标
+    frustum:
+      depth_min_m: 0.1           # 起始/近处深度
+      depth_max_m: 64.0          # 最大深度
+      step_near_m: 0.1           # 近处采样步长
+      step_far_m: 1.0            # 远处采样步长（步长在量程内线性增长）
+      coord_symlog_scale: 0.24   # 候选坐标 symlog 归一尺度
+      mlp_hidden: 512            # Linear->SiLU->Linear 隐藏维
+
+    # 注意力（Pre-Norm + SDPA），供 BEV↔图像、Token↔BEV 复用
+    attention:
+      num_heads: 6               # 须整除 work_dim
+      mlp_ratio: 4               # 前馈膨胀率（SwiGLU）
+
+    # BEV 编码器：交叉注意力查询图像特征 + ConvNeXt2D 提炼
+    bev_encoder:
+      cross_layers: 2            # BEV 查询 ← 图像特征 级联交叉注意力层数
+      num_convnext_blocks: 6     # ConvNeXt2D 层数
+      convnext_spatial_kernel: 7 # 深度可分离空间核（奇数）
+      convnext_expansion: 2      # 逐点卷积膨胀率
+
+    # 三场解码：像素洗牌上采样（Hb·2^len(up_channels) = 场分辨率，32×8=256）
+    fields:
+      reduce_channels: 128       # 上采样前 1×1 压缩通道
+      up_channels: [192, 96, 48] # 三级 2× 像素洗牌输出通道（32→256）
+      feature_channels: 32       # 共享上采样输出特征通道（各场 1×1 头再解码）
+
+    # 8 扇区多模态轨迹解码
+    trajectory:
+      num_modes: 8               # 前向扇区数 = 多模态轨迹条数
+      num_waypoints: 8           # 每条轨迹航点数 T_wp（0.5s/点 → 4s）
+      token_mlp_hidden: 256      # 扇区 Token 输入编码 MLP 隐藏维
+      cross_layers: 2            # Token ← BEV 特征 级联交叉注意力层数
+      self_layers: 1             # Token 自注意力层数
+      num_heads: 6               # 须整除 work_dim
+      velocity_norm_mps: 15.0    # 自车速度归一尺度（m/s）
 
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
@@ -212,6 +255,16 @@ data:
     # DINOv3 ImageNet 归一化（RGB 先除 255 到 [0,1] 再标准化）；本地无 preprocessor_config，故写此处
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
+
+  # 驾驶数据集：复用感知单帧读取，另产轨迹/风险/可行驶/分布场 GT 与内外参/速度/目标点。
+  # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
+  driving:
+    scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
+    camera: front             # 前向单目相机名
+    map_dir: data/map         # HD 地图目录
+    map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town01_HD_map.npz）
+    dist_sigma_m: 1.0         # 轨迹分布场高斯软标签标准差（米）
+    lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
 
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
@@ -227,12 +280,22 @@ train:
   log_every: 20              # 每多少步打印一次损失
   ckpt_dir: train/checkpoints   # 权重保存目录（相对仓库根）
   resume: true               # 断点续训：为真则自动从 ckpt_dir 下最新检查点恢复（模型+优化器+epoch）
+  perception_lr_scale: 0.01  # 驾驶训练：感知子模块（融合+trunk+双头）以下游 lr 的 1/100 慢更新；DINOv3 仍冻结
   # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度梯度 SmoothL1 / 深度范围 BCE
   loss_weights:
     semantic: 0.3
     depth: 1.0
     depth_grad: 1.0          # 深度空间梯度（相邻像素差）SmoothL1，监督边界/结构，不加距离权
     depth_range: 0.5
+
+  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 轨迹分布能量 / 风险场 / 可行驶场
+  # 注：distribution 为空间 softmax 交叉熵（能量式），量级天然 ~ln(视场格数)≈11，故权重取小以与 BCE 场平衡
+  driving_loss_weights:
+    trajectory: 1.0
+    confidence: 0.5
+    distribution: 0.1
+    risk: 1.0
+    drivable: 1.0
 
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
@@ -248,3 +311,19 @@ pred_vis:
   depth_max_display_m: 128.0 # 深度着色量程上限（米），对齐检测范围
   depth_min_display_m: 1.0   # 对数深度着色近端下限（米），量程 [min,max] 映射到整个色带
   depth_log: true            # 深度按对数量程着色（放大近处细节）；false=线性归一
+
+# ============================================================
+# driving_vis —— 驾驶模型可视化（RGB/Seg/Depth + GT/预测 风险/可行驶/分布场 + 多模态轨迹）
+# ============================================================
+driving_vis:
+  checkpoint: train/checkpoints/driving/epoch_010.pt  # 驾驶检查点（不存在则随机初始化并告警，仅验管线）
+  scene: ''                  # 指定场景目录名（如 scene_000000）；空=取 scene_root 下第一个
+  max_frames: 4              # 单张对照画布最多并排多少帧（0=全部）
+  save_dir: vis/driving_vis/out  # 渲染结果保存目录（相对仓库根）
+  show_ground_truth: true    # 是否并列渲染 GT 场/轨迹，便于与预测对照
+  display_scale: 0.6         # 合成画布整体缩放
+  field_colormap: turbo      # 风险/可行驶/分布场热力图 colormap
+  depth_colormap: turbo      # 深度着色 colormap
+  depth_max_display_m: 128.0 # 深度着色量程上限（米）
+  depth_min_display_m: 1.0   # 对数深度着色近端下限（米）
+  depth_log: true            # 深度按对数量程着色

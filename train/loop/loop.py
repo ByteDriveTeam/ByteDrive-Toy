@@ -6,11 +6,14 @@
     train.grad_clip_norm
     train.log_every
 对外接口:
-    - train_one_epoch(model, loader, optimizer, cfg, device) -> dict[str, float]   # 各损失分量均值
-    - evaluate(model, loader, cfg, device) -> dict[str, float]                      # 无梯度评估
+    - train_one_epoch(model, loader, optimizer, cfg, device) -> dict[str, float]      # 感知训练一轮
+    - evaluate(model, loader, cfg, device) -> dict[str, float]                         # 感知无梯度评估
+    - train_driving_epoch(model, loader, optimizer, cfg, device) -> dict[str, float]   # 驾驶训练一轮
+    - evaluate_driving(model, loader, cfg, device) -> dict[str, float]                 # 驾驶无梯度评估
 说明: 模型内部已处理 BF16/FP32 混精边界（骨干+主干+头前段 BF16，末段上采样/解码 FP32），故本循环
       不再包 autocast、直接在 FP32 下算损失。BF16 具备 FP32 指数范围，无需 GradScaler。梯度裁剪上限
-      为 0 时跳过。日志聚合按样本数加权求均值。
+      为 0 时跳过。日志聚合按样本数加权求均值。感知与驾驶两条路径共用 _LossMeter/裁剪/日志逻辑，仅前向
+      输入组织与损失函数不同（驾驶前向需内外参/速度/目标点多输入）。
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ import torch
 import torch.nn as nn
 
 from config.schema import Config
-from train.losses import compute_losses
+from train.losses import compute_driving_losses, compute_losses
 from train.loop.checks.loop_checks import check_train_inputs
 
 
-__all__ = ["train_one_epoch", "evaluate"]
+__all__ = ["train_one_epoch", "evaluate", "train_driving_epoch", "evaluate_driving"]
 
 
 def train_one_epoch(model, loader, optimizer, cfg: Config, device) -> Dict[str, float]:
@@ -61,6 +64,52 @@ def evaluate(model, loader, cfg: Config, device) -> Dict[str, float]:
         _, components = compute_losses(model(frames), targets, cfg)
         meter.update(components, int(frames.shape[0]))
     return meter.averages()
+
+
+def train_driving_epoch(model, loader, optimizer, cfg: Config, device) -> Dict[str, float]:
+    """驾驶训练一个 epoch，返回各损失分量的样本加权均值。"""
+    check_train_inputs(model, loader, optimizer)
+    model.train()
+    meter = _LossMeter()
+
+    for step, batch in enumerate(loader):
+        batch = _batch_to_device(batch, device)
+        optimizer.zero_grad(set_to_none=True)
+        outputs = _driving_forward(model, batch)
+        total, components = compute_driving_losses(outputs, batch, cfg)
+
+        total.backward()
+        if cfg.train.grad_clip_norm > 0:
+            nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.train.grad_clip_norm)
+        optimizer.step()
+
+        meter.update(components, int(batch["rgb"].shape[0]))
+        if cfg.train.log_every > 0 and step % cfg.train.log_every == 0:
+            print("[driving] step {} {}".format(step, _format(components)))
+    return meter.averages()
+
+
+@torch.no_grad()
+def evaluate_driving(model, loader, cfg: Config, device) -> Dict[str, float]:
+    """驾驶无梯度评估，返回各损失分量的样本加权均值。"""
+    model.eval()
+    meter = _LossMeter()
+    for batch in loader:
+        batch = _batch_to_device(batch, device)
+        _, components = compute_driving_losses(_driving_forward(model, batch), batch, cfg)
+        meter.update(components, int(batch["rgb"].shape[0]))
+    return meter.averages()
+
+
+def _driving_forward(model, batch: Dict[str, torch.Tensor]):
+    """驾驶模型多输入前向：rgb + 内外参 + 自车速度 + 目标点。"""
+    return model(batch["rgb"], batch["intrinsics"], batch["extrinsics"],
+                 batch["ego_velocity"], batch["target_point"])
+
+
+def _batch_to_device(batch: Dict[str, torch.Tensor], device) -> Dict[str, torch.Tensor]:
+    """把一个 batch 的全部张量搬到设备。"""
+    return {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
 
 def _to_device(batch: Dict[str, torch.Tensor], device):

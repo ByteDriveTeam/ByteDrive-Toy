@@ -19,7 +19,11 @@
 
 - [data/__init__.py](../data/__init__.py) — 数据读取与预处理包标识：只读消费 config 与已落盘数据集
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
+- [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、SceneReader 惰性缓存、RGB 归一化（感知与驾驶复用）
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（纯 numpy）：BEV 几何、视场掩码、轨迹/扇区、风险场、轨迹分布场
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线并按 ego 位姿栅格化为 BEV 可行驶区域掩码
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型单帧数据集：逐帧产 RGB/内外参/速度/目标点及轨迹/风险/可行驶/分布场与视场 GT
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -56,22 +60,29 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/__init__.py](../model/__init__.py) — 网络结构定义包标识：只读消费 config，不含可调参数默认值
 - [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — 通用 SwiGLU 激活模块（沿维度二等分为 value/gate）
 - [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — 通用 3D RoPE 旋转位置编码（只消费调用方传入的三维坐标，全程 FP32）
-- [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 3D ConvNeXt 块）
+- [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 2D/3D ConvNeXt 块）
+- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，SwiGLU 前馈）
 - [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-B 视觉骨干：全程冻结 + eval，逐帧输出多层 patch 网格特征
 - [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层特征融合：对选定层逐层 RMSNorm 后沿通道拼接，再 1×1 卷积降到特征主干工作维
 - [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 特征主干：已融合到工作维的单帧特征，经多层 2D 瓶颈残差块提炼空间表征
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 2D 特征主干 + 语义/深度双头
-- [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：把 ego 坐标系目标点编码为目标导航特征图
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 2D 特征主干 + 语义/深度双头（并对外暴露 trunk+DINO 原始特征供驾驶复用）
+- [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
+- [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：BEV 栅格 xyz + 目标点相对向量 → 初始 BEV 查询网格
+- [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
+- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：初始查询经级联交叉注意力查询图像特征，再过 ConvNeXt2D 提炼为 BEV 特征
+- [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 轨迹解码器：8 扇区 Token 查询 BEV 特征（并入自车速度）→ 多模态轨迹 + 置信度
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 单帧开环驾驶模型：复用感知主干 → BEV → 风险/可行驶/轨迹分布三场 + 多模态轨迹
 
 ## train/ — 训练 / 评估循环
 
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：语义 CE + 深度 SmoothL1(掩码+距离加权) + 深度梯度 SmoothL1(掩码) + 深度范围 BCE
-- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化可训练参数（主干+三头），骨干冻结不纳入
-- [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：前向 → 多任务损失 → 反向 → 梯度裁剪 → 步进，并聚合日志
-- [train/run.py](../train/run.py) — 训练入口 CLI：加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重
+- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知（语义/深度/梯度/范围）与驾驶（风险/可行驶 BCE + 分布能量 + WTA 轨迹 + 置信度）
+- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化可训练参数，冻结骨干不纳入
+- [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
+- [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重
 
 ## clone_loop/ — 行为克隆闭环
 
@@ -92,3 +103,9 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染双头预测与 GT 对照
 - [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
 - [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存
+
+### vis/driving_vis/ — 驾驶模型可视化（RGB/Seg/Depth + GT/预测 风险/可行驶/分布场 + 多模态轨迹）
+
+- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块包标识：加载权重，渲染透视 RGB/Seg/Depth 与 BEV 三场及多模态轨迹对照
+- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：三场/多模态轨迹着色与混合尺寸面板合成（复用 pred_vis 的 RGB/Seg/Depth 着色）
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场与多模态轨迹并保存

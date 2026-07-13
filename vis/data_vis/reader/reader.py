@@ -10,6 +10,7 @@
         .camera_names -> list[str]
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .frame(i) -> dict             # {rgb,depth,semantic,optical_flow,lidar,ego,bboxes,traffic_light_states,meta}
+        .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
 说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）。
@@ -92,6 +93,15 @@ class SceneReader:
         if not self.available[modality]:
             return {}
         return {cam: unpack_array(txn.get(self._key(i, modality, cam))) for cam in self.camera_names}
+
+    def frame_meta(self, i):
+        """只读第 i 帧的逐帧元数据（ego/bboxes/交通灯等），不解码 RGB/不取大数组。
+
+        供需要跨帧读取轻量状态（如未来 ego 位姿构造轨迹 GT）的下游避免逐帧建 VideoCapture。
+        """
+        check_frame_index(i, self.num_frames)
+        with self._env.begin() as txn:
+            return msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
 
     def frame(self, i):
         """读取第 i 帧的全部已落盘模态与标注，组装为一个 dict（缺失模态为空/None）。"""
