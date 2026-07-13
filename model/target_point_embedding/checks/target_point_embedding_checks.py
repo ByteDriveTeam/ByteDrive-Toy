@@ -19,13 +19,13 @@ def check_target_points(target_points, coordinate_dim):
         )
 
 
-def check_embedded_features(embedded_features, feature_channels, output_height, output_width):
-    """校验对象: 目标点卷积输出 embedded_features —— 通道与空间尺寸须与配置一致。"""
-    expected_shape = (feature_channels, output_height, output_width)
-    actual_shape = tuple(int(dim) for dim in embedded_features.shape[1:])
+def check_output_features(output_features, output_channels, output_height, output_width):
+    """校验对象: TargetPointEmbedding.forward 输出 output_features —— 通道与空间尺寸须与配置一致。"""
+    expected_shape = (output_channels, output_height, output_width)
+    actual_shape = tuple(int(dim) for dim in output_features.shape[1:])
     if actual_shape != expected_shape:
         raise ValueError(
-            "目标点卷积输出 shape 与配置不一致：期望 [B, {}, {}, {}]，实际为 {}。".format(
-                expected_shape[0], expected_shape[1], expected_shape[2], tuple(embedded_features.shape)
+            "目标点嵌入输出 shape 与配置不一致：期望 [B, {}, {}, {}]，实际为 {}。".format(
+                expected_shape[0], expected_shape[1], expected_shape[2], tuple(output_features.shape)
             )
         )

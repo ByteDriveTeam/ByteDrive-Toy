@@ -218,22 +218,14 @@ class TargetPointEmbeddingCfg:
     y_max_m: float
     vector_order: str
     vector_transform: str
-    feature_channels: int
-    conv1_kernel_size: List[int]
-    conv1_stride: List[int]
-    conv1_padding: List[int]
-    conv2_kernel_size: List[int]
-    conv2_stride: List[int]
-    conv2_padding: List[int]
-    downsample_kernel_size: List[int]
-    downsample_stride: List[int]
-    downsample_padding: List[int]
+    stem_channels: int
+    stem_kernel_size: List[int]
+    stem_stride: List[int]
+    stem_padding: List[int]
+    num_residual_blocks: int
+    output_channels: int
     output_height: int
     output_width: int
-    goal_token_count: int
-    hidden_dim: int
-    flatten_order: str
-    dtype: str
 
 
 @dataclass
@@ -452,8 +444,6 @@ def validate_config(cfg):
 # 目标点嵌入层受支持的枚举取值（须与 model/target_point_embedding.py 的分支一致）
 _TPE_VECTOR_ORDERS = {"grid_minus_target", "target_minus_grid"}
 _TPE_VECTOR_TRANSFORMS = {"symlog"}
-_TPE_FLATTEN_ORDERS = {"channel_height_width"}
-_TPE_DTYPES = {"float32"}
 
 
 def _validate_model(model):
@@ -533,9 +523,11 @@ def _validate_target_point_embedding(tpe):
     # 校验对象: coordinate_dim —— 固定为 2（ego 平面 [x, y]）
     assert tpe.coordinate_dim == 2, "model.target_point_embedding.coordinate_dim 必须为 2"
     # 校验对象: 正整数尺寸字段
-    for name in ("grid_height", "grid_width", "feature_channels",
-                 "output_height", "output_width", "goal_token_count", "hidden_dim"):
+    for name in ("grid_height", "grid_width", "stem_channels", "num_residual_blocks",
+                 "output_channels", "output_height", "output_width"):
         assert getattr(tpe, name) > 0, "model.target_point_embedding.{} 必须 > 0".format(name)
+    # 校验对象: stem_channels —— 残差块瓶颈 mid=channels/2，须为偶数
+    assert tpe.stem_channels % 2 == 0, "model.target_point_embedding.stem_channels 必须为偶数"
     # 校验对象: 栅格边界 —— min 必须严格小于 max
     assert tpe.x_min_m < tpe.x_max_m, "model.target_point_embedding 需满足 x_min_m < x_max_m"
     assert tpe.y_min_m < tpe.y_max_m, "model.target_point_embedding 需满足 y_min_m < y_max_m"
@@ -544,23 +536,15 @@ def _validate_target_point_embedding(tpe):
         "model.target_point_embedding.vector_order 仅支持 {}".format(sorted(_TPE_VECTOR_ORDERS))
     assert tpe.vector_transform in _TPE_VECTOR_TRANSFORMS, \
         "model.target_point_embedding.vector_transform 仅支持 {}".format(sorted(_TPE_VECTOR_TRANSFORMS))
-    assert tpe.flatten_order in _TPE_FLATTEN_ORDERS, \
-        "model.target_point_embedding.flatten_order 仅支持 {}".format(sorted(_TPE_FLATTEN_ORDERS))
-    assert tpe.dtype in _TPE_DTYPES, \
-        "model.target_point_embedding.dtype 仅支持 {}".format(sorted(_TPE_DTYPES))
-    # 校验对象: 卷积核/步长为正、padding 非负（均为 2 元 [H, W]）
-    for name in ("conv1_kernel_size", "conv1_stride", "conv2_kernel_size",
-                 "conv2_stride", "downsample_kernel_size", "downsample_stride"):
-        _check_2d_int(getattr(tpe, name), "model.target_point_embedding." + name, allow_zero=False)
-    for name in ("conv1_padding", "conv2_padding", "downsample_padding"):
-        _check_2d_int(getattr(tpe, name), "model.target_point_embedding." + name, allow_zero=True)
-    # 校验对象: 卷积链推导的输出空间尺寸须与 output_height/width 一致（避免展平维度错配）
-    shape = (tpe.grid_height, tpe.grid_width)
-    shape = _conv2d_out(shape, tpe.conv1_kernel_size, tpe.conv1_stride, tpe.conv1_padding)
-    shape = _conv2d_out(shape, tpe.conv2_kernel_size, tpe.conv2_stride, tpe.conv2_padding)
-    shape = _conv2d_out(shape, tpe.downsample_kernel_size, tpe.downsample_stride, tpe.downsample_padding)
+    # 校验对象: 降采样卷积核/步长为正、padding 非负（均为 2 元 [H, W]）
+    _check_2d_int(tpe.stem_kernel_size, "model.target_point_embedding.stem_kernel_size", allow_zero=False)
+    _check_2d_int(tpe.stem_stride, "model.target_point_embedding.stem_stride", allow_zero=False)
+    _check_2d_int(tpe.stem_padding, "model.target_point_embedding.stem_padding", allow_zero=True)
+    # 校验对象: 降采样卷积推导的输出空间尺寸须与 output_height/width 一致（残差块与 1×1 卷积保持尺寸不变）
+    shape = _conv2d_out((tpe.grid_height, tpe.grid_width),
+                        tpe.stem_kernel_size, tpe.stem_stride, tpe.stem_padding)
     assert shape == (tpe.output_height, tpe.output_width), \
-        "model.target_point_embedding 卷积链推导尺寸 {} 与 output_height/width {} 不一致".format(
+        "model.target_point_embedding 降采样推导尺寸 {} 与 output_height/width {} 不一致".format(
             shape, (tpe.output_height, tpe.output_width))
 
 

@@ -186,33 +186,25 @@ model:
     flow_ndc_pixel_scale: [192.0, 96.0]  # 归一化光流→像素位移的有符号缩放 [W/2, H/2]
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
-  # 目标点嵌入层：ego 目标点 → 栅格向量场 → 三层卷积下采样 → 目标导航点 Token
+  # 目标点嵌入层：ego 目标点 → 栅格向量场⊕栅格中心坐标（各 Symlog 拼接）→ 16×16 卷积降采样 → 2×残差块 → 1×1 升维
   target_point_embedding:
     coordinate_dim: 2          # 目标点坐标维度，固定为 ego 平面 [x, y]
-    grid_height: 64            # 栅格高度，对应 x 前后方向格数
-    grid_width: 64             # 栅格宽度，对应 y 左右方向格数
-    x_min_m: -32.0             # 栅格后向边界（米）
-    x_max_m: 32.0              # 栅格前向边界（米）
+    grid_height: 256           # 栅格高度，对应 x 前后方向格数
+    grid_width: 256            # 栅格宽度，对应 y 左右方向格数
+    x_min_m: 0.0               # 栅格后向边界（米）
+    x_max_m: 64.0              # 栅格前向边界（米）
     y_min_m: -32.0             # 栅格右向边界（米）
     y_max_m: 32.0              # 栅格左向边界（米）
     vector_order: grid_minus_target   # 向量场方向：栅格中心 - 目标点
-    vector_transform: symlog          # 送入卷积前对米制向量的变换（当前仅 symlog）
-    feature_channels: 64       # 卷积中间通道数
-    conv1_kernel_size: [3, 3]  # 第一层卷积核 [H, W]
-    conv1_stride: [2, 2]
-    conv1_padding: [1, 1]
-    conv2_kernel_size: [3, 3]  # 第二层卷积核 [H, W]
-    conv2_stride: [2, 2]
-    conv2_padding: [1, 1]
-    downsample_kernel_size: [3, 3]   # 下采样卷积核 [H, W]
-    downsample_stride: [2, 2]
-    downsample_padding: [1, 1]
-    output_height: 8           # 三层卷积后栅格高度（由上面卷积参数推导，schema 加载期校验一致）
-    output_width: 8            # 三层卷积后栅格宽度
-    goal_token_count: 2        # 输出目标导航点 Token 数
-    hidden_dim: 768            # 每个目标导航点 Token 维度（对齐视觉编码器 768）
-    flatten_order: channel_height_width   # 卷积输出展平顺序（当前仅 channel_height_width）
-    dtype: float32             # 目标点嵌入层强制运行精度（当前仅 float32）
+    vector_transform: symlog          # 送入卷积前对米制向量/坐标的变换（当前仅 symlog）
+    stem_channels: 256         # 16×16 降采样卷积输出通道；须为偶数（残差块瓶颈 mid=channels/2）
+    stem_kernel_size: [16, 16] # 降采样卷积核 [H, W]
+    stem_stride: [16, 16]      # 步长与核同尺寸即 16 倍降采样
+    stem_padding: [0, 0]
+    num_residual_blocks: 2     # 降采样后堆叠的 2D 残差卷积块层数
+    output_channels: 384       # 末端 1×1 卷积升维后的输出通道
+    output_height: 16           # 降采样后栅格高度（由 grid 与 stem 卷积推导，schema 加载期校验一致）
+    output_width: 16            # 降采样后栅格宽度
 
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）

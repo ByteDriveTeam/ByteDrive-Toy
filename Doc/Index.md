@@ -62,7 +62,7 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：3D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
 - [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务时序感知模型：冻结 DINOv3 骨干 + 3D 时序主干 + 语义/光流/深度三头
-- [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：ego 目标点经栅格向量场与三层卷积编码为目标导航点 Token
+- [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：把 ego 坐标系目标点编码为目标导航特征图
 
 ## train/ — 训练 / 评估循环
 
