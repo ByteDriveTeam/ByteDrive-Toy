@@ -13,7 +13,7 @@
     - to_display_bgr / colorize_semantic / colorize_depth                 # 复用 pred_vis（RGB/Seg/Depth）
 说明: BEV 约定与 data.driving_targets 一致（行沿 x 前向、自车在下沿中心；ego_xy_to_pixel 复用），故轨迹/场
       像素对齐。三场为 [0,1]（预测需先 sigmoid），视场外像素压暗以突出监督区。多模态轨迹从自车原点连折线，
-      按置信度着色、最高置信模态加粗；GT 轨迹绿色。RGB/Seg/Depth 着色直接复用 vis.pred_vis.render（DRY）。
+      按置信度着色（橙/黄），Winner（最高置信模态）以红色加粗突出；GT 轨迹绿色。RGB/Seg/Depth 着色直接复用 vis.pred_vis.render（DRY）。
       compose_canvas 把不同尺寸面板按统一行高缩放、再右侧补背景对齐行宽后纵向拼接，故透视图与 BEV 图可同框。
 """
 
@@ -42,6 +42,7 @@ _BG = (28, 28, 30)
 _DIM_OUTVIEW = 0.35            # 视场外像素亮度压暗系数
 _TRAJ_BASE_DIM = 0.5          # 轨迹面板底图（三场合成）压暗，使轨迹线醒目
 _GT_COLOR = (255, 255, 255)   # GT 轨迹（白，区别于底图可行驶绿）
+_WINNER_COLOR = (0, 0, 255)   # Winner（最高置信）轨迹（红，突出胜出模态）
 _EGO_COLOR = (0, 200, 255)    # 自车标记（橙）
 
 
@@ -79,8 +80,9 @@ def draw_trajectories(base_bgr: np.ndarray, trajectories: np.ndarray, confidence
         weights = _softmax(confidence)
         best = int(np.argmax(confidence))
         for m in order:
-            color = _mode_color(float(weights[m]))
-            thick = 3 if m == best else 1
+            is_best = m == best
+            color = _WINNER_COLOR if is_best else _mode_color(float(weights[m]))  # Winner 红，其余按置信橙/黄
+            thick = 3 if is_best else 1
             _draw_path(canvas, ego_px, trajectories[m], np.ones(len(trajectories[m])), bev, color, thick)
 
     if draw_gt:

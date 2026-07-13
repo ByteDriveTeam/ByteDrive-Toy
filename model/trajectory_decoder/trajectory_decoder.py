@@ -8,7 +8,7 @@
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / height / width / fov_deg
     model.driving.attention.mlp_ratio
     model.driving.trajectory.num_modes / num_waypoints / token_mlp_hidden / cross_layers / self_layers /
-        num_heads / velocity_norm_mps
+        num_heads / velocity_norm_mps / waypoint_scale_m
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
         forward(bev_feat, ego_velocity) -> dict   # trajectories [B,M,T_wp,2] / confidence [B,M]
@@ -54,6 +54,7 @@ class TrajectoryDecoder(nn.Module):
         self.num_modes = tj.num_modes
         self.num_waypoints = tj.num_waypoints
         self.velocity_norm = tj.velocity_norm_mps
+        self.waypoint_scale = tj.waypoint_scale_m
 
         # 扇区角掩码 [M,Hb,Wb] 与扇区中心朝向 [M,2]（由 BEV 几何 + fov 推导，随模型搬设备）
         masks, dirs = _build_sectors(cfg_driving.bev, tj.num_modes)
@@ -94,7 +95,9 @@ class TrajectoryDecoder(nn.Module):
         for layer in self.self_attn:
             tokens = layer(tokens)
 
-        trajectories = self.waypoint_head(tokens).reshape(b, self.num_modes, self.num_waypoints, 2)
+        # 乘固定尺度使 Linear 原始输出（初值 ~N(0,1)）落到米制量级，加速收敛；轨迹恒在物理空间（米）
+        trajectories = self.waypoint_head(tokens).reshape(
+            b, self.num_modes, self.num_waypoints, 2) * self.waypoint_scale
         confidence = self.confidence_head(tokens).squeeze(-1)        # [B, M]
         return {"trajectories": trajectories, "confidence": confidence}
 

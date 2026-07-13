@@ -275,6 +275,7 @@ class TrajectoryCfg:
     self_layers: int               # Token 自注意力层数
     num_heads: int
     velocity_norm_mps: float       # 自车速度归一尺度（m/s）
+    waypoint_scale_m: float        # 航点回归输出的固定尺度（米）：Linear 原始输出乘此值到米制量级
 
 
 @dataclass
@@ -665,6 +666,7 @@ def _validate_driving(dv):
     assert tj.num_heads > 0 and dv.work_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 work_dim"
     assert tj.velocity_norm_mps > 0, "model.driving.trajectory.velocity_norm_mps 必须 > 0"
+    assert tj.waypoint_scale_m > 0, "model.driving.trajectory.waypoint_scale_m 必须 > 0"
 
 
 def _validate_bev_geometry(bev):

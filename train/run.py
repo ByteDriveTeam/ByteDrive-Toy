@@ -89,11 +89,25 @@ def _maybe_resume(model, optimizer, ckpt_dir: Path, resume: bool, explicit, devi
 
 
 def _load_perception_weights(model: DrivingModel, path, device) -> None:
-    """以感知预训练权重初始化驾驶模型的感知子模块（融合+trunk+双头；骨干仍从 DINO 本地权重加载）。"""
+    """以感知预训练权重初始化驾驶模型的感知子模块（融合+trunk+双头；骨干仍从 DINO 本地权重加载）。
+
+    感知检查点不含 DINOv3 骨干（保存时排除 backbone.* 键），故 strict=False 下「缺失」的必然是骨干参数——
+    属正常，由本地 DINO 权重单独加载；只有「非骨干缺失」或「多余键」才是检查点与模型不匹配的真问题。
+    """
     ckpt = torch.load(path, map_location=device)
-    missing, unexpected = model.perception.load_state_dict(ckpt["model"], strict=False)
-    print("[driving] 载入感知预训练权重 {}（缺失 {} 项，多余 {} 项）".format(
-        path, len(missing), len(unexpected)))
+    state = ckpt.get("model", ckpt)  # 兼容 {epoch,model,optimizer} 或纯 state_dict
+    missing, unexpected = model.perception.load_state_dict(state, strict=False)
+    non_backbone_missing = [k for k in missing if "backbone." not in k]
+
+    print("[driving] 载入感知预训练权重 {}：融合/trunk/双头 {} 项已载入".format(path, len(state)))
+    if not non_backbone_missing:
+        print("[driving]   缺失的 {} 项均为 DINOv3 骨干（由本地权重加载），属正常。".format(len(missing)))
+    else:
+        print("[driving]   ⚠ {} 个非骨干参数未被覆盖（检查点可能不完整）：{}".format(
+            len(non_backbone_missing), non_backbone_missing[:5]))
+    if unexpected:
+        print("[driving]   ⚠ 检查点含 {} 个模型中无对应的多余键：{}".format(
+            len(unexpected), unexpected[:5]))
 
 
 def main(argv=None) -> None:

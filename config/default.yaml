@@ -242,6 +242,7 @@ model:
       self_layers: 1             # Token 自注意力层数
       num_heads: 6               # 须整除 work_dim
       velocity_norm_mps: 15.0    # 自车速度归一尺度（m/s）
+      waypoint_scale_m: 1.0      # 航点回归固定尺度（米）：Linear 原始输出乘此值，使初值即在米制量级、加速收敛
 
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
