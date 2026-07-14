@@ -279,7 +279,7 @@ train:
   num_workers: 4
   lr: 0.00005                # 5e-5
   weight_decay: 0.00001      # 1e-5
-  grad_clip_norm: 1.0        # 梯度裁剪上限（0 表示不裁剪）
+  grad_clip_norm: 0          # 梯度裁剪上限（0 表示不裁剪）
   log_every: 20              # 每多少步打印一次损失
   ckpt_dir: train/checkpoints   # 权重保存目录（相对仓库根）
   resume: true               # 断点续训：为真则自动从 ckpt_dir 下最新检查点恢复（模型+优化器+epoch）
