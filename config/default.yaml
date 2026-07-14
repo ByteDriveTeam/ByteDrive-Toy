@@ -275,7 +275,7 @@ data:
 train:
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
-  batch_size: 2
+  batch_size: 32
   num_workers: 4
   lr: 0.00005                # 5e-5
   weight_decay: 0.00001      # 1e-5
