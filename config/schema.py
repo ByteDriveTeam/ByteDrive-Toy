@@ -375,6 +375,7 @@ class DrivingLossWeightsCfg:
     distribution: float           # 轨迹分布场
     risk: float                   # 风险场
     drivable: float               # 可行驶区域场
+    boundary: float               # HDMap 轨迹越界距离
 
 
 @dataclass
@@ -621,7 +622,7 @@ def _validate_train(train):
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
-               ("trajectory", "confidence", "distribution", "risk", "drivable")), \
+               ("trajectory", "confidence", "distribution", "risk", "drivable", "boundary")), \
         "train.driving_loss_weights.* 必须 >= 0"
 
 

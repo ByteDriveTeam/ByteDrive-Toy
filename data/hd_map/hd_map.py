@@ -1,4 +1,4 @@
-"""HD 地图：加载车道折线并按 ego 位姿栅格化为 BEV 可行驶区域掩码。
+"""HD 地图：加载车道折线，生成 BEV 可行驶掩码及越界距离场。
 
 模块: data/hd_map/hd_map.py
 依赖: numpy, cv2, math, vis.data_vis.geometry(world_to_ego/transform_points),
@@ -7,6 +7,7 @@
 对外接口:
     - HdMap(npz_path) -> HdMap
         .drivable_bev(ego_pose6, bev, lane_half_width_m) -> (H,W) float32   # 1=可行驶
+    - offroad_distance_field(drivable, bev) -> (H,W) float32                # 道路内=0，越界距离（米）
 说明: npz 结构为 `arr[(road_id, {lane_id: [ {Points:[((x,y,z),(rpy))...], Type, Color, ...}, ... ]})]`；解析出
       全部车道折线的世界系 xyz。栅格化时按 ego 世界位姿把折线搬到 ego 系（复用 vis.data_vis.geometry 的 CARLA
       变换，避免重复实现），投到 BEV 像素后用 cv2 粗线（宽 = 2·车道半宽）画出，其并集近似路面可行驶区域——
@@ -22,11 +23,11 @@ import cv2
 import numpy as np
 
 from data.driving_targets import BevParams, ego_xy_to_pixel
-from data.hd_map.checks.hd_map_checks import check_map_path, check_polylines
+from data.hd_map.checks.hd_map_checks import check_drivable_mask, check_map_path, check_polylines
 from vis.data_vis.geometry import transform_points, world_to_ego
 
 
-__all__ = ["HdMap"]
+__all__ = ["HdMap", "offroad_distance_field"]
 
 
 class HdMap:
@@ -61,6 +62,24 @@ class HdMap:
             pts = np.stack((cols, rows), axis=1).round().astype(np.int32).reshape(-1, 1, 2)
             cv2.polylines(mask, [pts], isClosed=False, color=1, thickness=thickness)
         return mask.astype(np.float32)
+
+
+def offroad_distance_field(drivable: np.ndarray, bev: BevParams) -> np.ndarray:
+    """把 HDMap 可行驶掩码转成单侧距离场：道路内为 0，越界处为到道路的距离（米）。
+
+    二值掩码只有边缘附近存在空间梯度；距离场让落在道路外的轨迹航点无论离边界多远都能获得连续回拉信号。
+    """
+    check_drivable_mask(drivable, bev)
+    outside = np.ascontiguousarray(drivable < 0.5, dtype=np.uint8)
+    if not bool((outside == 0).any()):
+        diagonal_m = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)
+        return np.full((bev.height, bev.width), diagonal_m, dtype=np.float32)
+
+    distance_px = cv2.distanceTransform(outside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    x_cell_m = (bev.x_max - bev.x_min) / bev.height
+    y_cell_m = (bev.y_max - bev.y_min) / bev.width
+    meters_per_pixel = 0.5 * (x_cell_m + y_cell_m)
+    return (distance_px * meters_per_pixel).astype(np.float32)
 
 
 def _parse_polylines(arr):

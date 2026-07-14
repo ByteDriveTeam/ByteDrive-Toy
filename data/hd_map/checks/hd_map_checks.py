@@ -13,3 +13,10 @@ def check_polylines(polylines, path):
     """校验对象: HdMap 解析结果 —— 至少解析出一条车道折线，否则地图为空/结构不符。"""
     if not polylines:
         raise ValueError("HD 地图 {} 未解析出任何车道折线（结构可能与预期不符）。".format(path))
+
+
+def check_drivable_mask(drivable, bev):
+    """校验对象: offroad_distance_field 入参 —— 可行驶掩码形状须与 BEV 分辨率一致。"""
+    expected = (bev.height, bev.width)
+    if tuple(drivable.shape) != expected:
+        raise ValueError("drivable 期望形状 {}，实际 {}。".format(expected, tuple(drivable.shape)))

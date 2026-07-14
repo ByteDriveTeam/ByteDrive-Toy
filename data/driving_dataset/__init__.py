@@ -1,4 +1,4 @@
-"""驾驶模型单帧数据集：RGB/内外参/速度/目标点 + 轨迹/风险/可行驶/分布/视场 GT。公开 API 重导出入口。
+"""驾驶模型单帧数据集：逐帧产模型输入、驾驶 GT 及 HDMap 越界距离场。公开 API 重导出入口。
 
 模块: data/driving_dataset/__init__.py
 依赖: data.driving_dataset.driving_dataset

@@ -1,4 +1,4 @@
-"""驾驶模型单帧数据集：逐帧产 RGB/内外参/自车速度/目标点，及轨迹/风险/可行驶/分布场与视场 GT。
+"""驾驶模型单帧数据集：逐帧产模型输入、驾驶 GT 及 HDMap 越界距离场。
 
 模块: data/driving_dataset/driving_dataset.py
 依赖: torch, numpy, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
@@ -17,7 +17,8 @@
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界
       位姿经 world_to_ego 变到当前 ego 系（帧间隔即采集节拍）；自车速度由世界速度旋转到 ego 系（前向 vx、右向
       vy）；目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
-      风险场由 GT 深度反投影包络，可行驶场由 HD 地图按位姿栅格化，分布场由 GT 航点高斯软化，视场掩码为常量
+      风险场由 GT 深度反投影包络，可行驶场由 HD 地图按位姿栅格化，并转成道路外距离场供轨迹越界损失使用；
+      分布场由 GT 航点高斯软化，视场掩码为常量
       （构造期预算）。全帧 ego 位姿按场景缓存（[F,6]），供轨迹与目标点复用、避免逐样本重复读 LMDB。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
       vis.data_vis.geometry / data.driving_targets。
@@ -33,7 +34,7 @@ import torch
 from config.schema import Config
 from data import driving_targets as dt
 from data.driving_dataset.checks.driving_dataset_checks import check_camera_calib
-from data.hd_map import HdMap
+from data.hd_map import HdMap, offroad_distance_field
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
 from vis.data_vis.geometry import transform_points, world_to_ego
 
@@ -89,6 +90,7 @@ class DrivingDataset(SingleFrameSceneBase):
         depth = np.ascontiguousarray(frame["depth"][cam]).astype(np.float32)
         risk = dt.risk_field(depth, intrinsics4, extrinsic6, self._bev, self._fov, self._depth_max_m)
         drivable = self._hd_map(meta["map"]).drivable_bev(pose, self._bev, self._cfg_data.lane_half_width_m)
+        offroad_distance = offroad_distance_field(drivable, self._bev)
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
 
         return {
@@ -102,6 +104,7 @@ class DrivingDataset(SingleFrameSceneBase):
             "sector": torch.tensor(sector, dtype=torch.long),
             "risk": torch.from_numpy(risk),
             "drivable": torch.from_numpy(drivable),
+            "offroad_distance": torch.from_numpy(offroad_distance),
             "distribution": torch.from_numpy(distribution),
             "inview": self._inview,
         }

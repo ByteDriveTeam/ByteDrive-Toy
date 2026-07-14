@@ -1,11 +1,12 @@
-"""多任务监督损失：感知（语义/深度/梯度/范围）与驾驶（风险/可行驶 BCE + 分布能量 + WTA 轨迹 + 置信度）。
+"""多任务监督损失：感知多任务与驾驶三场、轨迹、置信度及 HDMap 越界约束。
 
 模块: train/losses/losses.py
 依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
 读取配置:
     model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_grad / depth_range
-    train.driving_loss_weights.trajectory / confidence / distribution / risk / drivable
+    train.driving_loss_weights.trajectory / confidence / distribution / risk / drivable / boundary
+    model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
 对外接口:
     - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])          # 感知总损失与各分量
     - compute_driving_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])  # 驾驶总损失与各分量
@@ -116,7 +117,8 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
     占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹为 winner-take-all 多模态：每样本 GT 按
     其扇区选中对应模态回归（SmoothL1，仅有效航点），并以该扇区为标签对置信度做交叉熵。视场外/无有效前向 GT
-    的样本自动被掩码剔除。
+    的样本自动被掩码剔除。越界损失把全部候选轨迹航点投影到 HDMap 单侧距离场，道路内为零、道路外按米制
+    距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
     """
     check_driving_losses_io(outputs, targets)
     w = cfg.train.driving_loss_weights
@@ -128,11 +130,14 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     trajectory, confidence = _trajectory_losses(
         outputs["trajectories"], outputs["confidence"],
         targets["trajectory"], targets["traj_valid"], targets["sector"])
+    boundary = _boundary_loss(
+        outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
 
     total = (w.risk * risk + w.drivable * drivable + w.distribution * distribution
-             + w.trajectory * trajectory + w.confidence * confidence)
+             + w.trajectory * trajectory + w.confidence * confidence + w.boundary * boundary)
     components = {"risk": risk, "drivable": drivable, "distribution": distribution,
-                  "trajectory": trajectory, "confidence": confidence, "total": total}
+                  "trajectory": trajectory, "confidence": confidence, "boundary": boundary,
+                  "total": total}
     return total, components
 
 
@@ -181,3 +186,22 @@ def _trajectory_losses(trajectories: torch.Tensor, confidence: torch.Tensor, gt:
     trajectory = per_wp.sum() / wp_mask.sum().clamp_min(_MASK_EPS)
     confidence = F.cross_entropy(confidence[sample_valid], sector[sample_valid])
     return trajectory, confidence
+
+
+def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor, bev) -> torch.Tensor:
+    """HDMap 轨迹越界损失：可微采样道路外距离场，并惩罚超出 BEV 覆盖范围的部分。
+
+    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸到道路外。`grid_sample` 的最后一维依次是列、行，
+    因而 ego 的 `(x前向, y右向)` 要换成 `(y归一列, x反向归一行)`。
+    """
+    x, y = trajectories[..., 0], trajectories[..., 1]
+    grid_col = 2.0 * (y - bev.y_min_m) / (bev.y_max_m - bev.y_min_m) - 1.0
+    grid_row = 1.0 - 2.0 * (x - bev.x_min_m) / (bev.x_max_m - bev.x_min_m)
+    grid = torch.stack((grid_col, grid_row), dim=-1)               # [B,M,T,2]
+    sampled = F.grid_sample(
+        offroad_distance[:, None], grid, mode="bilinear", padding_mode="border",
+        align_corners=False)[:, 0]                                 # [B,M,T]，单位米
+
+    x_over = F.relu(bev.x_min_m - x) + F.relu(x - bev.x_max_m)
+    y_over = F.relu(bev.y_min_m - y) + F.relu(y - bev.y_max_m)
+    return (sampled + x_over + y_over).mean()
