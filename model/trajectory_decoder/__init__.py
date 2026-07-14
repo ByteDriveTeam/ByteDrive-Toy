@@ -1,4 +1,4 @@
-"""轨迹解码器：8 扇区 Token 查询 BEV+速度 → 多模态轨迹 + 置信度。公开 API 重导出入口。
+"""轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列。公开 API 重导出入口。
 
 模块: model/trajectory_decoder/__init__.py
 依赖: model.trajectory_decoder.trajectory_decoder

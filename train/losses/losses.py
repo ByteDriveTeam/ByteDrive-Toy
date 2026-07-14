@@ -1,11 +1,11 @@
-"""多任务监督损失：感知多任务与驾驶三场、轨迹、置信度及 HDMap 越界约束。
+"""多任务监督损失：感知任务与驾驶三场、轨迹、置信度、行为多标签及 HDMap 越界约束。
 
 模块: train/losses/losses.py
 依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
 读取配置:
     model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_grad / depth_range
-    train.driving_loss_weights.trajectory / confidence / distribution / risk / drivable / boundary
+    train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable / boundary
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
 对外接口:
     - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])          # 感知总损失与各分量
@@ -116,7 +116,8 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     风险/可行驶为占据场（{0,1} 硬标签），在视场内掩码下做 BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
     分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
     占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹为 winner-take-all 多模态：每样本 GT 按
-    其扇区选中对应模态回归（SmoothL1，仅有效航点），并以该扇区为标签对置信度做交叉熵。视场外/无有效前向 GT
+    其扇区选中对应模态回归（SmoothL1，仅有效航点），并以该扇区为标签对置信度做交叉熵；行为固定八类彼此
+    独立，以 BCE-with-logits 监督同一帧同时激活的多个类别。视场外/无有效前向 GT
     的样本自动被掩码剔除。越界损失把全部候选轨迹航点投影到 HDMap 单侧距离场，道路内为零、道路外按米制
     距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
     """
@@ -130,14 +131,16 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     trajectory, confidence = _trajectory_losses(
         outputs["trajectories"], outputs["confidence"],
         targets["trajectory"], targets["traj_valid"], targets["sector"])
+    behavior = F.binary_cross_entropy_with_logits(outputs["behavior_logits"], targets["behavior"])
     boundary = _boundary_loss(
         outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
 
     total = (w.risk * risk + w.drivable * drivable + w.distribution * distribution
-             + w.trajectory * trajectory + w.confidence * confidence + w.boundary * boundary)
+             + w.trajectory * trajectory + w.confidence * confidence + w.behavior * behavior
+             + w.boundary * boundary)
     components = {"risk": risk, "drivable": drivable, "distribution": distribution,
-                  "trajectory": trajectory, "confidence": confidence, "boundary": boundary,
-                  "total": total}
+                  "trajectory": trajectory, "confidence": confidence, "behavior": behavior,
+                  "boundary": boundary, "total": total}
     return total, components
 
 

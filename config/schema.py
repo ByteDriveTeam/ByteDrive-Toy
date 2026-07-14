@@ -279,8 +279,13 @@ class TrajectoryCfg:
 
 
 @dataclass
+class BehaviorCfg:
+    num_classes: int               # 固定语义顺序的多标签行为类别数
+
+
+@dataclass
 class DrivingCfg:
-    """驾驶系统（复用感知主干 → BEV → 三场 + 多模态轨迹）网络参数。"""
+    """驾驶系统（复用感知主干 → BEV → 三场 + 多模态轨迹/行为）网络参数。"""
     work_dim: int                  # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: bool        # 是否冻结感知主干（复用其预训练表征）
     neck_num_residual_blocks: int  # driving_neck 融合后 2D 残差块层数
@@ -291,6 +296,7 @@ class DrivingCfg:
     bev_encoder: BevEncoderCfg
     fields: FieldsCfg
     trajectory: TrajectoryCfg
+    behavior: BehaviorCfg
 
 
 @dataclass
@@ -342,6 +348,17 @@ class DatasetCfg:
 
 
 @dataclass
+class BehaviorTargetCfg:
+    stationary_speed_mps: float
+    acceleration_threshold_mps2: float
+    turn_angle_deg: float
+    traffic_light_semantic_tag: int
+    traffic_light_match_radius_m: float
+    traffic_light_seg_margin_px: int
+    traffic_light_min_pixels: int
+
+
+@dataclass
 class DrivingDatasetCfg:
     """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
     scene_root: str
@@ -352,6 +369,7 @@ class DrivingDatasetCfg:
     lane_half_width_m: float      # 车道中心线缓冲半宽（栅格可行驶区域用）
     target_min_m: float           # 目标点采样距离窗口下界（沿未来轨迹搜近端引导点）
     target_max_m: float           # 目标点采样距离窗口上界
+    behavior: BehaviorTargetCfg
 
 
 @dataclass
@@ -372,6 +390,7 @@ class LossWeightsCfg:
 class DrivingLossWeightsCfg:
     trajectory: float             # WTA 多模态轨迹回归
     confidence: float             # 模态置信度分类
+    behavior: float               # 行为多标签分类
     distribution: float           # 轨迹分布场
     risk: float                   # 风险场
     drivable: float               # 可行驶区域场
@@ -608,6 +627,19 @@ def _validate_data(data):
         "data.driving.map_name_template 必须含 {map} 占位（按场景地图名解析 HD 地图文件）"
     assert 0 < dr.target_min_m < dr.target_max_m, \
         "data.driving 需满足 0 < target_min_m < target_max_m（目标点采样窗口）"
+    # 校验对象: data.driving.behavior —— 行为标签判定阈值与 Seg 语义参数
+    bh = dr.behavior
+    assert bh.stationary_speed_mps >= 0, \
+        "data.driving.behavior.stationary_speed_mps 必须 >= 0"
+    assert bh.acceleration_threshold_mps2 > 0, \
+        "data.driving.behavior.acceleration_threshold_mps2 必须 > 0"
+    assert 0 < bh.turn_angle_deg < 90, \
+        "data.driving.behavior.turn_angle_deg 必须在 (0,90)"
+    assert bh.traffic_light_semantic_tag >= 0, \
+        "data.driving.behavior.traffic_light_semantic_tag 必须 >= 0"
+    assert bh.traffic_light_match_radius_m > 0 and bh.traffic_light_seg_margin_px >= 0 \
+        and bh.traffic_light_min_pixels > 0, \
+        "data.driving.behavior 交通灯匹配半径/Seg 容差/最少像素数取值非法"
 
 
 def _validate_train(train):
@@ -622,7 +654,7 @@ def _validate_train(train):
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
-               ("trajectory", "confidence", "distribution", "risk", "drivable", "boundary")), \
+               ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable", "boundary")), \
         "train.driving_loss_weights.* 必须 >= 0"
 
 
@@ -668,6 +700,9 @@ def _validate_driving(dv):
         "model.driving.trajectory.num_heads 必须 > 0 且整除 work_dim"
     assert tj.velocity_norm_mps > 0, "model.driving.trajectory.velocity_norm_mps 必须 > 0"
     assert tj.waypoint_scale_m > 0, "model.driving.trajectory.waypoint_scale_m 必须 > 0"
+    # 校验对象: behavior.num_classes —— 固定对应八类行为语义，避免模型头与标签顺序漂移
+    assert dv.behavior.num_classes == 8, \
+        "model.driving.behavior.num_classes 必须为 8（固定行为语义顺序）"
 
 
 def _validate_bev_geometry(bev):

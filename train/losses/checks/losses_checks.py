@@ -3,10 +3,10 @@
 _REQUIRED_OUTPUTS = ("semantic", "depth")
 _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 
-_DRIVING_OUTPUTS = ("risk", "drivable", "distribution", "trajectories", "confidence")
+_DRIVING_OUTPUTS = ("risk", "drivable", "distribution", "trajectories", "confidence", "behavior_logits")
 _DRIVING_TARGETS = (
     "risk", "drivable", "offroad_distance", "distribution", "inview",
-    "trajectory", "traj_valid", "sector",
+    "trajectory", "traj_valid", "sector", "behavior",
 )
 
 
@@ -24,10 +24,13 @@ def check_losses_io(outputs, targets):
 
 
 def check_driving_losses_io(outputs, targets):
-    """校验对象: compute_driving_losses 入参 —— 三场+轨迹+置信度输出及 HDMap 监督齐备。"""
+    """校验对象: compute_driving_losses 入参 —— 三场、轨迹/置信度、行为与 HDMap 监督齐备。"""
     missing_o = [k for k in _DRIVING_OUTPUTS if k not in outputs]
     missing_t = [k for k in _DRIVING_TARGETS if k not in targets]
     if missing_o:
         raise KeyError("driving outputs 缺少键: {}".format(missing_o))
     if missing_t:
         raise KeyError("driving targets 缺少键: {}".format(missing_t))
+    if outputs["behavior_logits"].shape != targets["behavior"].shape:
+        raise ValueError("behavior_logits 与 behavior 标签形状须一致，实际 {} / {}。".format(
+            tuple(outputs["behavior_logits"].shape), tuple(targets["behavior"].shape)))

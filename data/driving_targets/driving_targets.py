@@ -1,7 +1,7 @@
-"""驾驶监督目标编码（纯 numpy 函数）：BEV 几何、视场掩码、轨迹/扇区、风险场、轨迹分布场。
+"""驾驶监督目标编码（纯 numpy 函数）：BEV/轨迹/三场及八类多标签行为。
 
 模块: data/driving_targets/driving_targets.py
-依赖: numpy, math, vis.data_vis.geometry(transform_matrix/world_to_ego/transform_points),
+依赖: numpy, math, vis.data_vis.geometry,
       data.driving_targets.checks.driving_targets_checks
 读取配置: —（BEV 量程/分辨率/视场/K/σ 等由调用方以参数传入，来源 config.model.driving 与 config.data.driving）
 对外接口:
@@ -9,14 +9,18 @@
     - bev_cell_centers(bev) -> (H,W,2)                                    # 每 cell 中心 ego xy
     - ego_xy_to_pixel(xy, bev) -> (rows, cols)                           # ego xy → BEV 像素(行,列)
     - inview_mask(bev, fov_deg) -> (H,W) float32                         # 前向视场内=1
+    - speed_accelerations(world_velocities, sim_times) -> (F,) float32   # 逐帧标量速度加速度
     - trajectory_targets(future_poses6, current_pose6, num_waypoints) -> (waypoints(K,2), valid(K))
     - sector_of(waypoints, valid, fov_deg, num_modes) -> int            # GT 所属前向扇区（-1=无效）
+    - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
     - risk_field(depth_m, intrinsics4, extrinsic6, bev, fov_deg, depth_max_m) -> (H,W) float32  # 包络外=风险
     - distribution_field(waypoints, valid, bev, sigma_m) -> (H,W) float32           # GT 航点高斯软占据
 说明: BEV 为 ego 前向单目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
       vis.data_vis.geometry（CARLA 左手系，已测），故 data 侧不重复实现投影。风险场把全部深度像素反投影到 ego
       BEV 得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
-      轨迹分布场对每个 GT 航点打各向同性高斯并取逐 cell 最大，得平滑正样本场。全部向量化（§9）。
+      行为标签固定为「障碍停车、红灯停车、加速、直行、左转、右转、减速、静止」：静止依据速度，纵向行为依据
+      帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent，红灯停车还要求
+      红灯静态框处于 BEV/视场并在其图像投影框内命中 Seg 交通灯像素。各类互不排斥，可同时为 1。
 """
 
 from __future__ import annotations
@@ -26,16 +30,41 @@ from collections import namedtuple
 
 import numpy as np
 
-from data.driving_targets.checks.driving_targets_checks import check_bev_params, check_depth_map
-from vis.data_vis.geometry import transform_matrix, transform_points, world_to_ego
+from data.driving_targets.checks.driving_targets_checks import (
+    check_behavior_inputs,
+    check_bev_params,
+    check_depth_map,
+    check_motion_sequence,
+)
+from vis.data_vis.geometry import (
+    bbox_corners,
+    intrinsic_matrix,
+    project_points,
+    transform_matrix,
+    transform_points,
+    world_to_camera,
+    world_to_ego,
+)
 
 
 __all__ = [
-    "BevParams", "bev_cell_centers", "ego_xy_to_pixel", "inview_mask",
-    "trajectory_targets", "sector_of", "risk_field", "distribution_field",
+    "BEHAVIOR_CLASSES", "BehaviorParams", "BevParams", "bev_cell_centers", "ego_xy_to_pixel",
+    "inview_mask", "speed_accelerations", "trajectory_targets", "sector_of", "behavior_targets",
+    "risk_field", "distribution_field",
 ]
 
 BevParams = namedtuple("BevParams", ["x_min", "x_max", "y_min", "y_max", "height", "width"])
+BehaviorParams = namedtuple("BehaviorParams", [
+    "stationary_speed_mps", "acceleration_threshold_mps2", "turn_angle_deg", "lane_half_width_m",
+    "traffic_light_semantic_tag", "traffic_light_match_radius_m", "traffic_light_seg_margin_px",
+    "traffic_light_min_pixels",
+])
+
+# 下标即模型输出/训练标签的稳定语义契约，顺序与用户给出的八类完全一致。
+BEHAVIOR_CLASSES = (
+    "obstacle_stop", "red_light_stop", "accelerating", "straight",
+    "left_turn", "right_turn", "decelerating", "stationary",
+)
 
 
 def bev_cell_centers(bev: BevParams) -> np.ndarray:
@@ -67,6 +96,25 @@ def inview_mask(bev: BevParams, fov_deg: float) -> np.ndarray:
     half = math.radians(fov_deg) * 0.5
     angle = np.arctan2(y, np.maximum(x, 1e-3))
     return ((x > 0) & (np.abs(angle) <= half)).astype(np.float32)
+
+
+def speed_accelerations(world_velocities: np.ndarray, sim_times: np.ndarray) -> np.ndarray:
+    """由逐帧世界速度与仿真时间计算标量速度加速度 `(F,)`。
+
+    相邻帧先作一阶差分；内部帧取前后斜率均值，首尾使用单侧斜率。速度模长与坐标旋转无关，适合直接判定
+    加速/减速。时间戳异常或重复的边对应斜率置零，避免产生无穷标签。
+    """
+    check_motion_sequence(world_velocities, sim_times)
+    speeds = np.linalg.norm(world_velocities[:, :2], axis=1)
+    if len(speeds) < 2:
+        return np.zeros_like(speeds, dtype=np.float32)
+    delta_t = np.diff(sim_times)
+    slopes = np.divide(np.diff(speeds), delta_t, out=np.zeros_like(delta_t), where=delta_t > 0)
+    accelerations = np.empty_like(speeds)
+    accelerations[0], accelerations[-1] = slopes[0], slopes[-1]
+    if len(speeds) > 2:
+        accelerations[1:-1] = 0.5 * (slopes[:-1] + slopes[1:])
+    return accelerations.astype(np.float32)
 
 
 def trajectory_targets(future_poses6, current_pose6, num_waypoints: int):
@@ -105,6 +153,116 @@ def sector_of(waypoints: np.ndarray, valid: np.ndarray, fov_deg: float, num_mode
         return -1
     frac = (angle + half) / (2.0 * half)                          # [0,1]
     return int(min(max(int(frac * num_modes), 0), num_modes - 1))
+
+
+def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,
+                     acceleration_mps2: float, bboxes, traffic_lights, traffic_light_states,
+                     static_bboxes, semantic: np.ndarray, current_pose6, intrinsics,
+                     camera_extrinsic6, bev: BevParams, fov_deg: float,
+                     params: BehaviorParams) -> np.ndarray:
+    """生成固定顺序的八类行为多热标签 `(8,)`。
+
+    标签顺序见 `BEHAVIOR_CLASSES`。转向三类按最远有效未来航点判定且至多激活一个；加速/减速由标量速度
+    加速度判定；静止可与转向、停车原因同时存在。仅静止时判停车原因：动态 Agent 的 3D 框变到 ego-BEV 后
+    与前方本车道走廊相交即障碍停车；交通灯须逐帧状态为 red，静态灯框位于 BEV/相机视场，并且其图像投影框
+    内存在足量 Seg 交通灯像素才算红灯停车。两种原因互不排斥。
+    """
+    check_behavior_inputs(waypoints, valid, semantic)
+    labels = np.zeros(len(BEHAVIOR_CLASSES), dtype=np.float32)
+    stationary = speed_mps <= params.stationary_speed_mps
+    labels[2] = float(acceleration_mps2 >= params.acceleration_threshold_mps2)
+    labels[6] = float(acceleration_mps2 <= -params.acceleration_threshold_mps2)
+    labels[7] = float(stationary)
+    _set_direction_labels(labels, waypoints, valid, params.turn_angle_deg)
+
+    if stationary:
+        labels[0] = float(_has_front_agent(
+            bboxes, current_pose6, bev, params.lane_half_width_m))
+        labels[1] = float(_has_visible_red_light(
+            traffic_lights, traffic_light_states, static_bboxes, semantic, current_pose6,
+            intrinsics, camera_extrinsic6, bev, fov_deg, params))
+    return labels
+
+
+def _set_direction_labels(labels, waypoints, valid, turn_angle_deg):
+    """按最远有效前向航点设置直行/左转/右转之一；CARLA ego 系 y 正向为右。"""
+    idx = np.nonzero(valid > 0)[0]
+    if idx.size == 0:
+        return
+    x, y = waypoints[idx[-1]]
+    if x <= 0:
+        return
+    angle_deg = math.degrees(math.atan2(float(y), float(x)))
+    labels[3] = float(abs(angle_deg) <= turn_angle_deg)
+    labels[4] = float(angle_deg < -turn_angle_deg)
+    labels[5] = float(angle_deg > turn_angle_deg)
+
+
+def _has_front_agent(bboxes, current_pose6, bev, lane_half_width_m):
+    """动态 Agent 框在 ego-BEV 前方且与本车道横向走廊相交。"""
+    agents = [box for box in bboxes if box.get("semantic") in ("vehicle", "pedestrian")]
+    if not agents:
+        return False
+    w2e = world_to_ego(current_pose6)
+    corners = np.stack([transform_points(bbox_corners(box), w2e) for box in agents])
+    centers = transform_points(np.array([box["location"] for box in agents]), w2e)
+    x_min, x_max = corners[:, :, 0].min(1), corners[:, :, 0].max(1)
+    y_min, y_max = corners[:, :, 1].min(1), corners[:, :, 1].max(1)
+    in_bev = ((centers[:, 0] > max(bev.x_min, 0.0)) & (centers[:, 0] <= bev.x_max)
+              & (centers[:, 1] >= bev.y_min) & (centers[:, 1] <= bev.y_max))
+    overlaps_lane = ((x_max > max(bev.x_min, 0.0)) & (x_min <= bev.x_max)
+                     & (y_max >= -lane_half_width_m) & (y_min <= lane_half_width_m))
+    return bool(np.any(in_bev & overlaps_lane))
+
+
+def _has_visible_red_light(traffic_lights, states, static_bboxes, semantic, current_pose6,
+                           intrinsics, camera_extrinsic6, bev, fov_deg, params):
+    """红灯 actor 状态 + 静态框视场/BEV + 投影框 Seg 像素联合判定可见红灯。"""
+    red_ids = {state["id"] for state in states if state.get("state") == "red"}
+    red_lights = [light for light in traffic_lights if light.get("id") in red_ids]
+    light_boxes = [box for box in static_bboxes if box.get("semantic") == "traffic_light"]
+    if not red_lights or not light_boxes:
+        return False
+
+    red_xy = np.array([light["transform"][:2] for light in red_lights], dtype=np.float64)
+    box_xy = np.array([box["location"][:2] for box in light_boxes], dtype=np.float64)
+    match_distance = np.linalg.norm(box_xy[:, None] - red_xy[None], axis=-1).min(axis=1)
+    matched = [box for box, distance in zip(light_boxes, match_distance)
+               if distance <= params.traffic_light_match_radius_m]
+    if not matched:
+        return False
+
+    centers_ego = transform_points(np.array([box["location"] for box in matched]), world_to_ego(current_pose6))
+    half_fov = math.radians(fov_deg) * 0.5
+    bearings = np.arctan2(centers_ego[:, 1], np.maximum(centers_ego[:, 0], 1e-3))
+    in_bev_view = ((centers_ego[:, 0] > max(bev.x_min, 0.0)) & (centers_ego[:, 0] <= bev.x_max)
+                   & (centers_ego[:, 1] >= bev.y_min) & (centers_ego[:, 1] <= bev.y_max)
+                   & (np.abs(bearings) <= half_fov))
+    candidates = [box for box, visible in zip(matched, in_bev_view) if visible]
+    if not candidates:
+        return False
+
+    w2c = world_to_camera(current_pose6, camera_extrinsic6)
+    k = intrinsic_matrix(intrinsics)
+    return any(_bbox_hits_semantic(
+        box, semantic, w2c, k, params.traffic_light_semantic_tag,
+        params.traffic_light_seg_margin_px, params.traffic_light_min_pixels) for box in candidates)
+
+
+def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixels):
+    """静态框投影矩形内命中足量指定 Seg 标签；完全在相机后方/画外则为假。"""
+    uv, depth = project_points(bbox_corners(box), w2c, k)
+    uv = uv[depth > 0]
+    if len(uv) == 0:
+        return False
+    height, width = semantic.shape
+    x0, y0 = np.floor(uv.min(0)).astype(np.int64) - margin_px
+    x1, y1 = np.ceil(uv.max(0)).astype(np.int64) + margin_px
+    x0, y0 = max(int(x0), 0), max(int(y0), 0)
+    x1, y1 = min(int(x1), width - 1), min(int(y1), height - 1)
+    if x0 > x1 or y0 > y1:
+        return False
+    return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
 
 
 # 风险场方位角分箱数（envelope 角分辨率；与相机水平像素数同量级足以贴合外缘线）

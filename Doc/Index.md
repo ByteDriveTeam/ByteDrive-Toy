@@ -21,9 +21,9 @@
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
 - [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、SceneReader 惰性缓存、RGB 归一化（感知与驾驶复用）
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
-- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（纯 numpy）：BEV 几何、视场掩码、轨迹/扇区、风险场、轨迹分布场
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（纯 numpy 函数）：BEV/轨迹/三场及八类多标签行为
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线，生成 BEV 可行驶掩码及越界距离场
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型单帧数据集：逐帧产模型输入、驾驶 GT 及 HDMap 越界距离场
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型单帧数据集：逐帧产模型输入、三场/轨迹/行为 GT 及 HDMap 越界距离场
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -73,13 +73,13 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
 - [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：初始查询经级联交叉注意力查询图像特征，再过 ConvNeXt2D 提炼为 BEV 特征
 - [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 轨迹解码器：8 扇区 Token 查询 BEV 特征（并入自车速度）→ 多模态轨迹 + 置信度
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 单帧开环驾驶模型：复用感知主干 → BEV → 风险/可行驶/轨迹分布三场 + 多模态轨迹
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列，输出轨迹、置信度与多标签行为
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 单帧开环驾驶模型：复用感知主干 → BEV → 三场 + 多模态轨迹与多标签行为
 
 ## train/ — 训练 / 评估循环
 
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知多任务与驾驶三场、轨迹、置信度及 HDMap 越界约束
+- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知任务与驾驶三场、轨迹、置信度、行为多标签及 HDMap 越界约束
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化可训练参数，冻结骨干不纳入
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
 - [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重

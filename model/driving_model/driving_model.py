@@ -1,4 +1,4 @@
-"""单帧开环驾驶模型：复用感知主干 → 图像特征 → BEV → 风险/可行驶/轨迹分布三场 + 多模态轨迹。
+"""单帧开环驾驶模型：复用感知主干 → BEV → 三场 + 多模态轨迹与多标签行为。
 
 模块: model/driving_model/driving_model.py
 依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionModel,
@@ -12,12 +12,13 @@
 对外接口:
     - DrivingModel(cfg) -> nn.Module
         forward(rgb, intrinsics, extrinsics, ego_velocity, target_point) -> dict
-            # risk/drivable/distribution [B,1,Hf,Wf] + trajectories [B,M,T,2] + confidence [B,M]
+            # 三场 [B,1,Hf,Wf] + trajectories [B,M,T,2] + confidence [B,M] + behavior_logits [B,8]
         trainable_parameters() -> Iterator[nn.Parameter]   # 排除冻结感知主干
 说明: 感知 = 驾驶的前端子任务：PerceptionModel 提供「双头共享 trunk 末端特征 + DINOv3 原始特征」，driving_neck
       融合并注入 frustum 几何位置编码得图像特征；target_point_embedding 由 ego 目标点生成初始 BEV 查询，
       bev_encoder 用交叉注意力从图像特征聚合信息并 ConvNeXt 提炼为 BEV 特征；field_decoder 上采样解码三场，
-      trajectory_decoder 取（上采样前的）BEV 特征并入自车速度解码多模态轨迹。前向单目，自车位于 BEV 下方中心。
+      trajectory_decoder 取（上采样前的）BEV 特征并入自车速度，以同一 Token 序列联合解码多模态轨迹与多标签
+      行为。前向单目，自车位于 BEV 下方中心。
       混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
       freeze_perception 为真时感知主干冻结且在 no_grad 下前向，梯度只回传驾驶各件（复用其深度/分割预训练表征）。
 """
@@ -53,7 +54,8 @@ class DrivingModel(nn.Module):
 
     Shape:
         rgb `[B,3,H,W]`、intrinsics `[B,4]`、extrinsics `[B,6]`、ego_velocity `[B,2]`、target_point `[B,2]`。
-        输出 dict：risk/drivable/distribution `[B,1,Hf,Wf]`、trajectories `[B,M,T,2]`、confidence `[B,M]`。
+        输出 dict：risk/drivable/distribution `[B,1,Hf,Wf]`、trajectories `[B,M,T,2]`、confidence `[B,M]`、
+        behavior_logits `[B,8]`。
     """
 
     def __init__(self, cfg: Config) -> None:
@@ -108,7 +110,7 @@ class DrivingModel(nn.Module):
 
     def forward(self, rgb: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
                 ego_velocity: torch.Tensor, target_point: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """单帧前向：图像特征 → BEV → 三场 + 多模态轨迹。"""
+        """单帧前向：图像特征 → BEV → 三场 + 多模态轨迹/行为。"""
         check_driving_inputs(rgb, intrinsics, extrinsics, ego_velocity, target_point)
         device = rgb.device
 

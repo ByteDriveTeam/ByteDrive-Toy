@@ -1,4 +1,4 @@
-"""单帧开环驾驶模型：复用感知主干 → BEV → 三场 + 多模态轨迹。公开 API 重导出入口。
+"""单帧开环驾驶模型：复用感知主干 → BEV → 三场 + 多模态轨迹与多标签行为。公开 API 重导出入口。
 
 模块: model/driving_model/__init__.py
 依赖: model.driving_model.driving_model

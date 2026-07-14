@@ -181,7 +181,7 @@ model:
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
   # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → BEV 交叉注意力
-  # → ConvNeXt → 风险/可行驶/轨迹分布三场 + 8 扇区多模态轨迹。感知 = 本驾驶系统的前端子任务。
+  # → ConvNeXt → 风险/可行驶/轨迹分布三场 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
@@ -244,6 +244,10 @@ model:
       velocity_norm_mps: 15.0    # 自车速度归一尺度（m/s）
       waypoint_scale_m: 1.0      # 航点回归固定尺度（米）：Linear 原始输出乘此值，使初值即在米制量级、加速收敛
 
+    # 行为多标签分类 Token：与 8 个轨迹 Token 拼成同一注意力序列
+    behavior:
+      num_classes: 8             # 障碍停车/红灯停车/加速/直行/左转/右转/减速/静止
+
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
 # ============================================================
@@ -257,7 +261,7 @@ data:
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
 
-  # 驾驶数据集：复用感知单帧读取，另产轨迹/风险/可行驶/分布场 GT 与内外参/速度/目标点。
+  # 驾驶数据集：复用感知单帧读取，另产轨迹/行为/风险/可行驶/分布场 GT 与内外参/速度/目标点。
   # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
   driving:
     scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
@@ -268,6 +272,14 @@ data:
     lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
     target_min_m: 16.0        # 目标点：沿未来自车轨迹搜距当前 16~32m 的点随机取一，作近端导航引导（增强鲁棒性）
     target_max_m: 32.0
+    behavior:
+      stationary_speed_mps: 0.2          # 速度不高于此值视为静止/停车
+      acceleration_threshold_mps2: 0.3   # 加速与减速标签的加速度绝对值阈值
+      turn_angle_deg: 10.0                # 最远有效航点方位角超过此值才标左/右转，否则直行
+      traffic_light_semantic_tag: 18      # CARLA CityScapes 交通灯语义标签
+      traffic_light_match_radius_m: 1.0   # 静态交通灯框与灯 actor 的世界平面匹配半径
+      traffic_light_seg_margin_px: 6      # 远距小目标投影框向外扩张像素，吸收标定/栅格取整误差
+      traffic_light_min_pixels: 1         # 投影框内至少命中多少个 Seg 交通灯像素才算可见
 
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
@@ -291,11 +303,12 @@ train:
     depth_grad: 1.0          # 深度空间梯度（相邻像素差）SmoothL1，监督边界/结构，不加距离权
     depth_range: 0.5
 
-  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 轨迹分布能量 / 风险场 / 可行驶场 / HDMap 越界距离
+  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 行为多标签 / 三场 / HDMap 越界距离
   # 注：distribution 为空间 softmax 交叉熵（能量式），量级天然 ~ln(视场格数)≈11，故权重取小以与 BCE 场平衡
   driving_loss_weights:
     trajectory: 1.0
     confidence: 0.5
+    behavior: 1.0
     distribution: 0.1
     risk: 1.0
     drivable: 1.0

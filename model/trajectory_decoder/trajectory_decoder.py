@@ -1,4 +1,4 @@
-"""轨迹解码器：8 扇区 Token 查询 BEV 特征（并入自车速度）→ 交叉+自注意力 → 多模态轨迹 + 置信度。
+"""轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列，输出轨迹、置信度与多标签行为。
 
 模块: model/trajectory_decoder/trajectory_decoder.py
 依赖: torch, config.schema.DrivingCfg, model.attention.(CrossAttentionBlock, SelfAttentionBlock),
@@ -9,15 +9,17 @@
     model.driving.attention.mlp_ratio
     model.driving.trajectory.num_modes / num_waypoints / token_mlp_hidden / cross_layers / self_layers /
         num_heads / velocity_norm_mps / waypoint_scale_m
+    model.driving.behavior.num_classes
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
-        forward(bev_feat, ego_velocity) -> dict   # trajectories [B,M,T_wp,2] / confidence [B,M]
+        forward(bev_feat, ego_velocity) -> dict
+            # trajectories [B,M,T_wp,2] / confidence [B,M] / behavior_logits [B,C_behavior]
 说明: 前向视场按 fov 均分为 num_modes 个扇区（每扇区对应一条候选轨迹）。每个扇区 Token 的初始查询由该扇区
       内 BEV cell 的均值池化特征（关键点分布代理）拼上扇区中心朝向(sin,cos)，归一化后经 Linear→SiLU→Linear
-      得到。查询方为 M 个扇区 Token；被查询方为 BEV 特征展平的 Token 序列，并额外并入 1 个自车速度 Token
-      （ego 系 vx,vy 归一后线性编码）。级联 cross_layers 层 Pre-Norm 交叉注意力聚合 BEV 与速度信息，再过
-      self_layers 层 Pre-Norm 自注意力让各模态互相协调，最后线性头解码每条轨迹的 T_wp 个 ego 系 (x,y) 航点
-      与一个置信度 logit。自车位于 BEV 下方中心，仅前向视场内有意义。精度由外层 autocast 控制。
+      得到。一个可学习行为 Token 追加到 M 个轨迹 Token 后，组成统一查询序列；被查询方为 BEV 特征展平的 Token
+      序列，并额外并入 1 个自车速度 Token（ego 系 vx,vy 归一后线性编码）。级联 cross_layers 层 Pre-Norm
+      交叉注意力聚合 BEV 与速度信息，再过 self_layers 层 Pre-Norm 自注意力使轨迹/行为互相协调。轨迹 Token
+      解码航点与置信度；行为 Token 输出固定顺序的多标签 logits。精度由外层 autocast 控制。
 """
 
 from __future__ import annotations
@@ -36,14 +38,15 @@ __all__ = ["TrajectoryDecoder"]
 
 
 class TrajectoryDecoder(nn.Module):
-    """8 扇区 Token 多模态轨迹解码器。
+    """8 扇区轨迹 Token + 1 个行为 Token 的联合解码器。
 
     Args:
         cfg_driving: 驾驶配置 `config.model.driving`。
 
     Shape:
         bev_feat: `[B, work_dim, Hb, Wb]`，ego_velocity: `[B, 2]`（ego 系 vx,vy）；
-        输出: dict，trajectories `[B, num_modes, num_waypoints, 2]`、confidence `[B, num_modes]`。
+        输出: dict，trajectories `[B, num_modes, num_waypoints, 2]`、confidence `[B, num_modes]`、
+        behavior_logits `[B, num_behavior_classes]`。
     """
 
     def __init__(self, cfg_driving: DrivingCfg) -> None:
@@ -53,6 +56,7 @@ class TrajectoryDecoder(nn.Module):
         self.work_dim = d
         self.num_modes = tj.num_modes
         self.num_waypoints = tj.num_waypoints
+        self.num_behavior_classes = cfg_driving.behavior.num_classes
         self.velocity_norm = tj.velocity_norm_mps
         self.waypoint_scale = tj.waypoint_scale_m
 
@@ -66,6 +70,7 @@ class TrajectoryDecoder(nn.Module):
         self.token_mlp = nn.Sequential(
             nn.Linear(d + 2, tj.token_mlp_hidden), nn.SiLU(),
             nn.Linear(tj.token_mlp_hidden, d))
+        self.behavior_token = nn.Parameter(torch.zeros(1, 1, d))
         # 自车速度 KV Token 编码
         self.velocity_proj = nn.Linear(2, d)
 
@@ -78,13 +83,16 @@ class TrajectoryDecoder(nn.Module):
 
         self.waypoint_head = nn.Linear(d, tj.num_waypoints * 2)
         self.confidence_head = nn.Linear(d, 1)
+        self.behavior_head = nn.Linear(d, self.num_behavior_classes)
 
     def forward(self, bev_feat: torch.Tensor, ego_velocity: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """解码多模态轨迹与置信度。"""
+        """联合解码多模态轨迹、置信度与多标签行为 logits。"""
         check_trajectory_inputs(bev_feat, ego_velocity, self.work_dim)
         b = bev_feat.shape[0]
 
-        tokens = self._sector_tokens(bev_feat)                       # [B, M, D]
+        trajectory_tokens = self._sector_tokens(bev_feat)            # [B, M, D]
+        behavior_token = self.behavior_token.expand(b, -1, -1)       # [B, 1, D]
+        tokens = torch.cat((trajectory_tokens, behavior_token), dim=1)  # [B, M+1, D]
         # KV = BEV 特征 Token ⊕ 速度 Token
         bev_tokens = bev_feat.flatten(2).transpose(1, 2)             # [B, Hb*Wb, D]
         vel_token = self.velocity_proj(ego_velocity / self.velocity_norm).unsqueeze(1)  # [B,1,D]
@@ -96,10 +104,13 @@ class TrajectoryDecoder(nn.Module):
             tokens = layer(tokens)
 
         # 乘固定尺度使 Linear 原始输出（初值 ~N(0,1)）落到米制量级，加速收敛；轨迹恒在物理空间（米）
-        trajectories = self.waypoint_head(tokens).reshape(
+        trajectory_tokens, behavior_token = tokens[:, :self.num_modes], tokens[:, self.num_modes]
+        trajectories = self.waypoint_head(trajectory_tokens).reshape(
             b, self.num_modes, self.num_waypoints, 2) * self.waypoint_scale
-        confidence = self.confidence_head(tokens).squeeze(-1)        # [B, M]
-        return {"trajectories": trajectories, "confidence": confidence}
+        confidence = self.confidence_head(trajectory_tokens).squeeze(-1)  # [B, M]
+        behavior_logits = self.behavior_head(behavior_token)         # [B, C_behavior]
+        return {"trajectories": trajectories, "confidence": confidence,
+                "behavior_logits": behavior_logits}
 
     def _sector_tokens(self, bev_feat: torch.Tensor) -> torch.Tensor:
         """每扇区均值池化 BEV 特征 ⊕ 扇区朝向 → 归一 → MLP，得初始查询 Token `[B, M, D]`。"""
