@@ -67,8 +67,7 @@ class RMSNorm1d(nn.Module):
         """对 1D 序列执行 RMSNorm（均方根统计量在 FP32 计算，再回落输入精度）。"""
         orig_dtype = x.dtype
         x = x.float()
-        rms = x.pow(2).mean(1, keepdim=True).sqrt()
-        x = x / (rms + self.eps)
+        x = x * torch.rsqrt(x.pow(2).mean(1, keepdim=True) + self.eps)
         x = self.weight[:, None].float() * x
         return x.to(orig_dtype)
 
@@ -98,8 +97,7 @@ class RMSNorm2d(nn.Module):
         """对 2D 特征图执行 RMSNorm（均方根统计量在 FP32 计算，再回落输入精度）。"""
         orig_dtype = x.dtype
         x = x.float()
-        rms = x.pow(2).mean(1, keepdim=True).sqrt()
-        x = x / (rms + self.eps)
+        x = x * torch.rsqrt(x.pow(2).mean(1, keepdim=True) + self.eps)
         x = self.weight[:, None, None].float() * x
         return x.to(orig_dtype)
 
@@ -129,8 +127,7 @@ class RMSNorm3d(nn.Module):
         """对 3D 特征图执行 RMSNorm（均方根统计量在 FP32 计算，再回落输入精度）。"""
         orig_dtype = x.dtype
         x = x.float()
-        rms = x.pow(2).mean(1, keepdim=True).sqrt()
-        x = x / (rms + self.eps)
+        x = x * torch.rsqrt(x.pow(2).mean(1, keepdim=True) + self.eps)
         x = self.weight[:, None, None, None].float() * x
         return x.to(orig_dtype)
 

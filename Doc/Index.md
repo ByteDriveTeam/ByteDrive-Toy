@@ -6,8 +6,14 @@
 
 ## 规范与文档
 
+- [README.md](../README.md) — ByteDrive-Toy 项目总览：代码库、模型架构、数据系统、训练策略、权重下载与运行指南
 - [Doc/开发规范.md](开发规范.md) — 项目强制开发规范（文档/注释/配置/校验/简洁）
 - [Doc/Index.md](Index.md) — 本文档索引
+
+## assets/visualizations/ — README 展示素材
+
+- [assets/visualizations/scene_000000_n04.png](../assets/visualizations/scene_000000_n04.png) — 感知语义/深度预测与真值对照图
+- [assets/visualizations/scene_000032_n04.png](../assets/visualizations/scene_000032_n04.png) — 驾驶三场与多模态轨迹预测图
 
 ## config/ — 配置与校验（参数唯一来源）
 

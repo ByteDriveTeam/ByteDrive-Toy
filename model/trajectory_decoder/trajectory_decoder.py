@@ -70,7 +70,9 @@ class TrajectoryDecoder(nn.Module):
         self.token_mlp = nn.Sequential(
             nn.Linear(d + 2, tj.token_mlp_hidden), nn.SiLU(),
             nn.Linear(tj.token_mlp_hidden, d))
-        self.behavior_token = nn.Parameter(torch.zeros(1, 1, d))
+        # 可学习 Token 使用小幅随机初始化，避免所有样本从完全相同的零查询开始。
+        self.behavior_token = nn.Parameter(torch.empty(1, 1, d))
+        nn.init.normal_(self.behavior_token, mean=0.0, std=0.02)
         # 自车速度 KV Token 编码
         self.velocity_proj = nn.Linear(2, d)
 

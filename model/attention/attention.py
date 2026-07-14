@@ -37,8 +37,9 @@ class _RMSNormLast(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_dtype = x.dtype
         x = x.float()
-        rms = x.pow(2).mean(-1, keepdim=True).sqrt()
-        x = x / (rms + self.eps)
+        # eps 必须放在平方根内；sqrt(mean(x^2)) 在全零输入处的反向导数奇异，
+        # 即使前向结果有限也会产生 NaN 梯度。
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return (self.weight.float() * x).to(orig_dtype)
 
 
