@@ -1,8 +1,8 @@
 # ByteDrive-Toy
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的单目、单帧、开放环端到端驾驶研究原型</strong><br/>
-  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 三场建模 · 多模态轨迹与行为联合预测
+  <strong>面向 CARLA 合成数据的单目、双帧时序、开放环端到端驾驶研究原型</strong><br/>
+  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 道路线图 · 三场建模 · 多模态轨迹与行为联合预测
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 > [!IMPORTANT]
-> ByteDrive-Toy 当前是**单帧开放环（open-loop）研究代码**，不是可直接部署到真实车辆的完整自动驾驶系统。
+> ByteDrive-Toy 当前是**双帧时序开放环（open-loop）研究代码**，不是可直接部署到真实车辆的完整自动驾驶系统。
 > 主流程已经覆盖 CARLA 数据采集、感知预训练、BEV 驾驶训练和离线可视化；闭环行为克隆目录
 > `clone_loop/` 尚未实现，当前也没有在 CARLA 中接管车辆并完成闭环评测的入口。
 
@@ -53,19 +53,20 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 
 1. **感知预训练**：以冻结的 DINOv3 ViT-B/16 为视觉骨干，融合浅/中/深层 patch 特征，联合学习
    29 类语义分割与米制深度估计。
-2. **驾驶学习**：复用感知表征，加入相机 frustum 几何编码和导航目标点条件，把图像特征聚合到前向 BEV，
-   同时预测风险场、可行驶场、轨迹分布场、8 模态未来轨迹、模态置信度和 8 类行为标签。
+2. **驾驶学习**：复用感知表征，加入相机 frustum 几何编码和导航目标点条件，把当前图像聚合到前向 BEV，
+   再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、独立道路线图、8 模态未来轨迹、
+   模态置信度和 8 类行为标签。
 
 项目的核心特点如下。
 
 | 能力 | 当前实现 |
 | --- | --- |
-| 视觉输入 | 单目 `front` RGB，默认 `W×H = 384×192`，每帧独立推理 |
+| 视觉输入 | 当前帧 + 同场景上一帧单目 `front` RGB，默认 `W×H = 384×192`；首帧用 identity + 无效位 |
 | 视觉骨干 | 本地 DINOv3 ViT-B/16，参数永久冻结，提取第 3/6/12 层特征 |
 | 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
 | 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
 | BEV | 前向 `64 m × 64 m`，工作网格 `32×32`，场输出 `256×256` |
-| 驾驶输出 | 风险/可行驶/轨迹分布三场；8 模态 × 8 航点；8 类多标签行为 |
+| 驾驶输出 | 风险/可行驶/轨迹分布三场；5 类道路线图 + 有向切向量；8 模态 × 8 航点；8 类行为 |
 | 训练 | AdamW；BF16 主干 + FP32 末端/损失；感知模块差分小学习率 |
 | 数据 | CARLA 0.9.15；RGB/H.265 + 非 RGB/LMDB；严格同步多传感器采集 |
 | 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照 |
@@ -99,9 +100,10 @@ flowchart LR
 
 ![ByteDrive 感知预测可视化](assets/visualizations/scene_000000_n04.png)
 
-### 驾驶三场与多模态轨迹
+### 驾驶三场、道路线图与多模态轨迹
 
-下图由 `vis/driving_vis/run.py` 生成，包含 RGB/语义/深度、风险场、可行驶场、轨迹分布场及候选轨迹。
+下图由 `vis/driving_vis/run.py` 生成，包含 RGB/语义/深度、风险场、可行驶场、轨迹分布场及候选轨迹；
+道路线图作为模型独立输出参与训练，具体类别/方向编码见“独立道路线图”章节。
 `gt` 与 `pred` 行采用相同几何范围和着色口径，可直接观察 BEV 空间对齐情况。
 
 ![ByteDrive 驾驶预测可视化](assets/visualizations/scene_000032_n04.png)
@@ -133,7 +135,7 @@ flowchart TB
 
     subgraph LEARN["训练数据与模型"]
         DS1["PerceptionDataset"]
-        DS2["DrivingDataset<br/>轨迹/行为/三场/HDMap"]
+        DS2["DrivingDataset<br/>双帧/轨迹/行为/三场/道路线图/HDMap"]
         P["PerceptionModel"]
         D["DrivingModel"]
         DS1 --> P
@@ -144,7 +146,7 @@ flowchart TB
     subgraph VIS["离线检查"]
         V1["data_vis<br/>原始数据交互浏览"]
         V2["pred_vis<br/>语义/深度预测"]
-        V3["driving_vis<br/>三场/轨迹预测"]
+        V3["driving_vis<br/>三场/道路线图/轨迹预测"]
     end
 
     SIM --> W
@@ -166,19 +168,24 @@ flowchart TB
 
 ### 张量尺寸总览
 
-以下尺寸按默认配置和单目输入 `rgb [B,3,192,384]` 计算。
+以下尺寸按默认配置和当前/上一帧单目输入 `rgb, previous_rgb [B,3,192,384]` 计算。
 
 | 阶段 | 张量 | 默认形状 | 说明 |
 | --- | --- | --- | --- |
 | 输入 | RGB | `[B,3,192,384]` | BGR 解码后转 RGB，并做 DINO ImageNet 归一化 |
+| 输入 | `previous_rgb` | `[B,3,192,384]` | 同场景上一帧；首帧回退当前图像 |
 | DINO 多层特征 | `dino_features` | `[B,3,768,12,24]` | 3 个层级；patch size 16 |
 | 感知共享特征 | `trunk_feat` | `[B,384,12,24]` | 多层融合后经过 6 个残差块 |
 | 语义输出 | `semantic` | `[B,29,192,384]` | 29 类 logits |
 | 深度输出 | `depth` | `[B,2,192,384]` | ch0=Symlog 深度；ch1=量程内 logit |
 | 驾驶图像特征 | `image_feat` | `[B,384,12,24]` | trunk + DINO 原始末层 + frustum 几何 |
 | 初始 BEV 查询 | `bev_query` | `[B,384,32,32]` | BEV xyz 与目标点相对向量编码 |
-| BEV 特征 | `bev_feat` | `[B,384,32,32]` | 图像交叉注意力 + 8 个 ConvNeXt2D 块 |
+| 上一帧 BEV | `previous_bev` | `[B,384,32,32]` | 上一帧图像编码的 BEV 骨干末端输出 |
+| 历史几何 | `previous_geometry` | `[B,384,32,32]` | 上一帧 cell 坐标刚性变换到当前 ego 系后重新编码 |
+| BEV 特征 | `bev_feat` | `[B,384,32,32]` | 当前图像交叉注意力 + 历史 BEV 交叉注意力 + 8 个 ConvNeXt2D 块 |
 | 三场输出 | `risk/drivable/distribution` | 各 `[B,1,256,256]` | 三级 PixelShuffle，输出 logits |
+| 道路线图 | `lane_class_logits` | `[B,5,256,256]` | 独立解码器，5 类类别 logits |
+| 道路线方向 | `lane_direction` | `[B,2,256,256]` | 独立解码器，有向切向量原始输出 |
 | 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 8 个扇区模态、每条 8 个 `(x,y)` 米制航点 |
 | 模态置信度 | `confidence` | `[B,8]` | 未归一化 logits |
 | 行为输出 | `behavior_logits` | `[B,8]` | 8 类独立多标签 logits |
@@ -371,7 +378,7 @@ flowchart TB
 ```
 
 约定与 CARLA ego 坐标保持一致：`x` 向前，`y` 向右，`z` 向上；BEV 图像第 0 行对应远端，最后一行
-对应近端。三场只在 90° 前向视场内计主要监督，视场外通过 `inview` 掩码剔除。
+对应近端。三场和道路线图只在 90° 前向视场内计主要监督，视场外通过 `inview` 掩码剔除。
 
 ### 参数量与精度边界
 
@@ -380,9 +387,10 @@ flowchart TB
 | 模型 | 总参数 | 默认可训练参数 | 冻结参数 |
 | --- | ---: | ---: | ---: |
 | `PerceptionModel` | 92,101,391 | 6,440,975 | 85,660,416 |
-| `DrivingModel` | 109,970,383 | 24,309,967 | 85,660,416 |
+| `DrivingModel` | 116,816,246 | 31,155,830 | 85,660,416 |
 
-默认 `model.driving.freeze_perception=false`，因此驾驶训练的 24.31M 可训练参数包含感知融合/trunk/双头；
+默认 `model.driving.freeze_perception=false`，因此驾驶训练的 31.16M 可训练参数包含感知融合/trunk/双头、
+时序 BEV 与独立道路线图解码器；
 DINOv3 的 85.66M 参数始终冻结。若设为 `true`，感知子模块也会完全冻结。
 
 混合精度边界不是由训练循环隐式决定，而是模型内部显式划分：
@@ -490,7 +498,7 @@ LMDB 主要键：
 未来轨迹取同场景后续 8 个采集帧的 ego 位姿并变换到当前 ego 系。默认采集频率为 2 Hz，因此 8 个航点
 覆盖约 4 秒；场景末尾不足 8 帧时补零，并由 `traj_valid` 排除无效位置。
 
-### 三类场监督如何生成
+### 场与道路线图监督如何生成
 
 ```mermaid
 flowchart LR
@@ -915,7 +923,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `model.dinov3_backbone` | 本地骨干路径、patch size、抽取层 |
 | `model.feature_trunk/heads/physics` | 感知主干、双头和物理量编码 |
 | `model.driving.bev/query/frustum` | BEV 几何、目标查询和视锥采样 |
-| `model.driving.attention/bev_encoder` | 注意力和 BEV 空间提炼 |
+| `model.driving.attention/bev_encoder` | 当前图像/上一帧 BEV 注意力和 BEV 空间提炼 |
 | `model.driving.fields/lane_map/trajectory/behavior` | 三场、独立道路线图、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
@@ -974,7 +982,8 @@ python vis/driving_vis/run.py `
   --checkpoint train/ckpt/driving/driving.pt
 ```
 
-三场 logits 在显示前经过 sigmoid；多模态轨迹使用置信度着色，并可与 GT 航点叠加。
+三场 logits 在显示前经过 sigmoid；道路线类别 logits 使用 argmax、方向向量沿通道归一化；多模态轨迹使用
+置信度着色，并可与 GT 航点叠加。当前可视化画布仍以三场/轨迹为主，道路线图可直接从模型输出读取。
 
 修改具体场景、最大帧数、是否显示 GT、色图和缩放比例，请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖。
 
@@ -1115,7 +1124,7 @@ ByteDrive-Toy/
 
 ### 研究边界
 
-- 当前模型是单帧、单目、开放环预测，没有时间记忆、车辆控制器和闭环接管；
+- 当前模型是双帧时序、单目、开放环预测，只融合一帧历史 BEV，不包含长时序记忆、车辆控制器和闭环接管；
 - 训练数据默认把所有帧展开并 shuffle，没有官方 train/val/test 划分；
 - 默认没有数据增强、学习率调度器、指标评测、早停或 best checkpoint；
 - `clone_loop/` 是占位目录；
