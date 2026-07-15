@@ -27,7 +27,7 @@
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
 - [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、SceneReader 惰性缓存、RGB 归一化（感知与驾驶复用）
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
-- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见占用及八类多标签行为
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载带类别/方向的车道折线，生成可行驶区域、独立道路线图及越界距离场
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督
 

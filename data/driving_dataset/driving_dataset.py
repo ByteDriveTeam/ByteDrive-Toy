@@ -25,8 +25,8 @@
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
       多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框、交通灯状态与 Seg
       可见性判定。目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
-      风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的动态/静态 box
-      占用（不区分类别、排除主车自身），并转成道路外/占用距离场供轨迹约束使用；
+      风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
+      vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
       独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
       （构造期预算）。全帧 ego 位姿与速度加速度按场景缓存，供轨迹/行为/目标点复用、避免逐样本重复读 LMDB。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
@@ -127,8 +127,8 @@ class DrivingDataset(SingleFrameSceneBase):
         lane_class, lane_direction = hd_map.lane_map_bev(
             pose, self._bev, lane_cfg.line_width_m,
             lane_cfg.type_to_class, lane_cfg.unknown_class)
-        box_occupancy = dt.visible_box_occupancy(
-            frame["bboxes"] + meta["static_bboxes"], depth, intr, pose, extrinsic6,
+        box_occupancy = dt.visible_moving_box_occupancy(
+            frame["bboxes"], depth, intr, pose, extrinsic6,
             self._bev, self._depth_max_m, self._box_min_visible_pixels)
         drivable = map_drivable * (1.0 - box_occupancy)
         offroad_distance = offroad_distance_field(drivable, self._bev)

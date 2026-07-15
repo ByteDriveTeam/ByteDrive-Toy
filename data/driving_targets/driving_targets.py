@@ -1,4 +1,4 @@
-"""驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见占用及八类多标签行为。
+"""驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
 
 模块: data/driving_targets/driving_targets.py
 依赖: numpy, cv2, math, vis.data_vis.geometry,
@@ -14,13 +14,14 @@
     - sector_of(waypoints, valid, fov_deg, num_modes) -> int            # GT 所属前向扇区（-1=无效）
     - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
     - risk_field(depth_m, intrinsics4, extrinsic6, bev, fov_deg, depth_max_m) -> (H,W) float32  # 包络外=风险
-    - visible_box_occupancy(...) -> (H,W) float32                         # 深度筛选后的 box BEV 占用
+    - visible_moving_box_occupancy(...) -> (H,W) float32                  # 深度筛选后的运动 box BEV 占用
     - distribution_field(waypoints, valid, bev, sigma_m) -> (H,W) float32           # GT 航点高斯软占据
 说明: BEV 为 ego 前向单目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
       vis.data_vis.geometry（CARLA 左手系，已测），故 data 侧不重复实现投影。风险场把全部深度像素反投影到 ego
       BEV 得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
-      可行驶区域使用的 box 占用不区分类别：先筛出与 BEV 相交的动态/静态 3D 框，再把 GT 深度像素反投影；
-      框内深度点不少于配置阈值（默认 10 像素）才算可见并栅格化其 BEV 足迹，主车自身不属于环境占用。
+      可行驶区域只考虑可运动类别 vehicle/pedestrian，二者不分类、统一视为占用；先筛出与 BEV 相交的 3D 框，
+      再把 GT 深度像素反投影，框内深度点不少于配置阈值（默认 10 像素）才栅格化其 BEV 足迹。ego 与场景级
+      traffic_sign/traffic_light/pole/static 均不参与。
       行为标签固定为「障碍停车、红灯停车、加速、直行、左转、右转、减速、静止」：静止依据速度，纵向行为依据
       帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent，红灯停车还要求
       红灯静态框处于 BEV/视场并在其图像投影框内命中 Seg 交通灯像素。各类互不排斥，可同时为 1。
@@ -39,7 +40,7 @@ from data.driving_targets.checks.driving_targets_checks import (
     check_bev_params,
     check_depth_map,
     check_motion_sequence,
-    check_visible_box_inputs,
+    check_visible_moving_box_inputs,
 )
 from vis.data_vis.geometry import (
     bbox_corners,
@@ -55,7 +56,7 @@ from vis.data_vis.geometry import (
 __all__ = [
     "BEHAVIOR_CLASSES", "BehaviorParams", "BevParams", "bev_cell_centers", "ego_xy_to_pixel",
     "inview_mask", "speed_accelerations", "trajectory_targets", "sector_of", "behavior_targets",
-    "risk_field", "visible_box_occupancy", "distribution_field",
+    "risk_field", "visible_moving_box_occupancy", "distribution_field",
 ]
 
 BevParams = namedtuple("BevParams", ["x_min", "x_max", "y_min", "y_max", "height", "width"])
@@ -70,6 +71,9 @@ BEHAVIOR_CLASSES = (
     "obstacle_stop", "red_light_stop", "accelerating", "straight",
     "left_turn", "right_turn", "decelerating", "stationary",
 )
+
+# 采集契约中只有车辆与行人是可运动环境参与者；ego 和场景级静态框不得进入可行驶占用监督。
+_MOVING_BOX_SEMANTICS = frozenset(("vehicle", "pedestrian"))
 
 
 def bev_cell_centers(bev: BevParams) -> np.ndarray:
@@ -270,13 +274,13 @@ def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixe
     return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
 
 
-def visible_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, current_pose6,
-                          camera_extrinsic6, bev: BevParams, depth_max_m: float,
-                          min_visible_pixels: int) -> np.ndarray:
-    """把深度图确认可见的 3D box 栅格化为 BEV 占用 `(H,W)`。
+def visible_moving_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, current_pose6,
+                                 camera_extrinsic6, bev: BevParams, depth_max_m: float,
+                                 min_visible_pixels: int) -> np.ndarray:
+    """把深度图确认可见的运动类别 3D box 栅格化为 BEV 占用 `(H,W)`。
 
     参数:
-        bboxes: 动态与静态世界系 3D 框；除主车自身外不区分语义类别。
+        bboxes: 世界系 3D 框；仅 vehicle/pedestrian 参与，二者统一作为占用。
         depth_m: 当前相机 GT 深度图（米）。
         intrinsics: 当前相机内参 dict。
         current_pose6: 当前主车世界位姿。
@@ -287,9 +291,9 @@ def visible_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, current_pose6
     返回:
         float32 二值占用图；1 表示当前相机可见 box 的地面足迹。
     """
-    check_visible_box_inputs(depth_m, min_visible_pixels)
+    check_visible_moving_box_inputs(depth_m, min_visible_pixels)
     occupancy = np.zeros((bev.height, bev.width), dtype=np.uint8)
-    boxes = [box for box in bboxes if box.get("semantic") != "ego"]
+    boxes = [box for box in bboxes if box.get("semantic") in _MOVING_BOX_SEMANTICS]
     if not boxes:
         return occupancy.astype(np.float32)
 
