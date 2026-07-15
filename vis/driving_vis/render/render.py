@@ -1,4 +1,4 @@
-"""渲染：把驾驶模型的三场（风险/可行驶/分布）与多模态轨迹着色，并与 RGB/Seg/Depth 合成对照画布。
+"""渲染：把驾驶模型的三场、带方向道路线图与多模态轨迹着色，并与 RGB/Seg/Depth 合成对照画布。
 
 模块: vis/driving_vis/render/render.py
 依赖: cv2, numpy, math, data.driving_targets(BevParams/ego_xy_to_pixel),
@@ -7,12 +7,14 @@
 读取配置: —（colormap / 量程等由调用方传入，来源 config.driving_vis）
 对外接口:
     - colorize_field(field01, colormap, inview=None) -> np.ndarray        # [H,W] 场(0..1) -> 伪彩 BGR
+    - colorize_lane_map(lane_class, lane_direction, ...) -> np.ndarray   # 道路线类别 + 有向切向量 → BGR
     - bev_scene_composite(risk, drivable, distribution, inview) -> np.ndarray  # 三场 → RGB 合成 BEV
     - draw_trajectories(base_bgr, trajectories, confidence, gt, gt_valid, bev, draw_gt) -> np.ndarray
     - compose_canvas(rows, tile_h) -> np.ndarray                          # 混合尺寸面板 letterbox 合成
     - to_display_bgr / colorize_semantic / colorize_depth                 # 复用 pred_vis（RGB/Seg/Depth）
-说明: BEV 约定与 data.driving_targets 一致（行沿 x 前向、自车在下沿中心；ego_xy_to_pixel 复用），故轨迹/场
-      像素对齐。三场为 [0,1]（预测需先 sigmoid），视场外像素压暗以突出监督区。多模态轨迹从自车原点连折线，
+说明: BEV 约定与 data.driving_targets 一致（行沿 x 前向、自车在下沿中心；ego_xy_to_pixel 复用），故轨迹/场/
+      道路线像素对齐。三场为 [0,1]（预测需先 sigmoid），道路线按类别着色并以稀疏箭头表达 ego (x前向,y右向)
+      有向切向量；视场外像素压暗以突出监督区。多模态轨迹从自车原点连折线，
       按置信度着色（橙/黄），Winner（最高置信模态）以红色加粗突出；GT 轨迹绿色。RGB/Seg/Depth 着色直接复用 vis.pred_vis.render（DRY）。
       compose_canvas 把不同尺寸面板按统一行高缩放、再右侧补背景对齐行宽后纵向拼接，故透视图与 BEV 图可同框。
 """
@@ -25,12 +27,12 @@ import cv2
 import numpy as np
 
 from data.driving_targets import BevParams, ego_xy_to_pixel
-from vis.driving_vis.render.checks.render_checks import check_canvas_rows, check_field
+from vis.driving_vis.render.checks.render_checks import check_canvas_rows, check_field, check_lane_map
 from vis.pred_vis.render import colorize_depth, colorize_semantic, to_display_bgr
 
 
 __all__ = [
-    "colorize_field", "bev_scene_composite", "draw_trajectories", "compose_canvas",
+    "colorize_field", "colorize_lane_map", "bev_scene_composite", "draw_trajectories", "compose_canvas",
     "to_display_bgr", "colorize_semantic", "colorize_depth",
 ]
 
@@ -55,6 +57,42 @@ def colorize_field(field01: np.ndarray, colormap: str, inview: np.ndarray = None
         scale = np.where(inview[..., None] > 0, 1.0, _DIM_OUTVIEW)
         bgr = (bgr * scale).astype(np.uint8)
     return bgr
+
+
+def colorize_lane_map(lane_class: np.ndarray, lane_direction: np.ndarray, class_colors,
+                      arrow_color, arrow_stride_px: int, arrow_length_px: int,
+                      arrow_thickness: int, arrow_tip_ratio: float,
+                      inview: np.ndarray = None) -> np.ndarray:
+    """道路线类别着色并在道路线像素上稀疏绘制有向切向量箭头。"""
+    check_lane_map(lane_class, lane_direction, class_colors, inview)
+    classes = lane_class.astype(np.int64, copy=False)
+    palette = np.asarray(class_colors, dtype=np.uint8)
+    canvas = palette[classes].copy()
+    if inview is not None:
+        scale = np.where(inview[..., None] > 0, 1.0, _DIM_OUTVIEW)
+        canvas = (canvas * scale).astype(np.uint8)
+
+    norm = np.linalg.norm(lane_direction, axis=0)
+    valid = (classes > 0) & (norm > 0)
+    if inview is not None:
+        valid &= inview > 0
+    rows, cols = np.nonzero(valid)
+    if rows.size == 0:
+        return canvas
+
+    # 每个 stride 网格保留一个真实道路线像素，避免规则采样点恰好错过细线。
+    cell_cols = (classes.shape[1] + arrow_stride_px - 1) // arrow_stride_px
+    cell_ids = (rows // arrow_stride_px) * cell_cols + cols // arrow_stride_px
+    _, selected = np.unique(cell_ids, return_index=True)
+    rows, cols = rows[selected], cols[selected]
+    directions = lane_direction[:, rows, cols] / norm[rows, cols][None]
+    end_cols = np.rint(cols + directions[1] * arrow_length_px).astype(np.int32)
+    end_rows = np.rint(rows - directions[0] * arrow_length_px).astype(np.int32)
+    color = tuple(int(value) for value in arrow_color)
+    for row, col, end_row, end_col in zip(rows, cols, end_rows, end_cols):
+        cv2.arrowedLine(canvas, (int(col), int(row)), (int(end_col), int(end_row)), color,
+                        arrow_thickness, cv2.LINE_AA, tipLength=arrow_tip_ratio)
+    return canvas
 
 
 def bev_scene_composite(risk: np.ndarray, drivable: np.ndarray, distribution: np.ndarray,

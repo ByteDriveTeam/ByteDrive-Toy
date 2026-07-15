@@ -452,6 +452,16 @@ class PredVisCfg:
 
 
 @dataclass
+class LaneMapVisCfg:
+    class_colors: List[List[int]]
+    arrow_color: List[int]
+    arrow_stride_px: int
+    arrow_length_px: int
+    arrow_thickness: int
+    arrow_tip_ratio: float
+
+
+@dataclass
 class DrivingVisCfg:
     checkpoint: str
     scene: str
@@ -464,6 +474,7 @@ class DrivingVisCfg:
     depth_max_display_m: float
     depth_min_display_m: float
     depth_log: bool
+    lane_map: LaneMapVisCfg
 
 
 @dataclass
@@ -579,7 +590,7 @@ def validate_config(cfg):
     _validate_data(cfg.data, cfg.model.driving.lane_map)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_pred_vis(cfg.pred_vis)
-    _validate_driving_vis(cfg.driving_vis)
+    _validate_driving_vis(cfg.driving_vis, cfg.model.driving.lane_map)
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
@@ -817,7 +828,7 @@ def _validate_pred_vis(pv):
         "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
 
 
-def _validate_driving_vis(dv):
+def _validate_driving_vis(dv, model_lane):
     """校验对象: cfg.driving_vis —— 驾驶模型可视化参数。"""
     assert dv.max_frames >= 0, "driving_vis.max_frames 必须 >= 0（0=全部）"
     assert dv.display_scale > 0, "driving_vis.display_scale 必须 > 0"
@@ -828,3 +839,13 @@ def _validate_driving_vis(dv):
     assert dv.depth_max_display_m > 0, "driving_vis.depth_max_display_m 必须 > 0"
     assert 0 < dv.depth_min_display_m < dv.depth_max_display_m, \
         "driving_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
+    lane = dv.lane_map
+    assert len(lane.class_colors) == len(model_lane.class_names) \
+        and all(_is_bgr(color) for color in lane.class_colors), \
+        "driving_vis.lane_map.class_colors 须与道路线类别等长，且每项为合法 BGR 颜色"
+    assert _is_bgr(lane.arrow_color), \
+        "driving_vis.lane_map.arrow_color 须为合法 BGR 颜色"
+    assert lane.arrow_stride_px > 0 and lane.arrow_length_px > 0 and lane.arrow_thickness > 0, \
+        "driving_vis.lane_map 箭头间距、长度和线宽必须 > 0"
+    assert 0 < lane.arrow_tip_ratio <= 1, \
+        "driving_vis.lane_map.arrow_tip_ratio 必须在 (0,1]"

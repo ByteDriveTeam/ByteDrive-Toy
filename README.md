@@ -102,8 +102,8 @@ flowchart LR
 
 ### 驾驶三场、道路线图与多模态轨迹
 
-下图由 `vis/driving_vis/run.py` 生成，包含 RGB/语义/深度、风险场、可行驶场、轨迹分布场及候选轨迹；
-道路线图作为模型独立输出参与训练，具体类别/方向编码见“独立道路线图”章节。
+下图由 `vis/driving_vis/run.py` 生成，包含 RGB/语义/深度、风险场、可行驶场、轨迹分布场、独立道路线图及候选轨迹；
+道路线图按类别着色，并以稀疏箭头显示 ego 坐标系中的有向切向量，具体类别/方向编码见“独立道路线图”章节。
 `gt` 与 `pred` 行采用相同几何范围和着色口径，可直接观察 BEV 空间对齐情况。
 
 ![ByteDrive 驾驶预测可视化](assets/visualizations/scene_000032_n04.png)
@@ -982,10 +982,10 @@ python vis/driving_vis/run.py `
   --checkpoint train/ckpt/driving/driving.pt
 ```
 
-三场 logits 在显示前经过 sigmoid；道路线类别 logits 使用 argmax、方向向量沿通道归一化；多模态轨迹使用
-置信度着色，并可与 GT 航点叠加。当前可视化画布仍以三场/轨迹为主，道路线图可直接从模型输出读取。
+三场 logits 在显示前经过 sigmoid；道路线类别 logits 使用 argmax，并按配置中的类别色板着色；方向向量沿通道
+归一化后，以稀疏箭头标出实际行驶方向。画布同时给出 GT/预测道路线图；多模态轨迹使用置信度着色，并可与 GT 航点叠加。
 
-修改具体场景、最大帧数、是否显示 GT、色图和缩放比例，请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖。
+修改具体场景、最大帧数、是否显示 GT、色图、道路线配色/箭头样式和缩放比例，请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖。
 
 ---
 

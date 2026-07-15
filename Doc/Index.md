@@ -111,8 +111,8 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
 - [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存
 
-### vis/driving_vis/ — 驾驶模型可视化（RGB/Seg/Depth + GT/预测 风险/可行驶/分布场 + 多模态轨迹）
+### vis/driving_vis/ — 驾驶模型可视化（RGB/Seg/Depth + GT/预测 三场/道路线图 + 多模态轨迹）
 
-- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块包标识：加载权重，渲染透视 RGB/Seg/Depth 与 BEV 三场及多模态轨迹对照
-- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：三场/多模态轨迹着色与混合尺寸面板合成（复用 pred_vis 的 RGB/Seg/Depth 着色）
-- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场与多模态轨迹并保存
+- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块包标识：渲染 RGB/Seg/Depth 与 GT/预测三场、道路线图及多模态轨迹对照
+- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：三场/带方向道路线图/多模态轨迹着色与混合尺寸面板合成（复用 pred_vis 的 RGB/Seg/Depth 着色）
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场、道路线图与多模态轨迹并保存

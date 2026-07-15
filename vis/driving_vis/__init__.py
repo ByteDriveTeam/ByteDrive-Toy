@@ -1,4 +1,4 @@
-"""驾驶模型可视化子模块包标识：加载权重，渲染 RGB/Seg/Depth 与 GT/预测三场及多模态轨迹对照。
+"""驾驶模型可视化子模块包标识：渲染 RGB/Seg/Depth 与 GT/预测三场、道路线图及多模态轨迹对照。
 
 模块: vis/driving_vis/__init__.py
 依赖: —（CLI 入口见 run.py，渲染见 render/）

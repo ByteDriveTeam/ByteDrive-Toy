@@ -350,7 +350,7 @@ pred_vis:
   depth_log: true            # 深度按对数量程着色（放大近处细节）；false=线性归一
 
 # ============================================================
-# driving_vis —— 驾驶模型可视化（RGB/Seg/Depth + GT/预测 风险/可行驶/分布场 + 多模态轨迹）
+# driving_vis —— 驾驶模型可视化（RGB/Seg/Depth + GT/预测 三场/道路线图 + 多模态轨迹）
 # ============================================================
 driving_vis:
   checkpoint: train/checkpoints/driving/epoch_010.pt  # 驾驶检查点（不存在则随机初始化并告警，仅验管线）
@@ -364,3 +364,11 @@ driving_vis:
   depth_max_display_m: 128.0 # 深度着色量程上限（米）
   depth_min_display_m: 1.0   # 对数深度着色近端下限（米）
   depth_log: true            # 深度按对数量程着色
+  lane_map:
+    # BGR，顺序须与 model.driving.lane_map.class_names 一致：背景/中心线/分隔线/道路边界/其他标线
+    class_colors: [[24, 24, 24], [0, 220, 255], [80, 220, 80], [255, 120, 40], [220, 80, 220]]
+    arrow_color: [255, 255, 255]  # 有向切向量箭头颜色（BGR）
+    arrow_stride_px: 16           # 每个此尺寸的像素网格最多绘制一个方向箭头
+    arrow_length_px: 10           # 方向箭头长度（像素）
+    arrow_thickness: 1            # 方向箭头线宽（像素）
+    arrow_tip_ratio: 0.35         # 箭头尖端占总长度比例

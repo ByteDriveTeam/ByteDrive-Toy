@@ -1,4 +1,4 @@
-"""驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场与多模态轨迹并保存。
+"""驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场、道路线图与轨迹并保存。
 
 模块: vis/driving_vis/run.py
 依赖: argparse, pathlib, cv2, numpy, torch, config.load_config, model.driving_model.DrivingModel,
@@ -7,6 +7,7 @@
 读取配置:
     driving_vis.checkpoint / scene / max_frames / save_dir / show_ground_truth / display_scale
     driving_vis.field_colormap / depth_colormap / depth_max_display_m / depth_min_display_m / depth_log
+    driving_vis.lane_map.*（道路线类别配色与方向箭头样式）
     data.dataset.dino_mean / dino_std（RGB 去归一化展示）
     data.driving.camera（读原始 Seg/Depth 展示）
     model.driving.bev.*（BEV 场几何与视场）/ fields.up_channels（场分辨率）
@@ -14,7 +15,7 @@
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
       读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，行含 RGB/Seg/Depth（透视）与 GT/预测
-      的风险/可行驶/分布场及叠加轨迹的 BEV（俯视）。加载驾驶权重（strict=False，容忍缺失的冻结骨干键）；检查点
+      的风险/可行驶/分布场、带方向箭头的道路线图及叠加轨迹 BEV（俯视）。加载驾驶权重（strict=False，容忍缺失的冻结骨干键）；检查点
       不存在则随机初始化并告警，便于仅验证渲染管线。推理沿用模型内部 BF16/FP32 混精边界，渲染委托
       vis.driving_vis.render，结果按场景存 PNG。
 """
@@ -83,6 +84,14 @@ def _predict_fields(outputs):
             for name in ("risk", "drivable", "distribution")}
 
 
+def _predict_lane_map(outputs):
+    """道路线类别 logits 与原始方向向量 → 类别图及单位有向切向量 numpy。"""
+    lane_class = outputs["lane_class_logits"][0].argmax(dim=0).cpu().numpy()
+    direction = outputs["lane_direction"][0]
+    direction = direction / torch.linalg.vector_norm(direction, dim=0, keepdim=True).clamp_min(1e-12)
+    return lane_class, direction.cpu().numpy()
+
+
 def main(argv=None) -> None:
     """驾驶可视化主流程。"""
     parser = argparse.ArgumentParser(description="ByteDrive 驾驶模型可视化")
@@ -122,10 +131,10 @@ def main(argv=None) -> None:
     print("[driving_vis] 已保存 {}".format(out_path))
 
 
-# 行顺序（透视 → BEV 三场 GT/预测 → 轨迹 BEV）；gt 行在 show_ground_truth=False 时跳过
+# 行顺序（透视 → BEV 三场/道路线 GT/预测 → 轨迹 BEV）；gt 行在 show_ground_truth=False 时跳过
 _ROW_ORDER = ("rgb", "seg", "depth",
               "gt risk", "pred risk", "gt drivable", "pred drivable",
-              "gt dist", "pred dist", "gt traj", "pred traj")
+              "gt dist", "pred dist", "gt lanes", "pred lanes", "gt traj", "pred traj")
 
 
 def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, mean, std, panels):
@@ -142,11 +151,14 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
                         sample["previous_to_current"].unsqueeze(0).to(device),
                         sample["previous_valid"].unsqueeze(0).to(device))
     pred = _predict_fields(outputs)
+    pred_lane_class, pred_lane_direction = _predict_lane_map(outputs)
     trajectories = outputs["trajectories"][0].cpu().numpy()
     confidence = outputs["confidence"][0].cpu().numpy()
 
     inview = sample["inview"].numpy()
     gt = {k: sample[k].numpy() for k in ("risk", "drivable", "distribution")}
+    gt_lane_class = sample["lane_class"].numpy()
+    gt_lane_direction = sample["lane_direction"].numpy()
     gt_traj, gt_valid = sample["trajectory"].numpy(), sample["traj_valid"].numpy()
 
     rgb = sample["rgb"].cpu().numpy() * std[:, None, None] + mean[:, None, None]
@@ -160,6 +172,14 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
         key = "dist" if name == "distribution" else name
         panels["gt " + key].append(render.colorize_field(gt[name], dv.field_colormap, inview))
         panels["pred " + key].append(render.colorize_field(pred[name], dv.field_colormap, inview))
+
+    lane_vis = dv.lane_map
+    lane_args = (lane_vis.class_colors, lane_vis.arrow_color, lane_vis.arrow_stride_px,
+                 lane_vis.arrow_length_px, lane_vis.arrow_thickness, lane_vis.arrow_tip_ratio, inview)
+    panels["gt lanes"].append(render.colorize_lane_map(
+        gt_lane_class, gt_lane_direction, *lane_args))
+    panels["pred lanes"].append(render.colorize_lane_map(
+        pred_lane_class, pred_lane_direction, *lane_args))
 
     gt_base = render.bev_scene_composite(gt["risk"], gt["drivable"], gt["distribution"], inview)
     pred_base = render.bev_scene_composite(pred["risk"], pred["drivable"], pred["distribution"], inview)
