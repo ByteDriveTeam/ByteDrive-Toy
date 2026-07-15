@@ -1,7 +1,7 @@
-"""驾驶监督目标编码（纯 numpy 函数）：BEV/轨迹/三场及八类多标签行为。
+"""驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见占用及八类多标签行为。
 
 模块: data/driving_targets/driving_targets.py
-依赖: numpy, math, vis.data_vis.geometry,
+依赖: numpy, cv2, math, vis.data_vis.geometry,
       data.driving_targets.checks.driving_targets_checks
 读取配置: —（BEV 量程/分辨率/视场/K/σ 等由调用方以参数传入，来源 config.model.driving 与 config.data.driving）
 对外接口:
@@ -14,10 +14,13 @@
     - sector_of(waypoints, valid, fov_deg, num_modes) -> int            # GT 所属前向扇区（-1=无效）
     - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
     - risk_field(depth_m, intrinsics4, extrinsic6, bev, fov_deg, depth_max_m) -> (H,W) float32  # 包络外=风险
+    - visible_box_occupancy(...) -> (H,W) float32                         # 深度筛选后的 box BEV 占用
     - distribution_field(waypoints, valid, bev, sigma_m) -> (H,W) float32           # GT 航点高斯软占据
 说明: BEV 为 ego 前向单目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
       vis.data_vis.geometry（CARLA 左手系，已测），故 data 侧不重复实现投影。风险场把全部深度像素反投影到 ego
       BEV 得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
+      可行驶区域使用的 box 占用不区分类别：先筛出与 BEV 相交的动态/静态 3D 框，再把 GT 深度像素反投影；
+      框内深度点不少于配置阈值（默认 10 像素）才算可见并栅格化其 BEV 足迹，主车自身不属于环境占用。
       行为标签固定为「障碍停车、红灯停车、加速、直行、左转、右转、减速、静止」：静止依据速度，纵向行为依据
       帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent，红灯停车还要求
       红灯静态框处于 BEV/视场并在其图像投影框内命中 Seg 交通灯像素。各类互不排斥，可同时为 1。
@@ -28,6 +31,7 @@ from __future__ import annotations
 import math
 from collections import namedtuple
 
+import cv2
 import numpy as np
 
 from data.driving_targets.checks.driving_targets_checks import (
@@ -35,6 +39,7 @@ from data.driving_targets.checks.driving_targets_checks import (
     check_bev_params,
     check_depth_map,
     check_motion_sequence,
+    check_visible_box_inputs,
 )
 from vis.data_vis.geometry import (
     bbox_corners,
@@ -50,7 +55,7 @@ from vis.data_vis.geometry import (
 __all__ = [
     "BEHAVIOR_CLASSES", "BehaviorParams", "BevParams", "bev_cell_centers", "ego_xy_to_pixel",
     "inview_mask", "speed_accelerations", "trajectory_targets", "sector_of", "behavior_targets",
-    "risk_field", "distribution_field",
+    "risk_field", "visible_box_occupancy", "distribution_field",
 ]
 
 BevParams = namedtuple("BevParams", ["x_min", "x_max", "y_min", "y_max", "height", "width"])
@@ -263,6 +268,120 @@ def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixe
     if x0 > x1 or y0 > y1:
         return False
     return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
+
+
+def visible_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, current_pose6,
+                          camera_extrinsic6, bev: BevParams, depth_max_m: float,
+                          min_visible_pixels: int) -> np.ndarray:
+    """把深度图确认可见的 3D box 栅格化为 BEV 占用 `(H,W)`。
+
+    参数:
+        bboxes: 动态与静态世界系 3D 框；除主车自身外不区分语义类别。
+        depth_m: 当前相机 GT 深度图（米）。
+        intrinsics: 当前相机内参 dict。
+        current_pose6: 当前主车世界位姿。
+        camera_extrinsic6: 相机相对主车外参。
+        bev: 输出 BEV 几何。
+        depth_max_m: 有效监督深度上限。
+        min_visible_pixels: 判为可见所需的最少框内深度像素数；配置保证不少于 10。
+    返回:
+        float32 二值占用图；1 表示当前相机可见 box 的地面足迹。
+    """
+    check_visible_box_inputs(depth_m, min_visible_pixels)
+    occupancy = np.zeros((bev.height, bev.width), dtype=np.uint8)
+    boxes = [box for box in bboxes if box.get("semantic") != "ego"]
+    if not boxes:
+        return occupancy.astype(np.float32)
+
+    world_corners = np.stack([bbox_corners(box) for box in boxes])
+    ego_corners = transform_points(
+        world_corners.reshape(-1, 3), world_to_ego(current_pose6)).reshape(-1, 8, 3)
+    relevant = _boxes_intersect_bev(ego_corners, bev)
+    if not bool(relevant.any()):
+        return occupancy.astype(np.float32)
+
+    boxes = [box for box, keep in zip(boxes, relevant) if keep]
+    ego_corners = ego_corners[relevant]
+    world_corners = world_corners[relevant]
+    camera_to_world = transform_matrix(current_pose6) @ transform_matrix(camera_extrinsic6)
+    uv, camera_depth = project_points(
+        world_corners.reshape(-1, 3), np.linalg.inv(camera_to_world),
+        intrinsic_matrix(intrinsics))
+    uv = uv.reshape(-1, 8, 2)
+    camera_depth = camera_depth.reshape(-1, 8)
+    visible = np.array([
+        _box_matches_depth(box, box_uv, box_depth, depth_m, intrinsics, camera_to_world,
+                           depth_max_m, min_visible_pixels)
+        for box, box_uv, box_depth in zip(boxes, uv, camera_depth)
+    ])
+
+    for corners in ego_corners[visible]:
+        rows, cols = ego_xy_to_pixel(corners[:, :2], bev)
+        polygon = cv2.convexHull(np.stack((cols, rows), axis=1).round().astype(np.int32))
+        cv2.fillConvexPoly(occupancy, polygon, 1)
+    return occupancy.astype(np.float32)
+
+
+def _boxes_intersect_bev(ego_corners: np.ndarray, bev: BevParams) -> np.ndarray:
+    """以框足迹外接范围快速排除 BEV 外 box，避免对全场景静态框逐个做图像检查。"""
+    x, y = ego_corners[:, :, 0], ego_corners[:, :, 1]
+    return ((x.max(1) >= bev.x_min) & (x.min(1) <= bev.x_max)
+            & (y.max(1) >= bev.y_min) & (y.min(1) <= bev.y_max))
+
+
+def _box_matches_depth(box, uv: np.ndarray, camera_depth: np.ndarray, depth_m: np.ndarray,
+                       intrinsics, camera_to_world: np.ndarray, depth_max_m: float,
+                       min_pixels: int) -> bool:
+    """投影凸包内有足量 GT 深度命中逐像素射线与框的交段，才认定框至少部分可见。"""
+    front = camera_depth > 0
+    if np.count_nonzero(front) < 3:
+        return False
+    height, width = depth_m.shape
+    points = uv[front].copy()
+    if (points[:, 0].max() < 0 or points[:, 0].min() > width - 1
+            or points[:, 1].max() < 0 or points[:, 1].min() > height - 1):
+        return False
+    points[:, 0] = np.clip(points[:, 0], 0, width - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, height - 1)
+    polygon = cv2.convexHull(points.round().astype(np.int32))
+    x, y, w, h = cv2.boundingRect(polygon)
+    if w == 0 or h == 0:
+        return False
+
+    local_polygon = polygon - np.array([[[x, y]]], dtype=np.int32)
+    projected = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillConvexPoly(projected, local_polygon, 1)
+    local_y, local_x = np.nonzero(projected)
+    pixel_x, pixel_y = local_x + x, local_y + y
+    observed = depth_m[pixel_y, pixel_x]
+    rays = np.stack((
+        np.ones_like(pixel_x),
+        (pixel_x - intrinsics["cx"]) / intrinsics["fx"],
+        -(pixel_y - intrinsics["cy"]) / intrinsics["fy"],
+    ), axis=1)
+    box_pose = [*box["location"], *box["rotation"]]
+    camera_to_box = np.linalg.inv(transform_matrix(box_pose)) @ camera_to_world
+    near, far, intersects = _ray_box_depth_interval(rays, camera_to_box, box["extent"])
+    matches = (intersects & (observed > 0) & (observed < depth_max_m)
+               & (observed >= near) & (observed <= far))
+    return int(np.count_nonzero(matches)) >= min_pixels
+
+
+def _ray_box_depth_interval(rays: np.ndarray, camera_to_box: np.ndarray, extent):
+    """以相机前向深度为参数，批量求射线在定向框局部坐标中的进入/离开深度。"""
+    origin = camera_to_box[:3, 3]
+    directions = rays @ camera_to_box[:3, :3].T
+    extent = np.asarray(extent, dtype=np.float64)
+    parallel = np.abs(directions) < np.finfo(np.float64).eps
+    safe_directions = np.where(parallel, 1.0, directions)
+    t0 = (-extent - origin) / safe_directions
+    t1 = (extent - origin) / safe_directions
+    axis_near = np.where(parallel, -np.inf, np.minimum(t0, t1))
+    axis_far = np.where(parallel, np.inf, np.maximum(t0, t1))
+    near, far = axis_near.max(1), axis_far.min(1)
+    parallel_outside = np.any(parallel & (np.abs(origin) > extent), axis=1)
+    intersects = ~parallel_outside & (far >= np.maximum(near, 0.0))
+    return near, far, intersects
 
 
 # 风险场方位角分箱数（envelope 角分辨率；与相机水平像素数同量级足以贴合外缘线）

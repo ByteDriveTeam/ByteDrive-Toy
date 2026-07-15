@@ -20,3 +20,11 @@ def check_target_points(target_points):
         raise TypeError("target_points 必须为浮点张量，实际 dtype 为 {}。".format(target_points.dtype))
     if target_points.ndim != 2 or int(target_points.shape[1]) != 2:
         raise ValueError("target_points 期望 [B, 2]（ego [x,y]），实际为 {}。".format(tuple(target_points.shape)))
+
+
+def check_grid_xy(grid_xy, batch, height, width):
+    """校验对象: TargetPointEmbedding.forward 可选 grid_xy —— 须为逐 batch 的实际网格坐标 [B,H,W,2]。"""
+    expected = (batch, height, width, 2)
+    if not torch.is_floating_point(grid_xy) or tuple(grid_xy.shape) != expected:
+        raise ValueError("grid_xy 期望浮点形状 {}，实际 {} / {}。".format(
+            expected, tuple(grid_xy.shape), grid_xy.dtype))

@@ -1,4 +1,4 @@
-"""目标点嵌入层：BEV 栅格 xyz + 目标点相对向量 → 初始 BEV 查询网格。公开 API 重导出入口。
+"""目标点嵌入层：默认或刚性变换后的 BEV 几何 + 目标点相对向量 → 查询网格。公开 API 重导出入口。
 
 模块: model/target_point_embedding/__init__.py
 依赖: model.target_point_embedding.target_point_embedding

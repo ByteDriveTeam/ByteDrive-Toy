@@ -3,9 +3,12 @@
 _REQUIRED_OUTPUTS = ("semantic", "depth")
 _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 
-_DRIVING_OUTPUTS = ("risk", "drivable", "distribution", "trajectories", "confidence", "behavior_logits")
+_DRIVING_OUTPUTS = (
+    "risk", "drivable", "distribution", "lane_class_logits", "lane_direction",
+    "trajectories", "confidence", "behavior_logits",
+)
 _DRIVING_TARGETS = (
-    "risk", "drivable", "offroad_distance", "distribution", "inview",
+    "risk", "drivable", "offroad_distance", "distribution", "lane_class", "lane_direction", "inview",
     "trajectory", "traj_valid", "sector", "behavior",
 )
 
@@ -24,7 +27,7 @@ def check_losses_io(outputs, targets):
 
 
 def check_driving_losses_io(outputs, targets):
-    """校验对象: compute_driving_losses 入参 —— 三场、轨迹/置信度、行为与 HDMap 监督齐备。"""
+    """校验对象: compute_driving_losses 入参 —— 三场、道路线图、轨迹/行为与地图监督齐备。"""
     missing_o = [k for k in _DRIVING_OUTPUTS if k not in outputs]
     missing_t = [k for k in _DRIVING_TARGETS if k not in targets]
     if missing_o:

@@ -1,10 +1,13 @@
-"""驾驶模型单帧数据集：逐帧产模型输入、三场/轨迹/行为 GT 及 HDMap 越界距离场。
+"""驾驶模型双帧数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
 
 模块: data/driving_dataset/driving_dataset.py
 依赖: torch, numpy, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
       data.driving_targets, data.hd_map.HdMap, vis.data_vis.geometry, data.driving_dataset.checks.*
 读取配置:
-    data.driving.scene_root / camera / map_dir / map_name_template / dist_sigma_m / lane_half_width_m
+    data.driving.scene_root / camera / map_dir / map_name_template / previous_frame_offset /
+        dist_sigma_m / lane_half_width_m
+    data.driving.lane_map.line_width_m / type_to_class / unknown_class
+    data.driving.box_min_visible_pixels
     data.driving.target_min_m / target_max_m（目标点采样距离窗口）
     data.driving.behavior.stationary_speed_mps / acceleration_threshold_mps2 / turn_angle_deg /
         traffic_light_semantic_tag / traffic_light_match_radius_m / traffic_light_seg_margin_px /
@@ -17,12 +20,14 @@
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
-说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界
-      位姿经 world_to_ego 变到当前 ego 系（帧间隔即采集节拍）；自车速度由世界速度旋转到 ego 系（前向 vx、右向
-      vy）；行为 GT 为固定八类多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框、交通灯状态与 Seg
+说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。每个样本同时返回同场景上一帧 RGB 及把
+      上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
+      轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
+      多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框、交通灯状态与 Seg
       可见性判定。目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
-      风险场由 GT 深度反投影包络，可行驶场由 HD 地图按位姿栅格化，并转成道路外距离场供轨迹越界损失使用；
-      分布场由 GT 航点高斯软化，视场掩码为常量
+      风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的动态/静态 box
+      占用（不区分类别、排除主车自身），并转成道路外/占用距离场供轨迹约束使用；
+      独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
       （构造期预算）。全帧 ego 位姿与速度加速度按场景缓存，供轨迹/行为/目标点复用、避免逐样本重复读 LMDB。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
       vis.data_vis.geometry / data.driving_targets。
@@ -40,14 +45,14 @@ from data import driving_targets as dt
 from data.driving_dataset.checks.driving_dataset_checks import check_behavior_annotations, check_camera_calib
 from data.hd_map import HdMap, offroad_distance_field
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
-from vis.data_vis.geometry import transform_points, world_to_ego
+from vis.data_vis.geometry import transform_matrix, transform_points, world_to_ego
 
 
 __all__ = ["DrivingDataset"]
 
 
 class DrivingDataset(SingleFrameSceneBase):
-    """逐帧展开的单帧驾驶数据集（复用感知单帧读取，另产驾驶多任务 GT）。"""
+    """以当前帧为索引、同时读取上一帧的双帧驾驶数据集。"""
 
     def __init__(self, cfg: Config) -> None:
         drv_data = cfg.data.driving
@@ -56,6 +61,7 @@ class DrivingDataset(SingleFrameSceneBase):
         self._cfg_data = drv_data
         bev = cfg.model.driving.bev
         self._fov = bev.fov_deg
+        self._previous_offset = drv_data.previous_frame_offset
         # 场分辨率 = BEV 工作分辨率 · 上采样倍率（与 field_decoder 输出一致）
         scale = 2 ** len(cfg.model.driving.fields.up_channels)
         self._bev = dt.BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
@@ -63,6 +69,7 @@ class DrivingDataset(SingleFrameSceneBase):
         self._num_waypoints = cfg.model.driving.trajectory.num_waypoints
         self._num_modes = cfg.model.driving.trajectory.num_modes
         self._depth_max_m = cfg.model.physics.depth_max_m  # 风险场包络排除超范围/天空像素
+        self._box_min_visible_pixels = drv_data.box_min_visible_pixels
         self._target_min = drv_data.target_min_m
         self._target_max = drv_data.target_max_m
         behavior = drv_data.behavior
@@ -83,6 +90,11 @@ class DrivingDataset(SingleFrameSceneBase):
         cam = self._camera
         check_camera_calib(meta, cam)
 
+        previous_idx = max(frame_idx - self._previous_offset, 0)
+        previous_valid = float(frame_idx >= self._previous_offset)
+        previous_meta = reader.frame_meta(previous_idx) if previous_valid else None
+        previous_rgb = reader.rgb(previous_idx, cam) if previous_valid else None
+
         frame = reader.frame(frame_idx)
         check_behavior_annotations(meta, frame, cam)
         intr = meta["intrinsics"][cam]
@@ -91,7 +103,10 @@ class DrivingDataset(SingleFrameSceneBase):
 
         pose = [float(v) for v in frame["ego"]["transform"]]
         world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
-        ego_vel = (world_to_ego(pose)[:3, :3] @ world_vel)[:2]        # 世界速度 → ego 系 (前, 右)
+        previous_meta = previous_meta or frame["meta"]
+        previous_rgb = previous_rgb if previous_rgb is not None else frame["rgb"][cam]
+        previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
+        previous_to_current = _planar_previous_to_current(previous_pose, pose)
 
         poses, accelerations = self._scene_states(scene_dir, reader)  # 全帧位姿/加速度（缓存）
         waypoints, valid = self._trajectory(poses, frame_idx, pose)
@@ -105,15 +120,27 @@ class DrivingDataset(SingleFrameSceneBase):
 
         depth = np.ascontiguousarray(frame["depth"][cam]).astype(np.float32)
         risk = dt.risk_field(depth, intrinsics4, extrinsic6, self._bev, self._fov, self._depth_max_m)
-        drivable = self._hd_map(meta["map"]).drivable_bev(pose, self._bev, self._cfg_data.lane_half_width_m)
+        hd_map = self._hd_map(meta["map"])
+        map_drivable = hd_map.drivable_bev(
+            pose, self._bev, self._cfg_data.lane_half_width_m)
+        lane_cfg = self._cfg_data.lane_map
+        lane_class, lane_direction = hd_map.lane_map_bev(
+            pose, self._bev, lane_cfg.line_width_m,
+            lane_cfg.type_to_class, lane_cfg.unknown_class)
+        box_occupancy = dt.visible_box_occupancy(
+            frame["bboxes"] + meta["static_bboxes"], depth, intr, pose, extrinsic6,
+            self._bev, self._depth_max_m, self._box_min_visible_pixels)
+        drivable = map_drivable * (1.0 - box_occupancy)
         offroad_distance = offroad_distance_field(drivable, self._bev)
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
 
         return {
             "rgb": self.normalize_rgb(frame["rgb"][cam]),
+            "previous_rgb": self.normalize_rgb(previous_rgb),
+            "previous_to_current": torch.from_numpy(previous_to_current),
+            "previous_valid": torch.tensor(previous_valid, dtype=torch.float32),
             "intrinsics": torch.tensor(intrinsics4, dtype=torch.float32),
             "extrinsics": torch.tensor(extrinsic6, dtype=torch.float32),
-            "ego_velocity": torch.tensor(ego_vel, dtype=torch.float32),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
             "trajectory": torch.from_numpy(waypoints),
             "traj_valid": torch.from_numpy(valid),
@@ -121,6 +148,8 @@ class DrivingDataset(SingleFrameSceneBase):
             "behavior": torch.from_numpy(behavior),
             "risk": torch.from_numpy(risk),
             "drivable": torch.from_numpy(drivable),
+            "lane_class": torch.from_numpy(lane_class),
+            "lane_direction": torch.from_numpy(lane_direction),
             "offroad_distance": torch.from_numpy(offroad_distance),
             "distribution": torch.from_numpy(distribution),
             "inview": self._inview,
@@ -165,3 +194,13 @@ class DrivingDataset(SingleFrameSceneBase):
             path = self._map_dir / self._cfg_data.map_name_template.format(map=key)
             self._hd_maps[key] = HdMap(path)
         return self._hd_maps[key]
+
+
+def _planar_previous_to_current(previous_pose, current_pose):
+    """由两帧世界位姿提取上一帧 ego xy → 当前帧 ego xy 的齐次刚性矩阵。"""
+    transform = world_to_ego(current_pose) @ transform_matrix(previous_pose)
+    return np.array([
+        [transform[0, 0], transform[0, 1], transform[0, 3]],
+        [transform[1, 0], transform[1, 1], transform[1, 3]],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float32)

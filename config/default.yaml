@@ -180,8 +180,8 @@ model:
     depth_max_m: 128.0        # 深度检测上限（米）；超出记为超范围，仅监督二分类
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
-  # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → BEV 交叉注意力
-  # → ConvNeXt → 风险/可行驶/轨迹分布三场 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
+  # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → 当前图像/上一帧 BEV 交叉注意力
+  # → ConvNeXt → 三场 + 独立道路线图 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
@@ -220,9 +220,11 @@ model:
       num_heads: 6               # 须整除 work_dim
       mlp_ratio: 4               # 前馈膨胀率（SwiGLU）
 
-    # BEV 编码器：交叉注意力查询图像特征 + ConvNeXt2D 提炼
+    # BEV 编码器：先查询当前图像，再查询刚性变换到当前 ego 系并重编码实际几何的上一帧 BEV
     bev_encoder:
       cross_layers: 2            # BEV 查询 ← 图像特征 级联交叉注意力层数
+      temporal_layers: 2         # 当前 BEV 查询 ← 上一帧 BEV 级联交叉注意力层数
+      detach_previous: true      # 上一帧分支只作缓存特征，不跨帧反传，控制显存并贴合在线推理
       num_convnext_blocks: 8     # ConvNeXt2D 层数
       convnext_spatial_kernel: 7 # 深度可分离空间核（奇数）
       convnext_expansion: 2      # 逐点卷积膨胀率
@@ -233,15 +235,21 @@ model:
       up_channels: [192, 96, 48] # 三级 2× 像素洗牌输出通道（32→256）
       feature_channels: 32       # 共享上采样输出特征通道（各场 1×1 头再解码）
 
+    # 独立道路线图：类别 logits + 有向单位切向量，不与风险/可行驶/分布三场共享解码参数
+    lane_map:
+      class_names: [background, centerline, lane_separator, road_boundary, other_marking]
+      reduce_channels: 128
+      up_channels: [192, 96, 48]
+      feature_channels: 32
+
     # 8 扇区多模态轨迹解码
     trajectory:
       num_modes: 8               # 前向扇区数 = 多模态轨迹条数
       num_waypoints: 8           # 每条轨迹航点数 T_wp（0.5s/点 → 4s）
       token_mlp_hidden: 256      # 扇区 Token 输入编码 MLP 隐藏维
       cross_layers: 2            # Token ← BEV 特征 级联交叉注意力层数
-      self_layers: 1             # Token 自注意力层数
+      self_layers: 2             # Token 自注意力层数；两层同结构、参数独立
       num_heads: 6               # 须整除 work_dim
-      velocity_norm_mps: 15.0    # 自车速度归一尺度（m/s）
       waypoint_scale_m: 1.0      # 航点回归固定尺度（米）：Linear 原始输出乘此值，使初值即在米制量级、加速收敛
 
     # 行为多标签分类 Token：与 8 个轨迹 Token 拼成同一注意力序列
@@ -261,15 +269,24 @@ data:
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
 
-  # 驾驶数据集：复用感知单帧读取，另产轨迹/行为/风险/可行驶/分布场 GT 与内外参/速度/目标点。
+  # 驾驶双帧数据集：复用感知读取，另产帧间刚性变换、三场、道路线图、轨迹/行为 GT 与标定/目标点。
   # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
   driving:
     scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
     camera: front             # 前向单目相机名
     map_dir: data/map         # HD 地图目录
     map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town01_HD_map.npz）
+    previous_frame_offset: 1   # 时序融合使用同场景前一帧；场景开头以 identity + 无效位安全跳过
     dist_sigma_m: 1.0         # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
+    lane_map:
+      line_width_m: 0.25      # 道路线监督栅格宽度（米）
+      type_to_class:          # TownXX_HD_map.npz 的 Type → model.driving.lane_map.class_names 索引
+        Center: 1             # 车道中心线
+        Broken: 2             # 虚线分隔线
+        "NONE": 3            # 地图中未细分样式的道路边界
+      unknown_class: 4        # 其余非 Trigger_Volumes 道路标线
+    box_min_visible_pixels: 10  # 反投影深度点落入 3D box 不少于 10 像素才作为可见占用监督
     target_min_m: 16.0        # 目标点：沿未来自车轨迹搜距当前 16~32m 的点随机取一，作近端导航引导（增强鲁棒性）
     target_max_m: 32.0
     behavior:
@@ -303,7 +320,7 @@ train:
     depth_grad: 1.0          # 深度空间梯度（相邻像素差）SmoothL1，监督边界/结构，不加距离权
     depth_range: 0.5
 
-  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 行为多标签 / 三场 / HDMap 越界距离
+  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 行为多标签 / 三场 / 不可行驶距离
   # 注：distribution 为空间 softmax 交叉熵（能量式），量级天然 ~ln(视场格数)≈11，故权重取小以与 BCE 场平衡
   driving_loss_weights:
     trajectory: 1.0
@@ -312,7 +329,10 @@ train:
     distribution: 0.1
     risk: 1.0
     drivable: 1.0
-    boundary: 1.0             # 全部候选航点的道路外距离（米）；道路内为 0，超出 BEV 继续按坐标距离惩罚
+    lane_class: 1.0           # 道路线类别交叉熵
+    lane_class_weights: [0.1, 1.0, 1.0, 1.0, 1.0]  # 抑制稠密背景对细线类别的数量淹没
+    lane_direction: 1.0       # 道路线有向单位切向量余弦损失
+    boundary: 1.0             # 全部候选航点的不可行驶距离（道路外/可见占用内）；超出 BEV 继续按坐标距离惩罚
 
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）

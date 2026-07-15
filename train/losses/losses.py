@@ -1,11 +1,12 @@
-"""多任务监督损失：感知任务与驾驶三场、轨迹、置信度、行为多标签及 HDMap 越界约束。
+"""多任务监督损失：感知任务与驾驶三场、独立道路线类别/方向、轨迹行为及不可行驶约束。
 
 模块: train/losses/losses.py
 依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
 读取配置:
     model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_grad / depth_range
-    train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable / boundary
+    train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable /
+        lane_class / lane_class_weights / lane_direction / boundary
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
 对外接口:
     - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])          # 感知总损失与各分量
@@ -113,13 +114,15 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
                            cfg: Config) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """计算驾驶多任务加权总损失与各分量。
 
-    风险/可行驶为占据场（{0,1} 硬标签），在视场内掩码下做 BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
+    风险/可行驶为二值场：可行驶 GT 已从 HDMap 道路中扣除深度确认可见的 box 占用；二者在视场内掩码下做
+    BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
     分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
     占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹为 winner-take-all 多模态：每样本 GT 按
     其扇区选中对应模态回归（SmoothL1，仅有效航点），并以该扇区为标签对置信度做交叉熵；行为固定八类彼此
     独立，以 BCE-with-logits 监督同一帧同时激活的多个类别。视场外/无有效前向 GT
-    的样本自动被掩码剔除。越界损失把全部候选轨迹航点投影到 HDMap 单侧距离场，道路内为零、道路外按米制
-    距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
+    的样本自动被掩码剔除。独立道路线图以加权 CE 监督类别，并仅在道路线像素上以有符号余弦距离监督单位
+    切向量；该方向来自 HD Map yaw，保留真实行驶正反向。越界损失把全部候选轨迹航点投影到不可行驶单侧距离场：道路外或可见 box 占用内
+    按米制距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
     """
     check_driving_losses_io(outputs, targets)
     w = cfg.train.driving_loss_weights
@@ -128,6 +131,11 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     risk = _masked_bce(outputs["risk"][:, 0], targets["risk"], inview)
     drivable = _masked_bce(outputs["drivable"][:, 0], targets["drivable"], inview)
     distribution = _distribution_energy(outputs["distribution"][:, 0], targets["distribution"], inview)
+    lane_weights = outputs["lane_class_logits"].new_tensor(w.lane_class_weights)
+    lane_class = _masked_lane_ce(
+        outputs["lane_class_logits"], targets["lane_class"], inview, lane_weights)
+    lane_direction = _lane_direction_loss(
+        outputs["lane_direction"], targets["lane_direction"], targets["lane_class"], inview)
     trajectory, confidence = _trajectory_losses(
         outputs["trajectories"], outputs["confidence"],
         targets["trajectory"], targets["traj_valid"], targets["sector"])
@@ -136,9 +144,11 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
         outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
 
     total = (w.risk * risk + w.drivable * drivable + w.distribution * distribution
+             + w.lane_class * lane_class + w.lane_direction * lane_direction
              + w.trajectory * trajectory + w.confidence * confidence + w.behavior * behavior
              + w.boundary * boundary)
     components = {"risk": risk, "drivable": drivable, "distribution": distribution,
+                  "lane_class": lane_class, "lane_direction": lane_direction,
                   "trajectory": trajectory, "confidence": confidence, "behavior": behavior,
                   "boundary": boundary, "total": total}
     return total, components
@@ -147,6 +157,22 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
 def _masked_bce(pred_logit: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """视场掩码下的 BCE-with-logits：sum(bce·mask)/max(sum(mask), eps)。"""
     per = F.binary_cross_entropy_with_logits(pred_logit, target, reduction="none") * mask
+    return per.sum() / mask.sum().clamp_min(_MASK_EPS)
+
+
+def _masked_lane_ce(logits, target, inview, class_weights):
+    """视场内道路线类别加权交叉熵；背景降权以免细线监督被数量淹没。"""
+    per = F.cross_entropy(logits, target.long(), weight=class_weights, reduction="none") * inview
+    return per.sum() / inview.sum().clamp_min(_MASK_EPS)
+
+
+def _lane_direction_loss(pred, target, lane_class, inview):
+    """仅道路线像素上的有向余弦距离；`v` 与 `-v` 不等价，保留真实行驶方向。"""
+    pred_unit = F.normalize(pred, dim=1, eps=_MASK_EPS)
+    target_unit = F.normalize(target, dim=1, eps=_MASK_EPS)
+    direction_valid = target.square().sum(1) > _MASK_EPS
+    mask = ((lane_class > 0) & direction_valid).to(pred.dtype) * inview
+    per = (1.0 - (pred_unit * target_unit).sum(1)) * mask
     return per.sum() / mask.sum().clamp_min(_MASK_EPS)
 
 
@@ -192,9 +218,9 @@ def _trajectory_losses(trajectories: torch.Tensor, confidence: torch.Tensor, gt:
 
 
 def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor, bev) -> torch.Tensor:
-    """HDMap 轨迹越界损失：可微采样道路外距离场，并惩罚超出 BEV 覆盖范围的部分。
+    """轨迹越界损失：可微采样道路外/可见占用距离场，并惩罚超出 BEV 覆盖范围的部分。
 
-    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸到道路外。`grid_sample` 的最后一维依次是列、行，
+    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸到道路外或穿过占用。`grid_sample` 的最后一维依次是列、行，
     因而 ego 的 `(x前向, y右向)` 要换成 `(y归一列, x反向归一行)`。
     """
     x, y = trajectories[..., 0], trajectories[..., 1]

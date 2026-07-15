@@ -1,4 +1,4 @@
-"""驾驶模型单帧数据集：逐帧产模型输入、三场/轨迹/行为 GT 及 HDMap 越界距离场。公开 API 重导出入口。
+"""驾驶模型双帧数据集：生成帧间刚性变换、独立道路线图与驾驶多任务监督。公开 API 重导出入口。
 
 模块: data/driving_dataset/__init__.py
 依赖: data.driving_dataset.driving_dataset

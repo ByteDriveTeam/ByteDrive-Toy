@@ -254,6 +254,8 @@ class DrivingAttentionCfg:
 @dataclass
 class BevEncoderCfg:
     cross_layers: int              # BEV 查询 ← 图像特征 交叉注意力层数
+    temporal_layers: int           # 当前 BEV 查询 ← 上一帧 BEV 交叉注意力层数
+    detach_previous: bool          # 是否截断上一帧 BEV 分支梯度
     num_convnext_blocks: int
     convnext_spatial_kernel: int
     convnext_expansion: int
@@ -267,6 +269,14 @@ class FieldsCfg:
 
 
 @dataclass
+class LaneMapCfg:
+    class_names: List[str]         # 0 固定为背景，其余为道路线类别
+    reduce_channels: int
+    up_channels: List[int]
+    feature_channels: int
+
+
+@dataclass
 class TrajectoryCfg:
     num_modes: int                 # 前向扇区数 = 多模态轨迹条数
     num_waypoints: int             # 每条轨迹航点数 T_wp
@@ -274,7 +284,6 @@ class TrajectoryCfg:
     cross_layers: int              # Token ← BEV 特征 交叉注意力层数
     self_layers: int               # Token 自注意力层数
     num_heads: int
-    velocity_norm_mps: float       # 自车速度归一尺度（m/s）
     waypoint_scale_m: float        # 航点回归输出的固定尺度（米）：Linear 原始输出乘此值到米制量级
 
 
@@ -285,7 +294,7 @@ class BehaviorCfg:
 
 @dataclass
 class DrivingCfg:
-    """驾驶系统（复用感知主干 → BEV → 三场 + 多模态轨迹/行为）网络参数。"""
+    """驾驶系统（双帧时序 BEV → 三场 + 独立道路线图 + 多模态轨迹/行为）网络参数。"""
     work_dim: int                  # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: bool        # 是否冻结感知主干（复用其预训练表征）
     neck_num_residual_blocks: int  # driving_neck 融合后 2D 残差块层数
@@ -295,6 +304,7 @@ class DrivingCfg:
     attention: DrivingAttentionCfg
     bev_encoder: BevEncoderCfg
     fields: FieldsCfg
+    lane_map: LaneMapCfg
     trajectory: TrajectoryCfg
     behavior: BehaviorCfg
 
@@ -359,14 +369,24 @@ class BehaviorTargetCfg:
 
 
 @dataclass
+class LaneMapTargetCfg:
+    line_width_m: float
+    type_to_class: Dict[str, int]
+    unknown_class: int
+
+
+@dataclass
 class DrivingDatasetCfg:
     """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
     scene_root: str
     camera: str
     map_dir: str                  # HD 地图目录
     map_name_template: str        # 地图文件名模板，如 "{map}_HD_map.npz"
+    previous_frame_offset: int    # 时序融合采用的同场景历史帧偏移
     dist_sigma_m: float           # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: float      # 车道中心线缓冲半宽（栅格可行驶区域用）
+    lane_map: LaneMapTargetCfg
+    box_min_visible_pixels: int   # box 可见性：反投影后落入 3D 框的最少深度像素数
     target_min_m: float           # 目标点采样距离窗口下界（沿未来轨迹搜近端引导点）
     target_max_m: float           # 目标点采样距离窗口上界
     behavior: BehaviorTargetCfg
@@ -394,7 +414,10 @@ class DrivingLossWeightsCfg:
     distribution: float           # 轨迹分布场
     risk: float                   # 风险场
     drivable: float               # 可行驶区域场
-    boundary: float               # HDMap 轨迹越界距离
+    lane_class: float             # 道路线类别
+    lane_class_weights: List[float]  # 类别 CE 权重（顺序对齐 model.driving.lane_map.class_names）
+    lane_direction: float         # 道路线有向切向量
+    boundary: float               # 轨迹到可行驶区域的越界距离（道路外/可见占用内）
 
 
 @dataclass
@@ -553,8 +576,8 @@ def validate_config(cfg):
 
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
-    _validate_data(cfg.data)
-    _validate_train(cfg.train)
+    _validate_data(cfg.data, cfg.model.driving.lane_map)
+    _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(cfg.driving_vis)
 
@@ -613,7 +636,7 @@ def _validate_physics(ph):
     # semantic_ignore_index 允许为负（如 -100 表示不忽略任何类），故不校验符号
 
 
-def _validate_data(data):
+def _validate_data(data, model_lane):
     """校验对象: cfg.data —— 数据加载参数。"""
     ds = data.dataset
     assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
@@ -621,8 +644,17 @@ def _validate_data(data):
     assert all(s > 0 for s in ds.dino_std), "data.dataset.dino_std 每通道必须 > 0"
     # 校验对象: data.driving —— 高斯软标签/车道半宽为正，地图模板含 {map} 占位
     dr = data.driving
+    assert dr.previous_frame_offset > 0, "data.driving.previous_frame_offset 必须 > 0"
     assert dr.dist_sigma_m > 0 and dr.lane_half_width_m > 0, \
         "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
+    lane = dr.lane_map
+    assert lane.line_width_m > 0, "data.driving.lane_map.line_width_m 必须 > 0"
+    class_ids = list(lane.type_to_class.values()) + [lane.unknown_class]
+    assert lane.type_to_class and all(isinstance(i, int) and 0 < i < len(model_lane.class_names)
+                                      for i in class_ids), \
+        "data.driving.lane_map 类别索引须落在 model.driving.lane_map.class_names 的非背景范围"
+    assert dr.box_min_visible_pixels >= 10, \
+        "data.driving.box_min_visible_pixels 必须 >= 10"
     assert "{map}" in dr.map_name_template, \
         "data.driving.map_name_template 必须含 {map} 占位（按场景地图名解析 HD 地图文件）"
     assert 0 < dr.target_min_m < dr.target_max_m, \
@@ -642,7 +674,7 @@ def _validate_data(data):
         "data.driving.behavior 交通灯匹配半径/Seg 容差/最少像素数取值非法"
 
 
-def _validate_train(train):
+def _validate_train(train, model_lane):
     """校验对象: cfg.train —— 训练超参数。"""
     for name in ("epochs", "batch_size", "num_workers", "log_every"):
         assert getattr(train, name) >= (1 if name != "num_workers" else 0), \
@@ -654,8 +686,12 @@ def _validate_train(train):
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
-               ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable", "boundary")), \
+               ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable",
+                "lane_class", "lane_direction", "boundary")), \
         "train.driving_loss_weights.* 必须 >= 0"
+    assert len(dw.lane_class_weights) == len(model_lane.class_names) \
+        and all(weight > 0 for weight in dw.lane_class_weights), \
+        "train.driving_loss_weights.lane_class_weights 须与道路线类别等长且各项 > 0"
 
 
 def _validate_driving(dv):
@@ -681,8 +717,8 @@ def _validate_driving(dv):
     assert dv.attention.mlp_ratio > 0, "model.driving.attention.mlp_ratio 必须 > 0"
     # 校验对象: bev_encoder —— 层数/核为正
     be = dv.bev_encoder
-    assert be.cross_layers > 0 and be.num_convnext_blocks > 0, \
-        "model.driving.bev_encoder.cross_layers / num_convnext_blocks 必须 > 0"
+    assert be.cross_layers > 0 and be.temporal_layers > 0 and be.num_convnext_blocks > 0, \
+        "model.driving.bev_encoder.cross_layers / temporal_layers / num_convnext_blocks 必须 > 0"
     assert be.convnext_spatial_kernel % 2 == 1 and be.convnext_spatial_kernel > 0, \
         "model.driving.bev_encoder.convnext_spatial_kernel 必须为正奇数"
     assert be.convnext_expansion > 0, "model.driving.bev_encoder.convnext_expansion 必须 > 0"
@@ -692,13 +728,25 @@ def _validate_driving(dv):
     assert len(dv.fields.up_channels) > 0 and all(
         isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in dv.fields.up_channels), \
         "model.driving.fields.up_channels 每级必须为正整数"
+    # 校验对象: lane_map —— 独立道路线图类别与上采样结构
+    lane = dv.lane_map
+    assert len(lane.class_names) >= 2 and lane.class_names[0] == "background", \
+        "model.driving.lane_map.class_names 至少含背景+一道路线，且索引 0 必须为 background"
+    assert len(lane.class_names) == len(set(lane.class_names)), \
+        "model.driving.lane_map.class_names 不得重复"
+    assert lane.reduce_channels > 0 and lane.feature_channels > 0, \
+        "model.driving.lane_map.reduce_channels / feature_channels 必须 > 0"
+    assert len(lane.up_channels) > 0 and all(
+        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in lane.up_channels), \
+        "model.driving.lane_map.up_channels 每级必须为正整数"
+    assert len(lane.up_channels) == len(dv.fields.up_channels), \
+        "model.driving.lane_map 与 fields 上采样级数须一致，保证监督分辨率对齐"
     # 校验对象: trajectory —— 模态/航点/层数为正、D 须能被头数整除
     tj = dv.trajectory
     for name in ("num_modes", "num_waypoints", "token_mlp_hidden", "cross_layers", "self_layers"):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
     assert tj.num_heads > 0 and dv.work_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 work_dim"
-    assert tj.velocity_norm_mps > 0, "model.driving.trajectory.velocity_norm_mps 必须 > 0"
     assert tj.waypoint_scale_m > 0, "model.driving.trajectory.waypoint_scale_m 必须 > 0"
     # 校验对象: behavior.num_classes —— 固定对应八类行为语义，避免模型头与标签顺序漂移
     assert dv.behavior.num_classes == 8, \

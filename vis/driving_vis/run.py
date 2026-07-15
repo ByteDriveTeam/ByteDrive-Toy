@@ -137,8 +137,10 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
     with torch.no_grad():
         outputs = model(sample["rgb"].unsqueeze(0).to(device), sample["intrinsics"].unsqueeze(0).to(device),
                         sample["extrinsics"].unsqueeze(0).to(device),
-                        sample["ego_velocity"].unsqueeze(0).to(device),
-                        sample["target_point"].unsqueeze(0).to(device))
+                        sample["target_point"].unsqueeze(0).to(device),
+                        sample["previous_rgb"].unsqueeze(0).to(device),
+                        sample["previous_to_current"].unsqueeze(0).to(device),
+                        sample["previous_valid"].unsqueeze(0).to(device))
     pred = _predict_fields(outputs)
     trajectories = outputs["trajectories"][0].cpu().numpy()
     confidence = outputs["confidence"][0].cpu().numpy()

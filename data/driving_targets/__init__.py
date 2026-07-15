@@ -1,4 +1,4 @@
-"""驾驶监督目标编码（纯 numpy 函数）：BEV/轨迹/三场及八类多标签行为。公开 API 重导出入口。
+"""驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见占用及八类多标签行为。公开 API 重导出入口。
 
 模块: data/driving_targets/__init__.py
 依赖: data.driving_targets.driving_targets
@@ -6,7 +6,7 @@
 对外接口:
     - BEHAVIOR_CLASSES / BehaviorParams / BevParams
     - bev_cell_centers / ego_xy_to_pixel / inview_mask / speed_accelerations
-    - trajectory_targets / sector_of / behavior_targets / risk_field / distribution_field
+    - trajectory_targets / sector_of / behavior_targets / risk_field / visible_box_occupancy / distribution_field
 说明: 跨模块统一 `from data.driving_targets import ...`；实现见 driving_targets.py，校验见 checks/。
 """
 
@@ -23,6 +23,7 @@ from data.driving_targets.driving_targets import (
     sector_of,
     speed_accelerations,
     trajectory_targets,
+    visible_box_occupancy,
 )
 
 __all__ = [
@@ -37,5 +38,6 @@ __all__ = [
     "sector_of",
     "behavior_targets",
     "risk_field",
+    "visible_box_occupancy",
     "distribution_field",
 ]

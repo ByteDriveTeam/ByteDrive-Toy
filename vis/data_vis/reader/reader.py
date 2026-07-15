@@ -9,6 +9,7 @@
         .num_frames -> int
         .camera_names -> list[str]
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
+        .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
         .frame(i) -> dict             # {rgb,depth,semantic,optical_flow,lidar,ego,bboxes,traffic_light_states,meta}
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .close()
@@ -102,6 +103,11 @@ class SceneReader:
         check_frame_index(i, self.num_frames)
         with self._env.begin() as txn:
             return msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
+
+    def rgb(self, i, camera):
+        """只读取指定帧/相机的 RGB，供时序模型避免为历史帧解码全部监督模态。"""
+        check_frame_index(i, self.num_frames)
+        return self._videos[camera].at(i)
 
     def frame(self, i):
         """读取第 i 帧的全部已落盘模态与标注，组装为一个 dict（缺失模态为空/None）。"""

@@ -7,8 +7,9 @@
     - TargetPointEmbedding(out_dim, x_min_m, x_max_m, y_min_m, y_max_m, height, width,
                            z_min_m, z_max_m, z_step_m, coord_symlog_scale, mlp_hidden,
                            vector_order) -> nn.Module
-        forward(target_points) -> Tensor   # [B,2] ego 目标点 → [B, out_dim, height, width] 初始 BEV 查询
-说明: 每个 BEV cell 中心 xy 扩展为一列 xyz（z 取 [z_min,z_max]@z_step 多值），逐 (cell,z) 拼上「到目标点的
+        forward(target_points, grid_xy=None) -> Tensor   # 可编码默认或外部刚性变换后的实际 BEV 几何
+说明: 默认把每个 BEV cell 中心 xy 扩展为一列 xyz（z 取 [z_min,z_max]@z_step 多值），也可接收逐 batch 的
+      外部 grid_xy（用于上一帧 BEV cell 刚性变换到当前 ego 系后的实际坐标）。逐 (cell,z) 拼上「到目标点的
       相对位移(xy)」构成 5 维几何向量，Symlog 归一到[-1,1]后过 Linear→SiLU→Linear 逐点编码，再沿 z 维
       聚合（均值）为该 cell 的 out_dim 维查询特征。垂直 z 多值经 MLP 非线性后聚合，使高度维带来的几何先验
       不被线性抵消；相对目标向量注入导航意图。自车位于 BEV 下方中心（x 前向、y 右向；行 0 对应 x_min）。
@@ -26,6 +27,7 @@ import torch.nn as nn
 
 from model.target_point_embedding.checks.target_point_embedding_checks import (
     check_bev_query_args,
+    check_grid_xy,
     check_target_points,
 )
 
@@ -63,32 +65,35 @@ class TargetPointEmbedding(nn.Module):
             nn.Linear(mlp_hidden, out_dim),
         )
 
-    def forward(self, target_points: torch.Tensor) -> torch.Tensor:
-        """ego 目标点 → 初始 BEV 查询 `[B, out_dim, height, width]`。"""
+    def forward(self, target_points: torch.Tensor, grid_xy: torch.Tensor = None) -> torch.Tensor:
+        """把目标点与默认/外部实际网格几何编码为 `[B, out_dim, height, width]`。"""
         check_target_points(target_points)
         device = target_points.device
         b = int(target_points.shape[0])
+        if grid_xy is None:
+            grid_xy = self.grid_xy[None].expand(b, -1, -1, -1)
+        check_grid_xy(grid_xy, b, self.height, self.width)
         with self._autocast(device, enabled=False):
-            columns = self._build_columns(target_points.float())  # [B, H, W, Nz, 5]
+            columns = self._build_columns(target_points.float(), grid_xy.float())
         with self._autocast(device, enabled=True):
             encoded = self.mlp(columns)          # [B, H, W, Nz, out_dim]
             query = encoded.mean(dim=3)          # 沿 z 聚合 → [B, H, W, out_dim]
         return query.permute(0, 3, 1, 2).reshape(b, self.out_dim, self.height, self.width)
 
-    def _build_columns(self, target_points: torch.Tensor) -> torch.Tensor:
+    def _build_columns(self, target_points: torch.Tensor, grid_xy: torch.Tensor) -> torch.Tensor:
         """构造逐 (cell, z) 的 5 维几何向量并 Symlog 归一：`[B, H, W, Nz, 5]`（FP32）。"""
-        grid_xy = self.grid_xy.to(target_points.device)          # [H,W,2]
+        grid_xy = grid_xy.to(target_points.device)               # [B,H,W,2]
         z = self.z_samples.to(target_points.device)              # [Nz]
         h, w = self.height, self.width
         nz = int(z.shape[0])
         # 到目标点相对位移（xy，与 z 无关）
         if self.vector_order == "grid_minus_target":
-            rel = grid_xy[None] - target_points[:, None, None, :]  # [B,H,W,2]
+            rel = grid_xy - target_points[:, None, None, :]
         else:
-            rel = target_points[:, None, None, :] - grid_xy[None]
+            rel = target_points[:, None, None, :] - grid_xy
         b = target_points.shape[0]
         # 广播拼出 [B,H,W,Nz,5] = (x,y,z, rel_x, rel_y)
-        xy = grid_xy[None, :, :, None, :].expand(b, h, w, nz, 2)
+        xy = grid_xy[:, :, :, None, :].expand(b, h, w, nz, 2)
         zc = z[None, None, None, :, None].expand(b, h, w, nz, 1)
         rel = rel[:, :, :, None, :].expand(b, h, w, nz, 2)
         columns = torch.cat((xy, zc, rel), dim=-1)

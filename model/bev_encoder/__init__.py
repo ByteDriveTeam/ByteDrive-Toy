@@ -1,4 +1,4 @@
-"""BEV 编码器：级联交叉注意力 + ConvNeXt2D。公开 API 重导出入口。
+"""BEV 编码器：依次查询当前图像与上一帧 BEV，再由 ConvNeXt2D 提炼。公开 API 重导出入口。
 
 模块: model/bev_encoder/__init__.py
 依赖: model.bev_encoder.bev_encoder

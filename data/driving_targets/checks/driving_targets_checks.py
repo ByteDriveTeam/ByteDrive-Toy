@@ -8,9 +8,16 @@ def check_bev_params(bev):
 
 
 def check_depth_map(depth_m):
-    """校验对象: risk_field 入参 depth_m —— 二维深度图 (Hc, Wc)。"""
+    """校验对象: risk_field/visible_box_occupancy 入参 depth_m —— 二维深度图 (Hc, Wc)。"""
     if depth_m.ndim != 2:
         raise ValueError("depth_m 期望二维 (Hc,Wc)，实际 {}。".format(tuple(depth_m.shape)))
+
+
+def check_visible_box_inputs(depth_m, min_visible_pixels):
+    """校验对象: visible_box_occupancy 入参 —— 深度图为二维且可见阈值不少于 10 像素。"""
+    check_depth_map(depth_m)
+    if min_visible_pixels < 10:
+        raise ValueError("min_visible_pixels 必须 >= 10，实际 {}。".format(min_visible_pixels))
 
 
 def check_motion_sequence(world_velocities, sim_times):
