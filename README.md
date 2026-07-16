@@ -98,7 +98,7 @@ flowchart LR
 下图由 `vis/pred_vis/run.py` 直接生成。每列是一帧，从上到下依次为 RGB、预测语义、预测深度、
 语义真值和深度真值。
 
-![ByteDrive 感知预测可视化](assets/visualizations/scene_000000_n04.png)
+![ByteDrive 感知预测可视化](assets/visualizations/perception.png)
 
 ### 驾驶三场、道路线、交通控制与多模态轨迹
 
@@ -106,7 +106,7 @@ flowchart LR
 道路线图按类别着色，并以稀疏箭头显示 ego 坐标系中的有向切向量，具体类别/方向编码见“独立道路线图”章节。
 `gt` 与 `pred` 行采用相同几何范围和着色口径，可直接观察 BEV 空间对齐情况。
 
-![ByteDrive 驾驶预测可视化](assets/visualizations/scene_000032_n04.png)
+![ByteDrive 驾驶预测可视化](assets/visualizations/driving.png)
 
 最新版额外输出 `gt traffic` / `pred traffic` 行：停止线按红/黄/绿灯态着色，未知灯态显示为白色，并叠加到
 轨迹 BEV 以检查空间关系。下图使用真实数据第 12 个样本的 GT，左侧为独立交通控制层，右侧为停止线与三场、
