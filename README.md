@@ -592,9 +592,9 @@ K_6\mathcal{L}_{drivable}+
 K_7\mathcal{L}_{lane\_class}+
 K_8\mathcal{L}_{lane\_direction}+
 K_9\mathcal{L}_{boundary}+
-K_10\mathcal{L}_{stop\_line}+
-K_11\mathcal{L}_{light\_state}+
-K_12\mathcal{L}_{stop\_crossing}
+K_{10}\mathcal{L}_{stop\_line}+
+K_{11}\mathcal{L}_{light\_state}+
+K_{12}\mathcal{L}_{stop\_crossing}
 \end{aligned}
 ```
 
@@ -718,24 +718,6 @@ ByteDrive-Toy/
 | `perception.pt` | 73.9 MiB | 感知 epoch 40；模型+优化器 | 感知推理/续训；初始化驾驶感知模块 |
 | `driving.pt` | 258.2 MiB | 驾驶 epoch 10；模型+优化器 | 驾驶推理/续训 |
 | `Town01_HD_map.npz` | 7.3 MiB | Town01 车道折线 HDMap | 生成可行驶场和越界距离场 |
-
-本说明对应文件的 SHA-256：
-
-| 文件 | SHA-256 |
-| --- | --- |
-| `model.safetensors` | `9A21AC3DF0C63839D62612DDA6F454D816C25611CC7A52966ED5A5A94921DC8B` |
-| `perception.pt` | `A15E290B5AD92E82D96D6CA625CE7E6AA8CB10518F57D44967C3F96BF9103B1B` |
-| `driving.pt` | `1B0F126D75503C766FCA6279DCCBC16CB442E6788919159B936C5535CDCCD05F` |
-| `Town01_HD_map.npz` | `A9C5B76CCCBD3A08BCD178F06943D256530E7331A93C0354F6F0F7B5396257B5` |
-
-Windows PowerShell 校验示例：
-
-```powershell
-Get-FileHash -Algorithm SHA256 model/dinov3-vitb16-pretrain-lvd1689m/model.safetensors
-Get-FileHash -Algorithm SHA256 train/ckpt/perception.pt
-Get-FileHash -Algorithm SHA256 train/ckpt/driving/driving.pt
-Get-FileHash -Algorithm SHA256 data/map/Town01_HD_map.npz
-```
 
 快速检查权重能否被当前代码识别：
 
