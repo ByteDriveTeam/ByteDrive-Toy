@@ -62,7 +62,8 @@ def _save_checkpoint(model, optimizer, path: Path, epoch: int) -> None:
     """保存非骨干权重（排除任何含 backbone. 的键）+ 优化器状态 + 已完成 epoch 数，供断点续训。"""
     trainable = {k: v for k, v in model.state_dict().items() if "backbone." not in k}
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"epoch": epoch, "model": trainable, "optimizer": optimizer.state_dict()}, path)
+    torch.save({"epoch": epoch, "model": trainable, "optimizer": optimizer.state_dict(),
+                "optimizer_param_names": _optimizer_param_names(model, optimizer)}, path)
 
 
 def _find_latest_checkpoint(ckpt_dir: Path):
@@ -80,12 +81,117 @@ def _maybe_resume(model, optimizer, ckpt_dir: Path, resume: bool, explicit, devi
     if path is None:
         return 0
     ckpt = torch.load(path, map_location=device)
-    # 骨干权重不在检查点内，故 strict=False 容忍缺失的 *backbone.* 键
-    model.load_state_dict(ckpt["model"], strict=False)
-    optimizer.load_state_dict(ckpt["optimizer"])
+    loaded_names = _load_compatible_model(model, ckpt["model"])
+    _load_compatible_optimizer(
+        model, optimizer, ckpt.get("optimizer"), ckpt.get("optimizer_param_names"), loaded_names)
     start_epoch = int(ckpt["epoch"])
     print("[train] 从 {} 恢复，起始 epoch={}".format(path, start_epoch))
     return start_epoch
+
+
+def _optimizer_param_names(model, optimizer):
+    """按优化器参数组保存稳定参数名，供结构扩展后精确迁移动量。"""
+    name_by_id = {id(parameter): name for name, parameter in model.named_parameters()}
+    return [[name_by_id[id(parameter)] for parameter in group["params"]]
+            for group in optimizer.param_groups]
+
+
+def _load_compatible_model(model, saved_state):
+    """载入键名与形状均兼容的模型权重；新增或改形状参数保留构造期初始化。"""
+    current = model.state_dict()
+    compatible = {name: value for name, value in saved_state.items()
+                  if name in current and tuple(value.shape) == tuple(current[name].shape)}
+    skipped = [name for name, value in saved_state.items()
+               if name not in current or tuple(value.shape) != tuple(current[name].shape)]
+    missing, unexpected = model.load_state_dict(compatible, strict=False)
+    initialized = [name for name in missing if "backbone." not in name]
+    print("[train] 模型兼容恢复：载入 {} 项，新增初始化 {} 项，跳过 {} 项".format(
+        len(compatible), len(initialized), len(skipped) + len(unexpected)))
+    if initialized:
+        print("[train]   新增/未覆盖参数保留自动初始化：{}".format(initialized[:8]))
+    if skipped or unexpected:
+        print("[train]   ⚠ 不兼容或多余参数：{}".format((skipped + list(unexpected))[:8]))
+    return set(compatible)
+
+
+def _load_compatible_optimizer(model, optimizer, saved, saved_name_groups, loaded_names):
+    """把旧优化器状态迁移到已恢复参数；新增参数保持无动量状态并在首次 step 时自动建立。"""
+    if not saved:
+        print("[train] 检查点无优化器状态，使用新优化器")
+        return
+    current = optimizer.state_dict()
+    if len(saved["param_groups"]) != len(current["param_groups"]):
+        print("[train] ⚠ 优化器参数组数量变化，模型已恢复但优化器使用新状态")
+        return
+
+    current_names = _optimizer_param_names(model, optimizer)
+    old_ids_by_name = _old_optimizer_ids_by_name(
+        saved["param_groups"], saved_name_groups, current_names, loaded_names)
+    if old_ids_by_name is None:
+        print("[train] ⚠ 旧优化器参数无法可靠对齐，模型已恢复但优化器使用新状态")
+        return
+
+    new_state = {}
+    restored_names = []
+    new_names = []
+    lazy_names = []
+    for names, current_group in zip(current_names, current["param_groups"]):
+        for name, current_id in zip(names, current_group["params"]):
+            old_id = old_ids_by_name.get(name)
+            if old_id in saved["state"]:
+                new_state[current_id] = saved["state"][old_id]
+                restored_names.append(name)
+            elif old_id is None:
+                new_names.append(name)
+            else:
+                lazy_names.append(name)
+    groups = []
+    for old_group, current_group in zip(saved["param_groups"], current["param_groups"]):
+        merged = dict(current_group)
+        merged.update({key: value for key, value in old_group.items() if key != "params"})
+        merged["params"] = current_group["params"]
+        groups.append(merged)
+    optimizer.load_state_dict({"state": new_state, "param_groups": groups})
+    total = sum(len(group["params"]) for group in current["param_groups"])
+    print("[train] 优化器兼容恢复：迁移 {}/{} 个参数状态；新增无旧状态 {} 项；旧档未建状态 {} 项".format(
+        len(restored_names), total, len(new_names), len(lazy_names)))
+    if new_names:
+        print("[train]   新增参数首次 step 自动建立状态：{}".format(new_names[:8]))
+    if lazy_names:
+        print("[train]   checkpoint 中未建立 AdamW 状态：{}".format(lazy_names[:8]))
+
+
+def _old_optimizer_ids_by_name(old_groups, saved_name_groups, current_names, loaded_names):
+    """优先按保存名映射；旧格式兼容新增参数及驾驶感知头从组尾移除前的稳定顺序。"""
+    if saved_name_groups is not None:
+        if len(saved_name_groups) != len(old_groups) or any(
+                len(names) != len(group["params"])
+                for names, group in zip(saved_name_groups, old_groups)):
+            return None
+        pairs = [(name, param_id)
+                 for names, group in zip(saved_name_groups, old_groups)
+                 for name, param_id in zip(names, group["params"])
+                 if name in loaded_names]
+        return dict(pairs)
+
+    mapping = {}
+    for old_group, names in zip(old_groups, current_names):
+        reusable = [name for name in names if name in loaded_names]
+        old_ids = old_group["params"]
+        if len(reusable) > len(old_ids):
+            return None
+        if len(reusable) < len(old_ids) and not _is_legacy_feature_group(reusable):
+            return None
+        # 无参数名的旧驾驶优化器按 fusion、trunk、semantic_head、depth_head 排序；
+        # 当前只保留前两者，故多出的旧 ID 必然是组尾两个未参与驾驶前向的感知头。
+        mapping.update(zip(reusable, old_ids[:len(reusable)]))
+    return mapping
+
+
+def _is_legacy_feature_group(names):
+    """判断当前组是否是旧驾驶优化器中位于两个感知解码头之前的 fusion/trunk 前缀。"""
+    prefixes = ("perception.fusion.", "perception.trunk.")
+    return bool(names) and all(name.startswith(prefixes) for name in names)
 
 
 def _load_perception_weights(model: DrivingModel, path, device) -> None:

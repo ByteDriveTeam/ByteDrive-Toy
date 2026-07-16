@@ -24,6 +24,39 @@ def check_lane_map(lane_class, lane_direction, class_colors, inview):
             tuple(lane_class.shape), tuple(inview.shape)))
 
 
+def check_traffic_control(stop_line, state_map, state_valid, state_colors, unknown_color, inview):
+    """校验对象: colorize_traffic_control 入参 —— 停止线、灯态、有效掩码、颜色与视场。"""
+    if stop_line.ndim != 2:
+        raise ValueError("stop_line 期望二维 [H,W]，实际 {}。".format(tuple(stop_line.shape)))
+    if tuple(state_map.shape) != tuple(stop_line.shape):
+        raise ValueError("state_map 期望 {}，实际 {}。".format(
+            tuple(stop_line.shape), tuple(state_map.shape)))
+    if state_valid is not None and tuple(state_valid.shape) != tuple(stop_line.shape):
+        raise ValueError("state_valid 期望 {}，实际 {}。".format(
+            tuple(stop_line.shape), tuple(state_valid.shape)))
+    if not state_colors or any(len(color) != 3 for color in state_colors) or len(unknown_color) != 3:
+        raise ValueError("state_colors 与 unknown_color 需为 BGR 三元组。")
+    if state_map.size and (state_map.min() < 0 or state_map.max() >= len(state_colors)):
+        raise ValueError("state_map 类别索引超出 state_colors 范围。")
+    if inview is not None and tuple(inview.shape) != tuple(stop_line.shape):
+        raise ValueError("inview 期望 {}，实际 {}。".format(
+            tuple(stop_line.shape), tuple(inview.shape)))
+
+
+def check_traffic_overlay(base_bgr, traffic_bgr, stop_mask, alpha):
+    """校验对象: overlay_traffic_control 入参 —— 等尺寸 BGR 底图、交通控制图与停止线掩码。"""
+    if base_bgr.ndim != 3 or base_bgr.shape[2] != 3:
+        raise ValueError("base_bgr 期望 [H,W,3]。")
+    if tuple(traffic_bgr.shape) != tuple(base_bgr.shape):
+        raise ValueError("traffic_bgr 期望 {}，实际 {}。".format(
+            tuple(base_bgr.shape), tuple(traffic_bgr.shape)))
+    if tuple(stop_mask.shape) != tuple(base_bgr.shape[:2]):
+        raise ValueError("stop_mask 期望 {}，实际 {}。".format(
+            tuple(base_bgr.shape[:2]), tuple(stop_mask.shape)))
+    if not 0 < alpha <= 1:
+        raise ValueError("alpha 必须在 (0,1]。")
+
+
 def check_canvas_rows(rows):
     """校验对象: compose_canvas 入参 rows —— 非空且每行至少一个面板。"""
     if not rows:

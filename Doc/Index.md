@@ -27,9 +27,9 @@
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
 - [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、SceneReader 惰性缓存、RGB 归一化（感知与驾驶复用）
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
-- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载带类别/方向的车道折线，生成可行驶区域、独立道路线图及越界距离场
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -73,23 +73,23 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 特征主干：已融合到工作维的单帧特征，经多层 2D 瓶颈残差块提炼空间表征
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 2D 特征主干 + 语义/深度双头（并对外暴露 trunk+DINO 原始特征供驾驶复用）
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 多层特征融合 + 2D 特征主干 + 语义/深度双头。
 - [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
 - [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：把 BEV 栅格中心 xyz 坐标（含垂直 z 采样）与目标点相对向量编码为初始 BEV 查询网格
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
 - [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：查询当前图像后查询带实际变换几何的上一帧 BEV，再由 ConvNeXt2D 提炼
 - [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
-- [model/lane_map_decoder/lane_map_decoder.py](../model/lane_map_decoder/lane_map_decoder.py) — 独立道路线图解码器：BEV 特征上采样为道路线类别 logits 与有向切向量
+- [model/lane_map_decoder/lane_map_decoder.py](../model/lane_map_decoder/lane_map_decoder.py) — 道路细线解码器：共享高分辨率特征输出道路线、相关停止线与交通灯状态。
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列，输出轨迹、置信度与多标签行为
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧开环驾驶模型：当前图像查询后融合刚性对齐的上一帧 BEV，解码三场、道路线图与驾驶输出
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧开环驾驶模型：融合刚性对齐的历史 BEV，解码三场、道路线、交通控制与驾驶输出。
 
 ## train/ — 训练 / 评估循环
 
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知任务与驾驶三场、独立道路线类别/方向、轨迹行为及不可行驶约束
-- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化可训练参数，冻结骨干不纳入
+- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
+- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
-- [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重
+- [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重。
 
 ## clone_loop/ — 行为克隆闭环
 
@@ -111,8 +111,9 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
 - [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存
 
-### vis/driving_vis/ — 驾驶模型可视化（RGB/Seg/Depth + GT/预测 三场/道路线图 + 多模态轨迹）
+### vis/driving_vis/ — 驾驶模型可视化（透视模态 + GT/预测 三场/道路线/交通控制/轨迹）
 
-- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块包标识：渲染 RGB/Seg/Depth 与 GT/预测三场、道路线图及多模态轨迹对照
-- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：三场/带方向道路线图/多模态轨迹着色与混合尺寸面板合成（复用 pred_vis 的 RGB/Seg/Depth 着色）
-- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场、道路线图与多模态轨迹并保存
+- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块：对照渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹。
+- [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — 驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
+- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布。
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹并保存。

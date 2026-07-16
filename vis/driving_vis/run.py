@@ -1,4 +1,4 @@
-"""驾驶可视化入口 CLI：加载配置与权重 → 逐帧推理 → 渲染 RGB/Seg/Depth + GT/预测三场、道路线图与轨迹并保存。
+"""驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹并保存。
 
 模块: vis/driving_vis/run.py
 依赖: argparse, pathlib, cv2, numpy, torch, config.load_config, model.driving_model.DrivingModel,
@@ -8,14 +8,16 @@
     driving_vis.checkpoint / scene / max_frames / save_dir / show_ground_truth / display_scale
     driving_vis.field_colormap / depth_colormap / depth_max_display_m / depth_min_display_m / depth_log
     driving_vis.lane_map.*（道路线类别配色与方向箭头样式）
+    driving_vis.traffic_control.*（灯态配色、停止线阈值与轨迹叠加强度）
     data.dataset.dino_mean / dino_std（RGB 去归一化展示）
     data.driving.camera（读原始 Seg/Depth 展示）
     model.driving.bev.*（BEV 场几何与视场）/ fields.up_channels（场分辨率）
+    model.driving.traffic_control.state_names（灯态显示名）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
       读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，行含 RGB/Seg/Depth（透视）与 GT/预测
-      的风险/可行驶/分布场、带方向箭头的道路线图及叠加轨迹 BEV（俯视）。加载驾驶权重（strict=False，容忍缺失的冻结骨干键）；检查点
+      的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）。加载驾驶权重（strict=False，容忍缺失的冻结骨干键）；检查点
       不存在则随机初始化并告警，便于仅验证渲染管线。推理沿用模型内部 BF16/FP32 混精边界，渲染委托
       vis.driving_vis.render，结果按场景存 PNG。
 """
@@ -92,6 +94,38 @@ def _predict_lane_map(outputs):
     return lane_class, direction.cpu().numpy()
 
 
+def _predict_traffic_control(outputs, state_names, threshold):
+    """把交通控制 logits 转成阈值化停止线、灯态类别图与峰值摘要。"""
+    stop = torch.sigmoid(outputs["stop_line_logits"][0, 0]).cpu().numpy()
+    state_prob = torch.softmax(outputs["traffic_light_state_logits"][0], dim=0).cpu().numpy()
+    state_map = state_prob.argmax(axis=0)
+    peak = np.unravel_index(int(stop.argmax()), stop.shape)
+    line_score = float(stop[peak])
+    active = line_score > threshold
+    state_id = int(state_map[peak])
+    state_score = float(state_prob[state_id][peak])
+    annotations = (["state {}".format(state_names[state_id]),
+                    "line {:.2f}  state {:.2f}".format(line_score, state_score)]
+                   if active else ["state none", "line {:.2f}".format(line_score)])
+    return np.where(stop > threshold, stop, 0.0), state_map, annotations
+
+
+def _ground_truth_traffic_control(sample, state_names):
+    """提取停止线/灯态真值，并生成灯态、停车要求和距离摘要。"""
+    stop = sample["stop_line"].numpy()
+    state_map = sample["traffic_light_state"].numpy()
+    state_valid = sample["traffic_light_state_valid"].numpy()
+    if not bool((stop > 0).any()):
+        return stop, state_map, state_valid, ["state none"]
+    valid_pixels = state_valid > 0
+    state = state_names[int(state_map[valid_pixels][0])] if bool(valid_pixels.any()) else "unknown"
+    must_stop = bool(float(sample["red_stop_valid"]) > 0)
+    distance = float(sample["stop_distance"])
+    annotations = ["state {}".format(state),
+                   "must_stop {}  d {:.1f}m".format("yes" if must_stop else "no", distance)]
+    return stop, state_map, state_valid, annotations
+
+
 def main(argv=None) -> None:
     """驾驶可视化主流程。"""
     parser = argparse.ArgumentParser(description="ByteDrive 驾驶模型可视化")
@@ -131,10 +165,11 @@ def main(argv=None) -> None:
     print("[driving_vis] 已保存 {}".format(out_path))
 
 
-# 行顺序（透视 → BEV 三场/道路线 GT/预测 → 轨迹 BEV）；gt 行在 show_ground_truth=False 时跳过
+# 行顺序（透视 → BEV 三场/道路线/交通控制 GT/预测 → 轨迹 BEV）；gt 行可按配置跳过
 _ROW_ORDER = ("rgb", "seg", "depth",
               "gt risk", "pred risk", "gt drivable", "pred drivable",
-              "gt dist", "pred dist", "gt lanes", "pred lanes", "gt traj", "pred traj")
+              "gt dist", "pred dist", "gt lanes", "pred lanes",
+              "gt traffic", "pred traffic", "gt traj", "pred traj")
 
 
 def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, mean, std, panels):
@@ -151,16 +186,17 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
                         sample["previous_to_current"].unsqueeze(0).to(device),
                         sample["previous_valid"].unsqueeze(0).to(device))
     pred = _predict_fields(outputs)
-    pred_lane_class, pred_lane_direction = _predict_lane_map(outputs)
-    trajectories = outputs["trajectories"][0].cpu().numpy()
-    confidence = outputs["confidence"][0].cpu().numpy()
-
     inview = sample["inview"].numpy()
     gt = {k: sample[k].numpy() for k in ("risk", "drivable", "distribution")}
-    gt_lane_class = sample["lane_class"].numpy()
-    gt_lane_direction = sample["lane_direction"].numpy()
-    gt_traj, gt_valid = sample["trajectory"].numpy(), sample["traj_valid"].numpy()
+    _append_perspective_panels(sample, frame, camera, dv, mean, std, panels)
+    _append_field_panels(gt, pred, inview, dv.field_colormap, panels)
+    _append_lane_panels(sample, outputs, inview, dv.lane_map, panels)
+    traffic_layers = _append_traffic_panels(sample, outputs, cfg, dv, inview, panels)
+    _append_trajectory_panels(sample, outputs, gt, pred, traffic_layers, dv, bev, fov, panels)
 
+
+def _append_perspective_panels(sample, frame, camera, dv, mean, std, panels):
+    """追加 RGB、语义和深度透视面板。"""
     rgb = sample["rgb"].cpu().numpy() * std[:, None, None] + mean[:, None, None]
     panels["rgb"].append(render.to_display_bgr(rgb))
     panels["seg"].append(render.colorize_semantic(np.ascontiguousarray(frame["semantic"][camera])))
@@ -168,24 +204,59 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
         np.ascontiguousarray(frame["depth"][camera]).astype(np.float32),
         dv.depth_colormap, dv.depth_max_display_m, dv.depth_min_display_m, dv.depth_log))
 
+
+def _append_field_panels(gt, pred, inview, colormap, panels):
+    """追加三场的真值与预测面板。"""
     for name in ("risk", "drivable", "distribution"):
         key = "dist" if name == "distribution" else name
-        panels["gt " + key].append(render.colorize_field(gt[name], dv.field_colormap, inview))
-        panels["pred " + key].append(render.colorize_field(pred[name], dv.field_colormap, inview))
+        panels["gt " + key].append(render.colorize_field(gt[name], colormap, inview))
+        panels["pred " + key].append(render.colorize_field(pred[name], colormap, inview))
 
-    lane_vis = dv.lane_map
+
+def _append_lane_panels(sample, outputs, inview, lane_vis, panels):
+    """追加带方向箭头的道路线真值与预测面板。"""
+    pred_class, pred_direction = _predict_lane_map(outputs)
     lane_args = (lane_vis.class_colors, lane_vis.arrow_color, lane_vis.arrow_stride_px,
                  lane_vis.arrow_length_px, lane_vis.arrow_thickness, lane_vis.arrow_tip_ratio, inview)
     panels["gt lanes"].append(render.colorize_lane_map(
-        gt_lane_class, gt_lane_direction, *lane_args))
+        sample["lane_class"].numpy(), sample["lane_direction"].numpy(), *lane_args))
     panels["pred lanes"].append(render.colorize_lane_map(
-        pred_lane_class, pred_lane_direction, *lane_args))
+        pred_class, pred_direction, *lane_args))
 
+
+def _append_traffic_panels(sample, outputs, cfg, dv, inview, panels):
+    """追加停止线/灯态面板，并返回供轨迹 BEV 叠加的图层。"""
+    state_names = cfg.model.driving.traffic_control.state_names
+    traffic_vis = dv.traffic_control
+    pred_stop, pred_state, pred_notes = _predict_traffic_control(
+        outputs, state_names, traffic_vis.line_threshold)
+    gt_stop, gt_state, gt_valid, gt_notes = _ground_truth_traffic_control(sample, state_names)
+    traffic_args = (traffic_vis.state_colors, traffic_vis.unknown_color, inview)
+    gt_traffic = render.colorize_traffic_control(
+        gt_stop, gt_state, gt_valid, *traffic_args, gt_notes)
+    pred_traffic = render.colorize_traffic_control(
+        pred_stop, pred_state, None, *traffic_args, pred_notes)
+    panels["gt traffic"].append(gt_traffic)
+    panels["pred traffic"].append(pred_traffic)
+    return gt_stop, gt_traffic, pred_stop, pred_traffic
+
+
+def _append_trajectory_panels(sample, outputs, gt, pred, traffic_layers, dv, bev, fov, panels):
+    """在三场底图叠加停止线，再追加真值与多模态预测轨迹。"""
+    gt_stop, gt_traffic, pred_stop, pred_traffic = traffic_layers
+    inview = sample["inview"].numpy()
     gt_base = render.bev_scene_composite(gt["risk"], gt["drivable"], gt["distribution"], inview)
     pred_base = render.bev_scene_composite(pred["risk"], pred["drivable"], pred["distribution"], inview)
+    gt_base = render.overlay_traffic_control(
+        gt_base, gt_traffic, gt_stop > 0, dv.traffic_control.overlay_alpha)
+    pred_base = render.overlay_traffic_control(
+        pred_base, pred_traffic, pred_stop > 0, dv.traffic_control.overlay_alpha)
+    gt_traj, gt_valid = sample["trajectory"].numpy(), sample["traj_valid"].numpy()
     empty_modes = np.zeros((0, gt_traj.shape[0], 2), dtype=np.float32)  # gt 面板只画 GT
     panels["gt traj"].append(render.draw_trajectories(
         gt_base, empty_modes, np.zeros(0), gt_traj, gt_valid, bev, fov, draw_gt=True))
+    trajectories = outputs["trajectories"][0].cpu().numpy()
+    confidence = outputs["confidence"][0].cpu().numpy()
     panels["pred traj"].append(render.draw_trajectories(
         pred_base, trajectories, confidence, gt_traj, gt_valid, bev, fov, draw_gt=dv.show_ground_truth))
 

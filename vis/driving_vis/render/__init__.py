@@ -1,10 +1,11 @@
-"""驾驶模型可视化渲染：三场/道路线图/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
+"""驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
 
 模块: vis/driving_vis/render/__init__.py
 依赖: vis.driving_vis.render.render
 读取配置: —
 对外接口:
-    - colorize_field / colorize_lane_map / bev_scene_composite / draw_trajectories / compose_canvas
+    - colorize_field / colorize_lane_map / colorize_traffic_control / overlay_traffic_control
+    - bev_scene_composite / draw_trajectories / compose_canvas
     - to_display_bgr / colorize_semantic / colorize_depth（复用 pred_vis）
 说明: 跨模块统一 `from vis.driving_vis.render import ...`；实现见 render.py，校验见 checks/。
 """
@@ -15,12 +16,15 @@ from vis.driving_vis.render.render import (
     colorize_field,
     colorize_lane_map,
     colorize_semantic,
+    colorize_traffic_control,
     compose_canvas,
     draw_trajectories,
+    overlay_traffic_control,
     to_display_bgr,
 )
 
 __all__ = [
-    "colorize_field", "colorize_lane_map", "bev_scene_composite", "draw_trajectories", "compose_canvas",
+    "colorize_field", "colorize_lane_map", "colorize_traffic_control", "overlay_traffic_control",
+    "bev_scene_composite", "draw_trajectories", "compose_canvas",
     "to_display_bgr", "colorize_semantic", "colorize_depth",
 ]

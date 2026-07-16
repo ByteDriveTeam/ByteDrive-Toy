@@ -277,6 +277,11 @@ class LaneMapCfg:
 
 
 @dataclass
+class TrafficControlCfg:
+    state_names: List[str]          # 动态灯色类别；停止线几何由独立二值头预测
+
+
+@dataclass
 class TrajectoryCfg:
     num_modes: int                 # 前向扇区数 = 多模态轨迹条数
     num_waypoints: int             # 每条轨迹航点数 T_wp
@@ -305,6 +310,7 @@ class DrivingCfg:
     bev_encoder: BevEncoderCfg
     fields: FieldsCfg
     lane_map: LaneMapCfg
+    traffic_control: TrafficControlCfg
     trajectory: TrajectoryCfg
     behavior: BehaviorCfg
 
@@ -376,6 +382,16 @@ class LaneMapTargetCfg:
 
 
 @dataclass
+class TrafficControlTargetCfg:
+    route_corridor_m: float         # 路线与停止区相关性判定的走廊半宽
+    line_expand_m: float            # 栅格化停止区的额外膨胀半径
+    actor_match_radius_m: float     # 地图 ParentActor 与场景交通灯 actor 匹配半径
+    stop_margin_m: float            # 红灯轨迹停止安全余量
+    reaction_time_s: float          # 可停车性判定反应时间
+    comfortable_decel_mps2: float   # 可停车性判定舒适减速度
+
+
+@dataclass
 class DrivingDatasetCfg:
     """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
     scene_root: str
@@ -386,6 +402,7 @@ class DrivingDatasetCfg:
     dist_sigma_m: float           # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: float      # 车道中心线缓冲半宽（栅格可行驶区域用）
     lane_map: LaneMapTargetCfg
+    traffic_control: TrafficControlTargetCfg
     box_min_visible_pixels: int   # box 可见性：反投影后落入 3D 框的最少深度像素数
     target_min_m: float           # 目标点采样距离窗口下界（沿未来轨迹搜近端引导点）
     target_max_m: float           # 目标点采样距离窗口上界
@@ -418,6 +435,9 @@ class DrivingLossWeightsCfg:
     lane_class_weights: List[float]  # 类别 CE 权重（顺序对齐 model.driving.lane_map.class_names）
     lane_direction: float         # 道路线有向切向量
     boundary: float               # 轨迹到可行驶区域的越界距离（道路外/可见占用内）
+    stop_line: float              # 相关交通灯停止线几何
+    traffic_light_state: float    # 停止线区域灯色分类
+    stop_crossing: float          # 红灯轨迹越线距离
 
 
 @dataclass
@@ -462,6 +482,14 @@ class LaneMapVisCfg:
 
 
 @dataclass
+class TrafficControlVisCfg:
+    state_colors: List[List[int]]
+    unknown_color: List[int]
+    line_threshold: float
+    overlay_alpha: float
+
+
+@dataclass
 class DrivingVisCfg:
     checkpoint: str
     scene: str
@@ -475,6 +503,7 @@ class DrivingVisCfg:
     depth_min_display_m: float
     depth_log: bool
     lane_map: LaneMapVisCfg
+    traffic_control: TrafficControlVisCfg
 
 
 @dataclass
@@ -590,7 +619,8 @@ def validate_config(cfg):
     _validate_data(cfg.data, cfg.model.driving.lane_map)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_pred_vis(cfg.pred_vis)
-    _validate_driving_vis(cfg.driving_vis, cfg.model.driving.lane_map)
+    _validate_driving_vis(
+        cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
@@ -664,6 +694,11 @@ def _validate_data(data, model_lane):
     assert lane.type_to_class and all(isinstance(i, int) and 0 < i < len(model_lane.class_names)
                                       for i in class_ids), \
         "data.driving.lane_map 类别索引须落在 model.driving.lane_map.class_names 的非背景范围"
+    traffic = dr.traffic_control
+    assert traffic.route_corridor_m > 0 and traffic.line_expand_m >= 0 \
+        and traffic.actor_match_radius_m > 0 and traffic.stop_margin_m >= 0 \
+        and traffic.reaction_time_s >= 0 and traffic.comfortable_decel_mps2 > 0, \
+        "data.driving.traffic_control 走廊/膨胀/匹配/制动参数取值非法"
     assert dr.box_min_visible_pixels >= 10, \
         "data.driving.box_min_visible_pixels 必须 >= 10"
     assert "{map}" in dr.map_name_template, \
@@ -698,7 +733,8 @@ def _validate_train(train, model_lane):
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
                ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable",
-                "lane_class", "lane_direction", "boundary")), \
+                "lane_class", "lane_direction", "boundary", "stop_line",
+                "traffic_light_state", "stop_crossing")), \
         "train.driving_loss_weights.* 必须 >= 0"
     assert len(dw.lane_class_weights) == len(model_lane.class_names) \
         and all(weight > 0 for weight in dw.lane_class_weights), \
@@ -752,6 +788,10 @@ def _validate_driving(dv):
         "model.driving.lane_map.up_channels 每级必须为正整数"
     assert len(lane.up_channels) == len(dv.fields.up_channels), \
         "model.driving.lane_map 与 fields 上采样级数须一致，保证监督分辨率对齐"
+    # 校验对象: traffic_control —— 灯色类别稳定且至少覆盖红灯越线监督所需的 red
+    states = dv.traffic_control.state_names
+    assert states and len(states) == len(set(states)) and "red" in states, \
+        "model.driving.traffic_control.state_names 须非空、不重复且包含 red"
     # 校验对象: trajectory —— 模态/航点/层数为正、D 须能被头数整除
     tj = dv.trajectory
     for name in ("num_modes", "num_waypoints", "token_mlp_hidden", "cross_layers", "self_layers"):
@@ -828,7 +868,7 @@ def _validate_pred_vis(pv):
         "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
 
 
-def _validate_driving_vis(dv, model_lane):
+def _validate_driving_vis(dv, model_lane, model_traffic):
     """校验对象: cfg.driving_vis —— 驾驶模型可视化参数。"""
     assert dv.max_frames >= 0, "driving_vis.max_frames 必须 >= 0（0=全部）"
     assert dv.display_scale > 0, "driving_vis.display_scale 必须 > 0"
@@ -849,3 +889,13 @@ def _validate_driving_vis(dv, model_lane):
         "driving_vis.lane_map 箭头间距、长度和线宽必须 > 0"
     assert 0 < lane.arrow_tip_ratio <= 1, \
         "driving_vis.lane_map.arrow_tip_ratio 必须在 (0,1]"
+    traffic = dv.traffic_control
+    assert len(traffic.state_colors) == len(model_traffic.state_names) \
+        and all(_is_bgr(color) for color in traffic.state_colors), \
+        "driving_vis.traffic_control.state_colors 须与灯态类别等长，且每项为合法 BGR 颜色"
+    assert _is_bgr(traffic.unknown_color), \
+        "driving_vis.traffic_control.unknown_color 须为合法 BGR 颜色"
+    assert 0 < traffic.line_threshold < 1, \
+        "driving_vis.traffic_control.line_threshold 必须在 (0,1)"
+    assert 0 < traffic.overlay_alpha <= 1, \
+        "driving_vis.traffic_control.overlay_alpha 必须在 (0,1]"

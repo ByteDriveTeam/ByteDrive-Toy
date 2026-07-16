@@ -7,6 +7,8 @@
     data.driving.scene_root / camera / map_dir / map_name_template / previous_frame_offset /
         dist_sigma_m / lane_half_width_m
     data.driving.lane_map.line_width_m / type_to_class / unknown_class
+    data.driving.traffic_control.route_corridor_m / line_expand_m / actor_match_radius_m / stop_margin_m /
+        reaction_time_s / comfortable_decel_mps2
     data.driving.box_min_visible_pixels
     data.driving.target_min_m / target_max_m（目标点采样距离窗口）
     data.driving.behavior.stationary_speed_mps / acceleration_threshold_mps2 / turn_angle_deg /
@@ -16,6 +18,7 @@
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
     model.driving.trajectory.num_waypoints / num_modes
+    model.driving.traffic_control.state_names
     model.physics.depth_max_m（风险场包络排除超范围/天空像素）
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
@@ -23,8 +26,8 @@
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。每个样本同时返回同场景上一帧 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
-      多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框、交通灯状态与 Seg
-      可见性判定。目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
+      多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
+      目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
       独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
@@ -72,6 +75,8 @@ class DrivingDataset(SingleFrameSceneBase):
         self._box_min_visible_pixels = drv_data.box_min_visible_pixels
         self._target_min = drv_data.target_min_m
         self._target_max = drv_data.target_max_m
+        self._traffic_cfg = drv_data.traffic_control
+        self._traffic_state_names = cfg.model.driving.traffic_control.state_names
         behavior = drv_data.behavior
         self._behavior_params = dt.BehaviorParams(
             behavior.stationary_speed_mps, behavior.acceleration_threshold_mps2,
@@ -79,7 +84,8 @@ class DrivingDataset(SingleFrameSceneBase):
             behavior.traffic_light_semantic_tag, behavior.traffic_light_match_radius_m,
             behavior.traffic_light_seg_margin_px, behavior.traffic_light_min_pixels)
         self._map_dir = resolve_repo_path(drv_data.map_dir)
-        self._inview = torch.from_numpy(dt.inview_mask(self._bev, self._fov))  # 常量，预算一次
+        self._inview_np = dt.inview_mask(self._bev, self._fov)
+        self._inview = torch.from_numpy(self._inview_np)  # 常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
         self._state_cache: Dict[str, tuple] = {}  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
 
@@ -112,15 +118,19 @@ class DrivingDataset(SingleFrameSceneBase):
         waypoints, valid = self._trajectory(poses, frame_idx, pose)
         sector = dt.sector_of(waypoints, valid, self._fov, self._num_modes)
         target_point = self._target_point(poses, frame_idx, pose, meta)
+        hd_map = self._hd_map(meta["map"])
+        speed_mps = float(np.linalg.norm(world_vel[:2]))
+        traffic = self._traffic_targets(
+            hd_map, poses, frame_idx, pose, target_point, meta, frame, speed_mps)
         behavior = dt.behavior_targets(
-            waypoints, valid, float(np.linalg.norm(world_vel[:2])), float(accelerations[frame_idx]),
+            waypoints, valid, speed_mps, float(accelerations[frame_idx]),
             frame["bboxes"], meta["traffic_lights"], frame["traffic_light_states"],
             meta["static_bboxes"], frame["semantic"][cam], pose, intr, extrinsic6,
-            self._bev, self._fov, self._behavior_params)
+            self._bev, self._fov, self._behavior_params,
+            red_light_relevant=bool(traffic["red_stop_valid"]))
 
         depth = np.ascontiguousarray(frame["depth"][cam]).astype(np.float32)
         risk = dt.risk_field(depth, intrinsics4, extrinsic6, self._bev, self._fov, self._depth_max_m)
-        hd_map = self._hd_map(meta["map"])
         map_drivable = hd_map.drivable_bev(
             pose, self._bev, self._cfg_data.lane_half_width_m)
         lane_cfg = self._cfg_data.lane_map
@@ -134,7 +144,7 @@ class DrivingDataset(SingleFrameSceneBase):
         offroad_distance = offroad_distance_field(drivable, self._bev)
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
 
-        return {
+        sample = {
             "rgb": self.normalize_rgb(frame["rgb"][cam]),
             "previous_rgb": self.normalize_rgb(previous_rgb),
             "previous_to_current": torch.from_numpy(previous_to_current),
@@ -154,6 +164,10 @@ class DrivingDataset(SingleFrameSceneBase):
             "distribution": torch.from_numpy(distribution),
             "inview": self._inview,
         }
+        sample.update({name: torch.from_numpy(value) if isinstance(value, np.ndarray)
+                       else torch.tensor(value, dtype=torch.float32)
+                       for name, value in traffic.items()})
+        return sample
 
     def _scene_states(self, scene_dir, reader):
         """惰性缓存全帧 ego 位姿与速度加速度（轻量读 LMDB），供轨迹/行为/目标点复用。"""
@@ -186,6 +200,35 @@ class DrivingDataset(SingleFrameSceneBase):
         j = int(np.random.choice(within)) if len(within) > 0 else int(np.argmax(dist))
         ego_pt = transform_points(future[j:j + 1, :3], world_to_ego(pose))
         return ego_pt[0, :2].astype(np.float32)
+
+    def _route_polyline(self, poses, frame_idx, pose, target_point):
+        """截取未来专家路径的目标距离窗口；长时间等灯时仍能延伸到路口之后。"""
+        future = poses[frame_idx + 1:, :3]
+        future_ego = transform_points(future, world_to_ego(pose))[:, :2].astype(np.float32)
+        route = np.vstack((np.zeros((1, 2), dtype=np.float32), future_ego))
+        arclength = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))]
+        end = min(int(np.searchsorted(arclength, self._target_max, side="right")) + 1, len(route))
+        route = route[:end]
+        if len(route) < 2 or np.linalg.norm(target_point) > np.linalg.norm(route[-1]) + 1e-3:
+            route = np.vstack((route, target_point))
+        return route
+
+    def _traffic_targets(self, hd_map, poses, frame_idx, pose, target_point, meta, frame, speed_mps):
+        """生成路线相关交通控制监督，并用视场与舒适制动距离门控红灯停车约束。"""
+        traffic = hd_map.traffic_control_bev(
+            pose, self._route_polyline(poses, frame_idx, pose, target_point),
+            meta["traffic_lights"], frame["traffic_light_states"], self._bev,
+            self._traffic_cfg.route_corridor_m, self._traffic_cfg.line_expand_m,
+            self._traffic_cfg.actor_match_radius_m, self._traffic_state_names)
+        stopping_distance = (speed_mps * self._traffic_cfg.reaction_time_s
+                             + speed_mps ** 2 / (2.0 * self._traffic_cfg.comfortable_decel_mps2)
+                             + self._traffic_cfg.stop_margin_m)
+        line_inview = bool(np.any(traffic["stop_line"] * self._inview_np))
+        can_stop = (speed_mps <= self._behavior_params.stationary_speed_mps
+                    or float(traffic["stop_distance"]) >= stopping_distance)
+        traffic["red_stop_valid"] = np.float32(
+            bool(traffic["red_stop_valid"]) and line_inview and can_stop)
+        return traffic
 
     def _hd_map(self, map_name: str) -> HdMap:
         """按场景 map 名（去 _Opt 后缀）惰性加载并缓存 HD 地图。"""

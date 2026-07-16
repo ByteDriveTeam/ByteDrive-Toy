@@ -242,6 +242,10 @@ model:
       up_channels: [192, 96, 48]
       feature_channels: 32
 
+    # 交通控制辅助头：复用 lane_map 的高分辨率细线特征，分别预测相关停止线几何与灯色
+    traffic_control:
+      state_names: [red, yellow, green]
+
     # 8 扇区多模态轨迹解码
     trajectory:
       num_modes: 8               # 前向扇区数 = 多模态轨迹条数
@@ -286,6 +290,13 @@ data:
         Broken: 2             # 虚线分隔线
         "NONE": 3            # 地图中未细分样式的道路边界
       unknown_class: 4        # 其余非 Trigger_Volumes 道路标线
+    traffic_control:
+      route_corridor_m: 0.75        # 路线中心线膨胀半宽；触发区与该走廊相交才视为相关
+      line_expand_m: 0.50           # 停止区栅格额外膨胀半径，缓解 256×256 细线正样本稀疏
+      actor_match_radius_m: 0.10    # HD Map ParentActor 与采集交通灯 actor 的世界平面匹配半径
+      stop_margin_m: 1.50           # 红灯轨迹须停在停止区前的安全余量
+      reaction_time_s: 0.50         # 判断红灯是否仍可安全停车的感知/控制反应时间
+      comfortable_decel_mps2: 4.0   # 可停车性判定使用的舒适制动减速度
     box_min_visible_pixels: 10  # 反投影深度点落入 3D box 不少于 10 像素才作为可见占用监督
     target_min_m: 16.0        # 目标点：沿未来自车轨迹搜距当前 16~32m 的点随机取一，作近端导航引导（增强鲁棒性）
     target_max_m: 32.0
@@ -333,6 +344,9 @@ train:
     lane_class_weights: [0.1, 1.0, 1.0, 1.0, 1.0]  # 抑制稠密背景对细线类别的数量淹没
     lane_direction: 1.0       # 道路线有向单位切向量余弦损失
     boundary: 1.0             # 全部候选航点的不可行驶距离（道路外/可见占用内）；超出 BEV 继续按坐标距离惩罚
+    stop_line: 1.0            # 与当前路线相关的交通灯停止线几何（前景/背景均衡 BCE）
+    traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green
+    stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
 
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
@@ -372,3 +386,9 @@ driving_vis:
     arrow_length_px: 10           # 方向箭头长度（像素）
     arrow_thickness: 1            # 方向箭头线宽（像素）
     arrow_tip_ratio: 0.35         # 箭头尖端占总长度比例
+  traffic_control:
+    # BGR，顺序须与 model.driving.traffic_control.state_names 一致：红/黄/绿
+    state_colors: [[0, 0, 255], [0, 220, 255], [0, 220, 0]]
+    unknown_color: [255, 255, 255] # 已知停止线但灯态无效时使用白色
+    line_threshold: 0.5            # 预测停止线显示阈值；零初始化旧权重恰为 0.5，不会误显示
+    overlay_alpha: 0.85            # 停止线叠加到轨迹 BEV 时的混合强度

@@ -1,4 +1,4 @@
-"""优化器构造：仅优化可训练参数（主干+三头），骨干冻结不纳入。
+"""优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
 
 模块: train/optimizer/optimizer.py
 依赖: torch, config.schema.Config, train.optimizer.checks.optimizer_checks
@@ -10,7 +10,7 @@
     - build_optimizer(model, cfg) -> torch.optim.AdamW
 说明: 参数集合取 model.trainable_parameters()（排除冻结的 DINOv3 骨干），避免把 requires_grad=False
       的骨干参数交给优化器。若模型提供 param_groups（如驾驶模型），则按分组构造：驾驶各件用 lr、感知子模块
-      用 lr·perception_lr_scale 慢更新。lr / weight_decay / perception_lr_scale 唯一来源为 config（规范 §6）。
+      用 lr·perception_lr_scale 慢更新；驾驶模型不纳入未参与其前向的感知解码头。各超参数唯一来自 config。
 """
 
 from __future__ import annotations

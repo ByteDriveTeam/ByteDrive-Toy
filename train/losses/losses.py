@@ -1,4 +1,4 @@
-"""多任务监督损失：感知任务与驾驶三场、独立道路线类别/方向、轨迹行为及不可行驶约束。
+"""多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
 
 模块: train/losses/losses.py
 依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
@@ -6,8 +6,10 @@
     model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_grad / depth_range
     train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable /
-        lane_class / lane_class_weights / lane_direction / boundary
+        lane_class / lane_class_weights / lane_direction / boundary /
+        stop_line / traffic_light_state / stop_crossing
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
+    data.driving.traffic_control.stop_margin_m
 对外接口:
     - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])          # 感知总损失与各分量
     - compute_driving_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])  # 驾驶总损失与各分量
@@ -136,21 +138,21 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
         outputs["lane_class_logits"], targets["lane_class"], inview, lane_weights)
     lane_direction = _lane_direction_loss(
         outputs["lane_direction"], targets["lane_direction"], targets["lane_class"], inview)
+    stop_line, traffic_light_state, stop_crossing = _traffic_control_losses(
+        outputs, targets, cfg, inview)
     trajectory, confidence = _trajectory_losses(
         outputs["trajectories"], outputs["confidence"],
         targets["trajectory"], targets["traj_valid"], targets["sector"])
     behavior = F.binary_cross_entropy_with_logits(outputs["behavior_logits"], targets["behavior"])
     boundary = _boundary_loss(
         outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
-
-    total = (w.risk * risk + w.drivable * drivable + w.distribution * distribution
-             + w.lane_class * lane_class + w.lane_direction * lane_direction
-             + w.trajectory * trajectory + w.confidence * confidence + w.behavior * behavior
-             + w.boundary * boundary)
     components = {"risk": risk, "drivable": drivable, "distribution": distribution,
                   "lane_class": lane_class, "lane_direction": lane_direction,
+                  "stop_line": stop_line, "traffic_light_state": traffic_light_state,
                   "trajectory": trajectory, "confidence": confidence, "behavior": behavior,
-                  "boundary": boundary, "total": total}
+                  "boundary": boundary, "stop_crossing": stop_crossing}
+    total = sum(getattr(w, name) * loss for name, loss in components.items())
+    components["total"] = total
     return total, components
 
 
@@ -164,6 +166,38 @@ def _masked_lane_ce(logits, target, inview, class_weights):
     """视场内道路线类别加权交叉熵；背景降权以免细线监督被数量淹没。"""
     per = F.cross_entropy(logits, target.long(), weight=class_weights, reduction="none") * inview
     return per.sum() / inview.sum().clamp_min(_MASK_EPS)
+
+
+def _balanced_binary_loss(logits, target, valid):
+    """前景/背景分别归一后等权；无停止线样本只保留背景项，避免稀疏正样本被淹没。"""
+    per = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    positive = (target > 0.5).to(logits.dtype) * valid
+    negative = (target <= 0.5).to(logits.dtype) * valid
+    positive_count = positive.sum()
+    negative_loss = (per * negative).sum() / negative.sum().clamp_min(_MASK_EPS)
+    if not bool(positive_count > 0):
+        return negative_loss
+    positive_loss = (per * positive).sum() / positive_count
+    return 0.5 * (positive_loss + negative_loss)
+
+
+def _masked_state_ce(logits, target, valid):
+    """仅在相关停止线且灯色已知的像素监督动态状态。"""
+    per = F.cross_entropy(logits, target.long(), reduction="none") * valid
+    return per.sum() / valid.sum().clamp_min(_MASK_EPS)
+
+
+def _traffic_control_losses(outputs, targets, cfg, inview):
+    """集中计算停止线、灯态与红灯越线三项相关损失。"""
+    stop_line = _balanced_binary_loss(
+        outputs["stop_line_logits"][:, 0], targets["stop_line"], inview)
+    traffic_state = _masked_state_ce(
+        outputs["traffic_light_state_logits"], targets["traffic_light_state"],
+        targets["traffic_light_state_valid"] * inview)
+    stop_crossing = _stop_crossing_loss(
+        outputs["trajectories"], targets["stop_point"], targets["stop_direction"],
+        targets["red_stop_valid"], cfg.data.driving.traffic_control.stop_margin_m)
+    return stop_line, traffic_state, stop_crossing
 
 
 def _lane_direction_loss(pred, target, lane_class, inview):
@@ -234,3 +268,16 @@ def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor, b
     x_over = F.relu(bev.x_min_m - x) + F.relu(x - bev.x_max_m)
     y_over = F.relu(bev.y_min_m - y) + F.relu(y - bev.y_max_m)
     return (sampled + x_over + y_over).mean()
+
+
+def _stop_crossing_loss(trajectories, stop_point, stop_direction, red_valid, stop_margin_m):
+    """红灯时按路线切向惩罚越过安全停止位置的全部候选航点。
+
+    `dot(point-stop_point, direction)` 在停止线之后为正；加上安全余量后，允许区域截止于停止线前
+    `stop_margin_m`。所有模态都受约束，避免低置信度越线轨迹在闭环选择时成为安全漏洞。
+    """
+    relative = trajectories - stop_point[:, None, None, :]
+    signed = (relative * stop_direction[:, None, None, :]).sum(-1) + stop_margin_m
+    mask = red_valid[:, None, None].to(trajectories.dtype)
+    count = mask.sum() * trajectories.shape[1] * trajectories.shape[2]
+    return (F.relu(signed) * mask).sum() / count.clamp_min(_MASK_EPS)

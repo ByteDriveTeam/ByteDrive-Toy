@@ -11,6 +11,7 @@
 对外接口:
     - PerceptionModel(cfg) -> nn.Module   # forward([B,3,H,W]) -> {"semantic","depth"}
     - trainable_parameters() -> Iterator[nn.Parameter]   # 仅 融合+trunk+双头（骨干冻结不训练）
+    - feature_parameters() -> Iterator[nn.Parameter]     # 仅融合+trunk，供驾驶特征复用路径优化
 说明: 单帧过冻结骨干得多层 patch 网格特征，经 feature_fusion 逐层 RMSNorm+拼接降到 channels，
       过 2D 特征主干后由双头各自上采样至原分辨率。
       精度边界（规范：混精外置）：骨干+融合+主干+双头的 encode 段在 BF16 autocast 下运行；每头最后一次上采样
@@ -73,6 +74,10 @@ class PerceptionModel(nn.Module):
         """仅返回可训练参数（融合 + trunk + 双头）；骨干冻结不纳入优化器。"""
         modules = (self.fusion, self.trunk, self.semantic_head, self.depth_head)
         return (p for m in modules for p in m.parameters())
+
+    def feature_parameters(self) -> Iterator[nn.Parameter]:
+        """仅返回驾驶 extract_features 路径实际使用的融合层与特征主干参数。"""
+        return (p for module in (self.fusion, self.trunk) for p in module.parameters())
 
     def extract_features(self, frames: torch.Tensor):
         """供下游驾驶系统复用的中段表征：返回 (trunk 末端特征, DINOv3 原始特征)。

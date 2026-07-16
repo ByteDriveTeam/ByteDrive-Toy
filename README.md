@@ -66,7 +66,7 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 | 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
 | 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
 | BEV | 前向 `64 m × 64 m`，工作网格 `32×32`，场输出 `256×256` |
-| 驾驶输出 | 风险/可行驶/轨迹分布三场；5 类道路线图 + 有向切向量；8 模态 × 8 航点；8 类行为 |
+| 驾驶输出 | 三场；道路线与方向；相关停止线与灯色；8 模态 × 8 航点；8 类行为 |
 | 训练 | AdamW；BF16 主干 + FP32 末端/损失；感知模块差分小学习率 |
 | 数据 | CARLA 0.9.15；RGB/H.265 + 非 RGB/LMDB；严格同步多传感器采集 |
 | 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照 |
@@ -100,13 +100,19 @@ flowchart LR
 
 ![ByteDrive 感知预测可视化](assets/visualizations/scene_000000_n04.png)
 
-### 驾驶三场、道路线图与多模态轨迹
+### 驾驶三场、道路线、交通控制与多模态轨迹
 
-下图由 `vis/driving_vis/run.py` 生成，包含 RGB/语义/深度、风险场、可行驶场、轨迹分布场、独立道路线图及候选轨迹；
+下图由 `vis/driving_vis/run.py` 生成，展示 RGB/语义/深度、风险场、可行驶场、轨迹分布场、独立道路线图及候选轨迹。
 道路线图按类别着色，并以稀疏箭头显示 ego 坐标系中的有向切向量，具体类别/方向编码见“独立道路线图”章节。
 `gt` 与 `pred` 行采用相同几何范围和着色口径，可直接观察 BEV 空间对齐情况。
 
 ![ByteDrive 驾驶预测可视化](assets/visualizations/scene_000032_n04.png)
+
+最新版额外输出 `gt traffic` / `pred traffic` 行：停止线按红/黄/绿灯态着色，未知灯态显示为白色，并叠加到
+轨迹 BEV 以检查空间关系。下图使用真实数据第 12 个样本的 GT，左侧为独立交通控制层，右侧为停止线与三场、
+GT 轨迹的叠加结果；该样本为绿灯，沿专家路线距离 32.3 m。
+
+![ByteDrive 停止线与交通灯真值可视化](assets/visualizations/traffic_control_gt.png)
 
 ---
 
@@ -146,7 +152,7 @@ flowchart TB
     subgraph VIS["离线检查"]
         V1["data_vis<br/>原始数据交互浏览"]
         V2["pred_vis<br/>语义/深度预测"]
-        V3["driving_vis<br/>三场/道路线图/轨迹预测"]
+        V3["driving_vis<br/>三场/道路线/交通控制/轨迹预测"]
     end
 
     SIM --> W
@@ -186,6 +192,8 @@ flowchart TB
 | 三场输出 | `risk/drivable/distribution` | 各 `[B,1,256,256]` | 三级 PixelShuffle，输出 logits |
 | 道路线图 | `lane_class_logits` | `[B,5,256,256]` | 独立解码器，5 类类别 logits |
 | 道路线方向 | `lane_direction` | `[B,2,256,256]` | 独立解码器，有向切向量原始输出 |
+| 相关停止线 | `stop_line_logits` | `[B,1,256,256]` | 复用道路线高分辨率特征的二值 logits |
+| 停止线灯色 | `traffic_light_state_logits` | `[B,3,256,256]` | red/yellow/green，仅在相关停止线区域监督 |
 | 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 8 个扇区模态、每条 8 个 `(x,y)` 米制航点 |
 | 模态置信度 | `confidence` | `[B,8]` | 未归一化 logits |
 | 行为输出 | `behavior_logits` | `[B,8]` | 8 类独立多标签 logits |
@@ -352,6 +360,12 @@ road_boundary / other_marking`。当前 Town01 HD Map 的映射为 `Center / Bro
 非触发区标线落入 `other_marking`。另一路输出每个道路线像素的有向单位切向量 `(dx,dy)`；方向直接由 HD Map
 采样点 yaw 变换到当前 ego 系，因此 `v` 与 `-v` 表示相反行驶方向。
 
+交通控制头复用道路线图的细线高分辨率特征，只新增停止线二值头和三类灯色头。HD Map 的
+`Trigger_Volumes/TrafficLight` 四边形与当前路线走廊相交才算候选；多候选取沿路线最先到达者，避免把横向道路
+或转弯后的灯关联给当前车道。四边形的 `ParentActor_Location` 与场景交通灯 actor 匹配后读取逐帧状态。红灯状态
+始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于“反应距离 + 舒适制动距离 + 安全余量”时激活，
+避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
+
 #### 7. 轨迹与行为联合 Token
 
 90° 前向视场被均分成 8 个扇区。每个扇区对其覆盖的 BEV cell 做均值池化，并拼接扇区中心方向
@@ -360,7 +374,8 @@ road_boundary / other_marking`。当前 Town01 HD Map 的映射为 `Center / Bro
 
 - 每个轨迹 Token 输出 8 个未来 `(x,y)` 航点和 1 个置信度；
 - 行为 Token 输出 8 个独立 logits；
-- 行为顺序为：障碍停车、红灯停车、加速、直行、左转、右转、减速、静止。
+- 行为顺序为：障碍停车、红灯停车、加速、直行、左转、右转、减速、静止；其中红灯停车在相关停止线为红灯时
+  提前激活，不再等车辆完全静止。
 
 ### BEV 坐标与输出定义
 
@@ -493,6 +508,8 @@ LMDB 主要键：
 | 行为监督 | `behavior` | 8 类多热向量 |
 | 场监督 | `risk/drivable/distribution/inview` | 三场与视场掩码；drivable 已扣除可见 box 占用 |
 | 道路线监督 | `lane_class/lane_direction` | 5 类道路线索引与 ego 系有向单位切向量 `[2,H,W]` |
+| 交通控制监督 | `stop_line/traffic_light_state/state_valid` | 当前路线第一条停止线、灯色与状态有效掩码 |
+| 红灯越线监督 | `stop_point/stop_direction/red_stop_valid` | 停止区中心、路线切向与红灯有效位 |
 | 可行驶约束 | `offroad_distance` | 可行驶处为 0，道路外或可见 box 占用内为米制距离 |
 
 未来轨迹取同场景后续 8 个采集帧的 ego 位姿并变换到当前 ego 系。默认采集频率为 2 Hz，因此 8 个航点
@@ -558,7 +575,7 @@ flowchart LR
 从感知检查点初始化 `DrivingModel.perception`。默认 `freeze_perception=false`：
 
 - 新增驾驶模块学习率：`5e-5`；
-- 感知融合/trunk/双头学习率：`5e-5 × 0.01 = 5e-7`；
+- 感知 fusion/trunk 学习率：`5e-5 × 0.01 = 5e-7`；语义/深度头不参与驾驶前向，故不进入驾驶优化器；
 - DINOv3：始终冻结，不进入优化器。
 
 驾驶总损失：
@@ -574,7 +591,10 @@ flowchart LR
 1.0\mathcal{L}_{drivable}+
 1.0\mathcal{L}_{lane\_class}+
 1.0\mathcal{L}_{lane\_direction}+
-1.0\mathcal{L}_{boundary}
+1.0\mathcal{L}_{boundary}+
+1.0\mathcal{L}_{stop\_line}+
+1.0\mathcal{L}_{light\_state}+
+1.0\mathcal{L}_{stop\_crossing}
 \end{aligned}
 ```
 
@@ -589,6 +609,9 @@ flowchart LR
 | `confidence` | 8 扇区分类交叉熵 |
 | `behavior` | 8 类独立 BCE-with-logits，允许同一帧多个行为同时激活 |
 | `boundary` | 对全部模态/航点可微采样道路外/可见占用距离；超出 BEV 另加坐标越界距离 |
+| `stop_line` | 前景/背景分别归一的均衡 BCE，避免稀疏停止线被背景淹没 |
+| `traffic_light_state` | 仅在相关停止线且状态已知区域做 red/yellow/green 交叉熵 |
+| `stop_crossing` | 红灯时按路线切向惩罚全部候选航点越过带安全余量的停止位置 |
 
 `boundary` 对所有候选轨迹等权约束，因此低置信度模态也不能无代价地逃逸到道路外。
 
@@ -623,6 +646,7 @@ train/checkpoints/
     "epoch": 已完成的_epoch数,
     "model": 不含任何名为_backbone_的冻结骨干权重,
     "optimizer": AdamW状态,
+    "optimizer_param_names": 与优化器参数组逐项对齐的稳定参数名,
 }
 ```
 
@@ -635,6 +659,11 @@ train/checkpoints/
 
 `train.epochs` 表示最终要训练到的总轮数。比如检查点已经是 epoch 40，必须把 `epochs` 设为大于 40；
 若仍保持默认 10，恢复成功后训练区间为空，程序不会再执行任何 epoch。
+
+模型结构新增辅助头时，resume 会按键名与形状复用旧模型参数；新增参数保留构造期初始化。优化器状态按参数名迁移，
+旧版检查点未保存参数名时按“过滤新增参数后的稳定顺序”迁移，因此停止线头加入前的 driving checkpoint 可直接自动恢复；
+新头的 AdamW 动量在第一次 `step` 时自动建立。AdamW 本身按需创建状态：参数从未得到梯度时只有参数组条目、没有
+`exp_avg/exp_avg_sq`；恢复日志会把这种“旧档未建状态”与真正的“新增无旧状态”分开报告。
 
 ### 当前训练器尚未自动完成的事项
 
@@ -924,7 +953,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `model.feature_trunk/heads/physics` | 感知主干、双头和物理量编码 |
 | `model.driving.bev/query/frustum` | BEV 几何、目标查询和视锥采样 |
 | `model.driving.attention/bev_encoder` | 当前图像/上一帧 BEV 注意力和 BEV 空间提炼 |
-| `model.driving.fields/lane_map/trajectory/behavior` | 三场、独立道路线图、轨迹和行为输出 |
+| `model.driving.fields/lane_map/traffic_control/trajectory/behavior` | 三场、道路线、停止线灯色、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
 | `pred_vis/driving_vis` | 权重、场景、帧数、保存目录和配色 |
@@ -983,9 +1012,12 @@ python vis/driving_vis/run.py `
 ```
 
 三场 logits 在显示前经过 sigmoid；道路线类别 logits 使用 argmax，并按配置中的类别色板着色；方向向量沿通道
-归一化后，以稀疏箭头标出实际行驶方向。画布同时给出 GT/预测道路线图；多模态轨迹使用置信度着色，并可与 GT 航点叠加。
+归一化后，以稀疏箭头标出实际行驶方向。停止线概率超过配置阈值后按预测灯态着色，GT 行同时显示是否必须停车与
+沿路线距离；两者都叠加到各自轨迹 BEV。多模态轨迹使用置信度着色，并可与 GT 航点叠加。旧权重新增输出头保持
+零初始化时，停止线概率恰为 0.5；默认阈值采用严格大于判断，因此不会误显示整幅停止线。
 
-修改具体场景、最大帧数、是否显示 GT、色图、道路线配色/箭头样式和缩放比例，请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖。
+修改具体场景、最大帧数、是否显示 GT、色图、道路线配色/箭头样式、交通控制配色/阈值/叠加强度和缩放比例，
+请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖。
 
 ---
 
@@ -1042,12 +1074,15 @@ with torch.no_grad():
 print(output["risk"].shape)             # [1, 1, 256, 256]
 print(output["lane_class_logits"].shape)  # [1, 5, 256, 256]
 print(output["lane_direction"].shape)     # [1, 2, 256, 256]
+print(output["stop_line_logits"].shape)   # [1, 1, 256, 256]
+print(output["traffic_light_state_logits"].shape)  # [1, 3, 256, 256]
 print(output["trajectories"].shape)     # [1, 8, 8, 2]
 print(output["behavior_logits"].shape)  # [1, 8]
 ```
 
-模型输出的三场、置信度、行为和道路线类别都是 logits；三场使用 `sigmoid`，道路线类别用 `argmax`，方向向量
-沿通道归一化。轨迹模态选择可对 `confidence` 使用 `softmax`/`argmax`。轨迹坐标已经是 ego 系米制 `(x,y)`。
+模型输出的三场、停止线、置信度、行为和类别图都是 logits；三场/停止线使用 `sigmoid`，道路线/灯色类别用
+`argmax`，方向向量沿通道归一化。轨迹模态选择可对 `confidence` 使用 `softmax`/`argmax`。轨迹坐标已经是
+ego 系米制 `(x,y)`。
 
 ---
 
@@ -1093,7 +1128,7 @@ ByteDrive-Toy/
 ├── vis/
 │   ├── data_vis/                     # 原始数据交互浏览器
 │   ├── pred_vis/                     # 感知预测/GT 对照
-│   └── driving_vis/                  # 三场/轨迹预测/GT 对照
+│   └── driving_vis/                  # 三场/道路线/交通控制/轨迹预测与 GT 对照
 ├── assets/
 │   └── visualizations/               # README 展示用的可视化结果图
 ├── clone_loop/                       # 行为克隆闭环占位，尚未实现

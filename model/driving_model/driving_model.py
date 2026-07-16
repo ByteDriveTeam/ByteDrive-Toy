@@ -1,4 +1,4 @@
-"""双帧开环驾驶模型：当前图像查询后融合刚性对齐的上一帧 BEV，解码三场、道路线图与驾驶输出。
+"""双帧开环驾驶模型：融合刚性对齐的历史 BEV，解码三场、道路线、交通控制与驾驶输出。
 
 模块: model/driving_model/driving_model.py
 依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionModel,
@@ -7,24 +7,27 @@
       model.lane_map_decoder.LaneMapDecoder, model.trajectory_decoder.TrajectoryDecoder,
       model.driving_model.checks.driving_model_checks
 读取配置:
-    model.driving.work_dim / freeze_perception 及其下 bev / query / bev_encoder / lane_map 各键
+    model.driving.work_dim / freeze_perception / neck_num_residual_blocks
+    model.driving.bev / query / frustum / attention / bev_encoder / fields / lane_map /
+        traffic_control / trajectory / behavior 各键
     model.dinov3_backbone.patch_size / hidden_dim（frustum 像素反投影、DINO 原始特征通道）
     model.feature_trunk.channels（trunk 通道）
 对外接口:
     - DrivingModel(cfg) -> nn.Module
         forward(rgb, intrinsics, extrinsics, target_point, previous_rgb,
                 previous_to_current, previous_valid) -> dict
-            # 三场 + lane_class_logits/lane_direction + trajectories/confidence/behavior_logits
-        trainable_parameters() -> Iterator[nn.Parameter]   # 排除冻结感知主干
+            # 三场 + 道路线/停止线/灯色 + trajectories/confidence/behavior_logits
+        trainable_parameters() -> Iterator[nn.Parameter]   # 驾驶各件 + 可选感知 fusion/trunk
 说明: 感知 = 驾驶的前端子任务：PerceptionModel 提供「双头共享 trunk 末端特征 + DINOv3 原始特征」，driving_neck
       融合并注入 frustum 几何位置编码得图像特征；target_point_embedding 由 ego 目标点生成初始 BEV 查询，
       bev_encoder 用交叉注意力从图像特征聚合信息并 ConvNeXt 提炼为 BEV 特征；field_decoder 上采样解码三场，
       上一帧用同一世界目标点在上一帧 ego 系编码查询，得到 BEV 骨干末端特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
-      BEV 查询先查图像、再查上一帧 BEV。独立 lane_map_decoder 输出道路线类别与方向；trajectory_decoder
+      BEV 查询先查图像、再查上一帧 BEV。lane_map_decoder 输出道路线、停止线与灯色；trajectory_decoder
       末端不再注入自车状态。前向单目，自车位于 BEV 下方中心。
       混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
-      freeze_perception 为真时感知主干冻结且在 no_grad 下前向，梯度只回传驾驶各件（复用其深度/分割预训练表征）。
+      freeze_perception 为真时感知主干冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时仅优化驾驶实际经过的
+      感知 fusion/trunk，未参与 extract_features 前向的语义/深度解码头不进入驾驶优化器。
 """
 
 from __future__ import annotations
@@ -60,8 +63,7 @@ class DrivingModel(nn.Module):
     Shape:
         当前/上一帧 rgb `[B,3,H,W]`、intrinsics `[B,4]`、extrinsics `[B,6]`、target_point `[B,2]`、
         previous_to_current `[B,3,3]`、previous_valid `[B]`。
-        输出 dict：risk/drivable/distribution `[B,1,Hf,Wf]`、trajectories `[B,M,T,2]`、confidence `[B,M]`、
-        behavior_logits `[B,8]`。
+        输出 dict：risk/drivable/distribution/stop_line_logits、交通灯状态、道路线、轨迹与行为。
     """
 
     def __init__(self, cfg: Config) -> None:
@@ -98,22 +100,22 @@ class DrivingModel(nn.Module):
                 self.lane_map_decoder, self.trajectory_decoder)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
-        """可训练参数：驾驶各件；感知子模块视 freeze_perception 决定是否纳入。"""
+        """可训练参数：驾驶各件，以及未冻结时驾驶前向实际使用的感知 fusion/trunk。"""
         for m in self._driving_modules():
             yield from m.parameters()
         if not self.freeze_perception:
-            yield from self.perception.trainable_parameters()
+            yield from self.perception.feature_parameters()
 
     def param_groups(self, base_lr: float, weight_decay: float, perception_lr_scale: float):
         """优化器参数分组：驾驶各件用 base_lr；感知子模块（若未冻结）用 base_lr·perception_lr_scale 慢更新。
 
-        DINOv3 骨干恒冻结、不出现在任何分组；感知融合/trunk/双头以极小 lr 缓慢适配驾驶任务，既复用其预训练
-        表征又允许轻微迁移。返回 AdamW 可直接消费的分组列表。
+        DINOv3 骨干恒冻结、不出现在任何分组；感知 fusion/trunk 以极小 lr 缓慢适配驾驶任务。语义/深度头不在
+        驾驶前向路径上，故不进入优化器，避免产生永远没有梯度和 AdamW 状态的悬空参数。返回 AdamW 参数组。
         """
         groups = [{"params": [p for m in self._driving_modules() for p in m.parameters()],
                    "lr": base_lr, "weight_decay": weight_decay}]
         if not self.freeze_perception:
-            groups.append({"params": list(self.perception.trainable_parameters()),
+            groups.append({"params": list(self.perception.feature_parameters()),
                            "lr": base_lr * perception_lr_scale, "weight_decay": weight_decay})
         return groups
 

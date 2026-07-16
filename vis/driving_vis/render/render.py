@@ -1,4 +1,4 @@
-"""渲染：把驾驶模型的三场、带方向道路线图与多模态轨迹着色，并与 RGB/Seg/Depth 合成对照画布。
+"""渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布。
 
 模块: vis/driving_vis/render/render.py
 依赖: cv2, numpy, math, data.driving_targets(BevParams/ego_xy_to_pixel),
@@ -8,12 +8,14 @@
 对外接口:
     - colorize_field(field01, colormap, inview=None) -> np.ndarray        # [H,W] 场(0..1) -> 伪彩 BGR
     - colorize_lane_map(lane_class, lane_direction, ...) -> np.ndarray   # 道路线类别 + 有向切向量 → BGR
+    - colorize_traffic_control(stop_line, state_map, ...) -> np.ndarray       # 停止线/灯态 → BGR
+    - overlay_traffic_control(base_bgr, traffic_bgr, stop_mask, alpha) -> np.ndarray
     - bev_scene_composite(risk, drivable, distribution, inview) -> np.ndarray  # 三场 → RGB 合成 BEV
     - draw_trajectories(base_bgr, trajectories, confidence, gt, gt_valid, bev, draw_gt) -> np.ndarray
     - compose_canvas(rows, tile_h) -> np.ndarray                          # 混合尺寸面板 letterbox 合成
     - to_display_bgr / colorize_semantic / colorize_depth                 # 复用 pred_vis（RGB/Seg/Depth）
 说明: BEV 约定与 data.driving_targets 一致（行沿 x 前向、自车在下沿中心；ego_xy_to_pixel 复用），故轨迹/场/
-      道路线像素对齐。三场为 [0,1]（预测需先 sigmoid），道路线按类别着色并以稀疏箭头表达 ego (x前向,y右向)
+      道路线/停止线像素对齐。三场为 [0,1]（预测需先 sigmoid），道路线按类别着色并以稀疏箭头表达 ego (x前向,y右向)
       有向切向量；视场外像素压暗以突出监督区。多模态轨迹从自车原点连折线，
       按置信度着色（橙/黄），Winner（最高置信模态）以红色加粗突出；GT 轨迹绿色。RGB/Seg/Depth 着色直接复用 vis.pred_vis.render（DRY）。
       compose_canvas 把不同尺寸面板按统一行高缩放、再右侧补背景对齐行宽后纵向拼接，故透视图与 BEV 图可同框。
@@ -27,12 +29,15 @@ import cv2
 import numpy as np
 
 from data.driving_targets import BevParams, ego_xy_to_pixel
-from vis.driving_vis.render.checks.render_checks import check_canvas_rows, check_field, check_lane_map
+from vis.driving_vis.render.checks.render_checks import (
+    check_canvas_rows, check_field, check_lane_map, check_traffic_control, check_traffic_overlay,
+)
 from vis.pred_vis.render import colorize_depth, colorize_semantic, to_display_bgr
 
 
 __all__ = [
-    "colorize_field", "colorize_lane_map", "bev_scene_composite", "draw_trajectories", "compose_canvas",
+    "colorize_field", "colorize_lane_map", "colorize_traffic_control", "overlay_traffic_control",
+    "bev_scene_composite", "draw_trajectories", "compose_canvas",
     "to_display_bgr", "colorize_semantic", "colorize_depth",
 ]
 
@@ -93,6 +98,32 @@ def colorize_lane_map(lane_class: np.ndarray, lane_direction: np.ndarray, class_
         cv2.arrowedLine(canvas, (int(col), int(row)), (int(end_col), int(end_row)), color,
                         arrow_thickness, cv2.LINE_AA, tipLength=arrow_tip_ratio)
     return canvas
+
+
+def colorize_traffic_control(stop_line: np.ndarray, state_map: np.ndarray, state_valid,
+                             state_colors, unknown_color, inview: np.ndarray = None,
+                             annotations=()) -> np.ndarray:
+    """按灯态为停止线着色；无有效灯态的真值使用 unknown_color，并叠加简短状态标注。"""
+    check_traffic_control(
+        stop_line, state_map, state_valid, state_colors, unknown_color, inview)
+    palette = np.asarray(state_colors, dtype=np.uint8)
+    colors = palette[state_map.astype(np.int64, copy=False)]
+    if state_valid is not None:
+        colors = np.where(np.asarray(state_valid)[..., None] > 0, colors, unknown_color)
+    strength = np.clip(stop_line, 0.0, 1.0)[..., None]
+    canvas = (colors * strength).astype(np.uint8)
+    if inview is not None:
+        scale = np.where(inview[..., None] > 0, 1.0, _DIM_OUTVIEW)
+        canvas = (canvas * scale).astype(np.uint8)
+    return _annotate(canvas, annotations)
+
+
+def overlay_traffic_control(base_bgr: np.ndarray, traffic_bgr: np.ndarray,
+                            stop_mask: np.ndarray, alpha: float) -> np.ndarray:
+    """仅在停止线掩码内把交通控制着色混合到 BEV 底图。"""
+    check_traffic_overlay(base_bgr, traffic_bgr, stop_mask, alpha)
+    mixed = cv2.addWeighted(base_bgr, 1.0 - alpha, traffic_bgr, alpha, 0.0)
+    return np.where(np.asarray(stop_mask)[..., None] > 0, mixed, base_bgr).astype(np.uint8)
 
 
 def bev_scene_composite(risk: np.ndarray, drivable: np.ndarray, distribution: np.ndarray,
@@ -220,4 +251,15 @@ def _titled(img: np.ndarray, text: str) -> np.ndarray:
     out = img.copy()
     cv2.putText(out, text, (6, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(out, text, (6, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    return out
+
+
+def _annotate(img: np.ndarray, lines) -> np.ndarray:
+    """在面板左上角绘制英文短标注；OpenCV 内置字体不支持中文。"""
+    out = img.copy()
+    for index, line in enumerate(lines):
+        point = (6, 22 + 18 * index)
+        cv2.putText(out, str(line), point, cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, str(line), point, cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                    (255, 255, 255), 1, cv2.LINE_AA)
     return out

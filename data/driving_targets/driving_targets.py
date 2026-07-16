@@ -23,8 +23,9 @@
       再把 GT 深度像素反投影，框内深度点不少于配置阈值（默认 10 像素）才栅格化其 BEV 足迹。ego 与场景级
       traffic_sign/traffic_light/pole/static 均不参与。
       行为标签固定为「障碍停车、红灯停车、加速、直行、左转、右转、减速、静止」：静止依据速度，纵向行为依据
-      帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent，红灯停车还要求
-      红灯静态框处于 BEV/视场并在其图像投影框内命中 Seg 交通灯像素。各类互不排斥，可同时为 1。
+      帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent。新数据管线可
+      直接传入「当前路线相关停止线为红灯」以提前激活红灯停车；未传入时兼容旧的静止+可见灯判定。
+      各类互不排斥，可同时为 1。
 """
 
 from __future__ import annotations
@@ -168,13 +169,13 @@ def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,
                      acceleration_mps2: float, bboxes, traffic_lights, traffic_light_states,
                      static_bboxes, semantic: np.ndarray, current_pose6, intrinsics,
                      camera_extrinsic6, bev: BevParams, fov_deg: float,
-                     params: BehaviorParams) -> np.ndarray:
+                     params: BehaviorParams, red_light_relevant=None) -> np.ndarray:
     """生成固定顺序的八类行为多热标签 `(8,)`。
 
     标签顺序见 `BEHAVIOR_CLASSES`。转向三类按最远有效未来航点判定且至多激活一个；加速/减速由标量速度
-    加速度判定；静止可与转向、停车原因同时存在。仅静止时判停车原因：动态 Agent 的 3D 框变到 ego-BEV 后
-    与前方本车道走廊相交即障碍停车；交通灯须逐帧状态为 red，静态灯框位于 BEV/相机视场，并且其图像投影框
-    内存在足量 Seg 交通灯像素才算红灯停车。两种原因互不排斥。
+    加速度判定；静止可与转向、停车原因同时存在。障碍停车仍仅在静止时按前方动态 Agent 判定；若调用方传入
+    `red_light_relevant`，红灯停车表示相关停止线当前为红灯并可在减速阶段提前激活。未传入时保留旧的
+    「静止 + 红灯 actor + Seg 可见性」判定，兼容独立调用方。
     """
     check_behavior_inputs(waypoints, valid, semantic)
     labels = np.zeros(len(BEHAVIOR_CLASSES), dtype=np.float32)
@@ -184,12 +185,16 @@ def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,
     labels[7] = float(stationary)
     _set_direction_labels(labels, waypoints, valid, params.turn_angle_deg)
 
+    if red_light_relevant is not None:
+        # 新数据管线以「当前路线的第一条停止线为红灯」表达提前停车意图，不再等车辆静止后才给正标签。
+        labels[1] = float(red_light_relevant)
     if stationary:
         labels[0] = float(_has_front_agent(
             bboxes, current_pose6, bev, params.lane_half_width_m))
-        labels[1] = float(_has_visible_red_light(
-            traffic_lights, traffic_light_states, static_bboxes, semantic, current_pose6,
-            intrinsics, camera_extrinsic6, bev, fov_deg, params))
+        if red_light_relevant is None:
+            labels[1] = float(_has_visible_red_light(
+                traffic_lights, traffic_light_states, static_bboxes, semantic, current_pose6,
+                intrinsics, camera_extrinsic6, bev, fov_deg, params))
     return labels
 
 

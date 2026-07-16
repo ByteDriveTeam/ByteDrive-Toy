@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import numpy as np
+
 
 def check_map_path(path):
     """校验对象: HdMap 构造入参 path —— HD 地图 npz 文件须存在。"""
@@ -20,3 +22,12 @@ def check_drivable_mask(drivable, bev):
     expected = (bev.height, bev.width)
     if tuple(drivable.shape) != expected:
         raise ValueError("drivable 期望形状 {}，实际 {}。".format(expected, tuple(drivable.shape)))
+
+
+def check_traffic_control_inputs(route_xy, state_names):
+    """校验对象: HdMap.traffic_control_bev —— 路线须为 [N,2]，灯色类别须非空且含 red。"""
+    route = np.asarray(route_xy)
+    if route.ndim != 2 or route.shape[1] != 2:
+        raise ValueError("route_xy 期望 [N,2]，实际 {}。".format(tuple(route.shape)))
+    if not state_names or "red" not in state_names:
+        raise ValueError("state_names 须非空且包含 red。")
