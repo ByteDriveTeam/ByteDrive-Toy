@@ -337,7 +337,7 @@ train:
     trajectory: 1.0
     confidence: 0.5
     behavior: 1.0
-    distribution: 0.1
+    distribution: 0.05
     risk: 1.0
     drivable: 1.0
     lane_class: 1.0           # 道路线类别交叉熵

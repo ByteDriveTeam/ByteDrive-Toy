@@ -555,10 +555,10 @@ flowchart LR
 
 ```math
 \mathcal{L}_{perception}=
-0.3\mathcal{L}_{semantic}+
-1.0\mathcal{L}_{depth}+
-1.0\mathcal{L}_{depth\_grad}+
-0.5\mathcal{L}_{depth\_range}
+K_1\mathcal{L}_{semantic}+
+K_2\mathcal{L}_{depth}+
+K_3\mathcal{L}_{depth\_grad}+
+K_4\mathcal{L}_{depth\_range}
 ```
 
 | 分量 | 实现 |
@@ -583,18 +583,18 @@ flowchart LR
 ```math
 \begin{aligned}
 \mathcal{L}_{driving}={}&
-1.0\mathcal{L}_{trajectory}+
-0.5\mathcal{L}_{confidence}+
-1.0\mathcal{L}_{behavior}\\
-&+0.1\mathcal{L}_{distribution}+
-1.0\mathcal{L}_{risk}+
-1.0\mathcal{L}_{drivable}+
-1.0\mathcal{L}_{lane\_class}+
-1.0\mathcal{L}_{lane\_direction}+
-1.0\mathcal{L}_{boundary}+
-1.0\mathcal{L}_{stop\_line}+
-1.0\mathcal{L}_{light\_state}+
-1.0\mathcal{L}_{stop\_crossing}
+k_1\mathcal{L}_{trajectory}+
+k_2\mathcal{L}_{confidence}+
+k_3\mathcal{L}_{behavior}\\
+&+k_4\mathcal{L}_{distribution}+
+K_5\mathcal{L}_{risk}+
+K_6\mathcal{L}_{drivable}+
+K_7\mathcal{L}_{lane\_class}+
+K_8\mathcal{L}_{lane\_direction}+
+K_9\mathcal{L}_{boundary}+
+K_10\mathcal{L}_{stop\_line}+
+K_11\mathcal{L}_{light\_state}+
+K_12\mathcal{L}_{stop\_crossing}
 \end{aligned}
 ```
 
