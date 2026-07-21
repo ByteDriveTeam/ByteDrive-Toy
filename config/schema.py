@@ -288,7 +288,7 @@ class TrajectoryCfg:
     num_waypoints: int             # 每条轨迹航点数 T_wp
     planning_dim: int              # 规划分支工作维
     condition_mlp_hidden: int      # 目标点+ego 速度条件编码 MLP 隐藏维
-    feature_ffn_hidden: int        # 两路感知特征适配 FFN 隐藏维
+    feature_ffn_hidden: int        # path2 感知特征适配 FFN 隐藏维
     cross_layers: int              # 规划 CTB 数（固定对应第 3、6 层特征）
     self_layers: int               # 规划 CTB 后的 TB 层数
     num_heads: int
@@ -827,8 +827,8 @@ def _validate_driving(dv):
     assert tj.self_layers == 4, "model.driving.trajectory.self_layers 必须为 4"
     for name in ("num_waypoints", "planning_dim", "condition_mlp_hidden", "feature_ffn_hidden"):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
-    assert tj.planning_dim < dv.work_dim, \
-        "model.driving.trajectory.planning_dim 必须小于 work_dim（1×1 CNN 执行降维）"
+    assert tj.planning_dim < tj.cross_layers * dv.work_dim, \
+        "model.driving.trajectory.planning_dim 必须小于 cross_layers×work_dim（拼接后 1×1 CNN 降维）"
     assert tj.num_heads > 0 and tj.planning_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 planning_dim"
     assert all(math.isfinite(value) and value > 0 for value in (

@@ -16,9 +16,10 @@
             # trajectory_normalized/trajectories [B,M,T,2] / confidence [B,M] /
             # behavior_logits [B,C_behavior]
 说明: 目标点与 ego 平面速度先作 Symlog，再经 MLP 产生第一路预查询，随后经 FFN 产生第二路预查询。
-      8 个随机初始化的可学习 Mode Token 依次在两个规划 CTB 中查询主感知第 3、6 层特征；两路特征分别
-      RMSNorm，共享 1×1 CNN 降维，再经独立 FFN。其后四层 TB 协调各 Mode。轨迹头仅回归 8 个扇区
-      中线基线在 Symlog 空间的残差，且零初始化保证初始预测严格等于基线；物理解码仅供安全损失与推理使用。
+      主感知第 3、6 层特征分别 RMSNorm 后沿通道拼接，经单个 1×1 CNN 降到 planning_dim；path1 直接、
+      path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个随机初始化的可学习 Mode Token 携各自
+      预查询依次经两个 CTB，其后四层 TB 协调各 Mode。轨迹头仅回归 8 个扇区中线基线在 Symlog 空间的残差，
+      且零初始化保证初始预测严格等于基线；物理解码仅供安全损失与推理使用。
 """
 
 from __future__ import annotations
@@ -61,12 +62,11 @@ class TrajectoryDecoder(nn.Module):
 
         self.feature_norms = nn.ModuleList(
             RMSNormTokens(self.work_dim) for _ in range(tj.cross_layers))
-        self.feature_reduce = nn.Conv2d(self.work_dim, tj.planning_dim, kernel_size=1)
-        self.feature_ffns = nn.ModuleList(
-            nn.Sequential(
-                nn.Linear(tj.planning_dim, tj.feature_ffn_hidden), nn.SiLU(),
-                nn.Linear(tj.feature_ffn_hidden, tj.planning_dim))
-            for _ in range(tj.cross_layers))
+        self.feature_reduce = nn.Conv2d(
+            tj.cross_layers * self.work_dim, tj.planning_dim, kernel_size=1)
+        self.feature_ffn = nn.Sequential(
+            nn.Linear(tj.planning_dim, tj.feature_ffn_hidden), nn.SiLU(),
+            nn.Linear(tj.feature_ffn_hidden, tj.planning_dim))
         self.planning_cross = nn.ModuleList(
             CrossAttentionBlock(tj.planning_dim, tj.num_heads, cfg_driving.attention.mlp_ratio)
             for _ in range(tj.cross_layers))
@@ -116,15 +116,14 @@ class TrajectoryDecoder(nn.Module):
         }
 
     def _planning_contexts(self, features: Sequence[torch.Tensor]):
-        """两路特征分别归一、共享降维，再由独立 FFN 适配为 CTB 被查询序列。"""
-        contexts = []
-        for feature, norm, ffn in zip(features, self.feature_norms, self.feature_ffns):
-            batch_size, _, height, width = feature.shape
-            tokens = norm(feature.flatten(2).transpose(1, 2))
-            normalized = tokens.transpose(1, 2).reshape(batch_size, self.work_dim, height, width)
-            reduced = self.feature_reduce(normalized).flatten(2).transpose(1, 2)
-            contexts.append(reduced + ffn(reduced))
-        return tuple(contexts)
+        """两层特征分别 RMSNorm、沿通道拼接后经单个 1×1 CNN 降维；path1 直接、path2 过 FFN。"""
+        batch_size, _, height, width = features[0].shape
+        normalized = [
+            norm(feature.flatten(2).transpose(1, 2)).transpose(1, 2).reshape(
+                batch_size, self.work_dim, height, width)
+            for feature, norm in zip(features, self.feature_norms)]
+        reduced = self.feature_reduce(torch.cat(normalized, dim=1)).flatten(2).transpose(1, 2)
+        return reduced, reduced + self.feature_ffn(reduced)
 
 
 def _sector_baselines(num_modes: int, num_waypoints: int, fov_deg: float,

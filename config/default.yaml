@@ -172,7 +172,7 @@ model:
   # 双头解码：各含 1 层 2D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
   heads:
     reduce_channels: 128      # 残差块后 1×1 把主干输出 384 压到的头内起始通道 C0
-    up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（24×48 → 384×768）
+    up_channels: [96, 64, 48, 32]   # 四级 2× 像素洗牌各级输出通道（24×48 → 384×768）
     num_classes: 29           # 语义分割类别数（CARLA CityScapes tag 0..28）
     semantic_out: 29          # 语义头输出通道（= num_classes logits）
     depth_out: 2              # 深度头输出通道（ch0=深度 scale·symlog，ch1=范围内 BCE logit）
@@ -253,10 +253,10 @@ model:
     trajectory:
       num_modes: 8               # 8 个可学习 Mode Token，对应 8 条候选轨迹
       num_waypoints: 8           # 每条轨迹航点数 T_wp（0.5s/点 → 4s）
-      planning_dim: 256          # 规划分支工作维；主感知第 3/6 层经 1×1 CNN 降到此维
+      planning_dim: 384          # 规划分支工作维；第 3/6 层分别归一后拼接再经 1×1 CNN 降到此维
       condition_mlp_hidden: 256  # 目标点+ego 速度条件编码 MLP 隐藏维
-      feature_ffn_hidden: 512    # 两路感知特征适配 FFN 隐藏维
-      cross_layers: 2            # 两个规划 CTB，分别查询主感知第 3、6 层特征
+      feature_ffn_hidden: 512    # path2 感知特征适配 FFN 隐藏维
+      cross_layers: 2            # 两个规划 CTB；第 3、6 层特征分别归一后拼接供两 CTB 共享查询
       self_layers: 4             # 规划 CTB 后的 TB 层数
       num_heads: 8               # 须整除 planning_dim
       mode_token_init_std: 0.02  # 8 个可学习 Mode Token 的随机初始化标准差
