@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from collections import namedtuple
 
@@ -75,11 +76,17 @@ BEHAVIOR_CLASSES = (
 # 采集契约中只有车辆与行人是可运动环境参与者；ego 和场景级静态框不得进入可行驶占用监督。
 _MOVING_BOX_SEMANTICS = frozenset(("vehicle", "pedestrian"))
 
+# BEV 网格与图像像素网格是随几何常量不变的量，同一 dataset 里只有极少数取值；有界记忆化避免每样本
+# 重复分配大数组，缓存条目数为常量、绝不随场景/样本增长（不重演历史无界内存问题）。
+_GEOMETRY_CACHE_SIZE = 8
 
+
+@functools.lru_cache(maxsize=_GEOMETRY_CACHE_SIZE)
 def bev_cell_centers(bev: BevParams) -> np.ndarray:
     """每 BEV cell 中心的 ego 平面坐标 `(H, W, 2)`=(x, y)。
 
     行约定与 ego_xy_to_pixel 一致：行 0 = 远 x_max（图像上沿），末行 = 近 x_min（自车在下沿中心）。
+    结果只依赖 bev 几何常量，故按 BevParams 有界记忆化并置为只读——调用方一律只读取、不就地改写。
     """
     check_bev_params(bev)
     x_cell = (bev.x_max - bev.x_min) / bev.height
@@ -87,7 +94,9 @@ def bev_cell_centers(bev: BevParams) -> np.ndarray:
     xs = bev.x_max - (np.arange(bev.height) + 0.5) * x_cell        # 行 0 = 远、末行 = 近（自车在下沿）
     ys = bev.y_min + (np.arange(bev.width) + 0.5) * y_cell
     gx, gy = np.meshgrid(xs, ys, indexing="ij")
-    return np.stack((gx, gy), axis=-1)
+    centers = np.stack((gx, gy), axis=-1)
+    centers.flags.writeable = False
+    return centers
 
 
 def ego_xy_to_pixel(xy: np.ndarray, bev: BevParams):
@@ -380,6 +389,15 @@ _RISK_BEARING_BINS = 256
 _RISK_MIN_DEPTH_M = 0.1
 
 
+@functools.lru_cache(maxsize=_GEOMETRY_CACHE_SIZE)
+def _image_pixel_grid(hc: int, wc: int):
+    """像平面 (行, 列) 坐标网格 `(vv, uu)`，随图像尺寸恒定，有界记忆化并置只读供反投影复用。"""
+    vv, uu = np.meshgrid(np.arange(hc), np.arange(wc), indexing="ij")
+    vv.flags.writeable = False
+    uu.flags.writeable = False
+    return vv, uu
+
+
 def risk_field(depth_m: np.ndarray, intrinsics4, extrinsic6, bev: BevParams,
                fov_deg: float, depth_max_m: float) -> np.ndarray:
     """遮挡风险场 `(H, W)`：深度投影外缘线包络之外即风险。
@@ -396,7 +414,7 @@ def risk_field(depth_m: np.ndarray, intrinsics4, extrinsic6, bev: BevParams,
 
     # 反投影全部像素到 ego 平面（像平面系→传感器系→ego 系，与 vis.geometry.project_points 互逆）
     hc, wc = depth_m.shape
-    vv, uu = np.meshgrid(np.arange(hc), np.arange(wc), indexing="ij")
+    vv, uu = _image_pixel_grid(hc, wc)          # 像素坐标网格随图像尺寸恒定，有界记忆化
     d = depth_m.astype(np.float64)
     sensor = np.stack([d, (uu - cx) / fx * d, -((vv - cy) / fy * d)], axis=-1).reshape(-1, 3)
     ego = transform_points(sensor, ego_from_cam)

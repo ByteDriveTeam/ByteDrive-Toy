@@ -10,7 +10,7 @@
         .camera_names -> list[str]
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
-        .frame(i) -> dict             # {rgb,depth,semantic,optical_flow,lidar,ego,bboxes,traffic_light_states,meta}
+        .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
@@ -97,9 +97,9 @@ class SceneReader:
         present["rgb"] = has_rgb
         return present
 
-    def _cam_arrays(self, txn, i, modality):
-        """读某模态在第 i 帧的逐相机数组（模态不存在则空 dict）。"""
-        if not self.available[modality]:
+    def _cam_arrays(self, txn, i, modality, wanted):
+        """读某模态在第 i 帧的逐相机数组（模态未落盘或未被 wanted 选中则空 dict，跳过解码开销）。"""
+        if not self.available[modality] or (wanted is not None and modality not in wanted):
             return {}
         return {cam: unpack_array(txn.get(self._key(i, modality, cam))) for cam in self.camera_names}
 
@@ -117,15 +117,22 @@ class SceneReader:
         check_frame_index(i, self.num_frames)
         return self._videos[camera].at(i)
 
-    def frame(self, i):
-        """读取第 i 帧的全部已落盘模态与标注，组装为一个 dict（缺失模态为空/None）。"""
+    def frame(self, i, modalities=None):
+        """读取第 i 帧的标注与所选大数组模态，组装为一个 dict（缺失/未选模态为空/None）。
+
+        modalities=None 解码全部已落盘大数组（默认，保持既有行为）；传入模态名集合（depth/semantic/
+        optical_flow/lidar 的任意子集）时只解码其中的大数组，供只需部分模态的下游跳过无用解码与分配开销。
+        rgb 与逐帧元数据（ego/bboxes/交通灯）恒返回，不受 modalities 影响。
+        """
         check_frame_index(i, self.num_frames)
+        wanted = None if modalities is None else set(modalities)
         with self._env.begin() as txn:
             fmeta = msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
-            depth = self._cam_arrays(txn, i, "depth")
-            semantic = self._cam_arrays(txn, i, "semantic")
-            optical_flow = self._cam_arrays(txn, i, "optical_flow")
-            lidar = unpack_array(txn.get(self._key(i, "lidar"))) if self.available["lidar"] else None
+            depth = self._cam_arrays(txn, i, "depth", wanted)
+            semantic = self._cam_arrays(txn, i, "semantic", wanted)
+            optical_flow = self._cam_arrays(txn, i, "optical_flow", wanted)
+            want_lidar = self.available["lidar"] and (wanted is None or "lidar" in wanted)
+            lidar = unpack_array(txn.get(self._key(i, "lidar"))) if want_lidar else None
         rgb = {cam: v.at(i) for cam, v in self._videos.items()}
         return {"rgb": rgb, "depth": depth, "semantic": semantic, "optical_flow": optical_flow,
                 "lidar": lidar, "ego": fmeta["ego"], "bboxes": fmeta["bboxes"],

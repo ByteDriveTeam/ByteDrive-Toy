@@ -104,7 +104,7 @@ class DrivingDataset(SingleFrameSceneBase):
         previous_meta = reader.frame_meta(previous_idx) if previous_valid else None
         previous_rgb = reader.rgb(previous_idx, cam) if previous_valid else None
 
-        frame = reader.frame(frame_idx)
+        frame = reader.frame(frame_idx, modalities=("depth", "semantic"))  # 驾驶只用深度/语义，跳过光流/lidar 解码
         check_behavior_annotations(meta, frame, cam)
         intr = meta["intrinsics"][cam]
         extrinsic6 = [float(v) for v in meta["extrinsics"][cam]]
