@@ -419,6 +419,7 @@ class DrivingDatasetCfg:
 
 @dataclass
 class DataCfg:
+    scene_cache_size: int
     dataset: DatasetCfg
     driving: DrivingDatasetCfg
 
@@ -455,6 +456,10 @@ class TrainCfg:
     epochs: int
     batch_size: int
     num_workers: int
+    shuffle: bool
+    drop_last: bool
+    pin_memory: bool
+    persistent_workers: bool
     lr: float
     weight_decay: float
     grad_clip_norm: float
@@ -691,6 +696,7 @@ def _validate_physics(ph):
 
 def _validate_data(data, model_lane):
     """校验对象: cfg.data —— 数据加载参数。"""
+    assert data.scene_cache_size > 0, "data.scene_cache_size 必须 > 0"
     ds = data.dataset
     assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
         "data.dataset.dino_mean/std 必须为 3 通道"
@@ -741,6 +747,9 @@ def _validate_train(train, model_lane):
     assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
     assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
+    assert all(isinstance(getattr(train, name), bool) for name in
+               ("shuffle", "drop_last", "pin_memory", "persistent_workers")), \
+        "train.shuffle / drop_last / pin_memory / persistent_workers 必须为布尔值"
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in

@@ -272,6 +272,9 @@ model:
 # ============================================================
 data:
 
+  # 每个 DataLoader worker 的场景资源上限；SceneReader/驾驶状态均采用有界 LRU，防止全量数据集线性涨内存
+  scene_cache_size: 2
+
   # 感知模型的单帧数据集：只读消费 carla_collector 落盘的场景，逐帧独立成样本（采用所有帧）
   dataset:
     scene_root: data/carla_data_collector/dataset/scenes  # 场景目录搜索根（含 scene_XXXXXX/）
@@ -324,6 +327,10 @@ train:
   epochs: 10
   batch_size: 32
   num_workers: 4
+  shuffle: true              # 按同场景连续帧成批后打乱 batch，兼顾随机性与顺序解码吞吐
+  drop_last: true            # 丢弃不足 batch_size 的最终尾批
+  pin_memory: true           # CUDA 训练锁页内存，加速 non_blocking 主机到设备传输；CPU 回退时自动关闭
+  persistent_workers: true   # 跨 epoch 复用 worker；场景缓存有界后不会随 epoch 增长
   lr: 0.0001                 # 1e-4
   weight_decay: 0.00001      # 1e-5
   grad_clip_norm: 0          # 梯度裁剪上限（0 表示不裁剪）

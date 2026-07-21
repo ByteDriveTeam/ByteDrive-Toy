@@ -6,6 +6,7 @@
 读取配置:
     data.driving.scene_root / camera / map_dir / map_name_template / previous_frame_offset /
         dist_sigma_m / lane_half_width_m
+    data.scene_cache_size
     data.driving.lane_map.line_width_m / type_to_class / unknown_class
     data.driving.traffic_control.route_corridor_m / line_expand_m / actor_match_radius_m / stop_margin_m /
         reaction_time_s / comfortable_decel_mps2
@@ -32,13 +33,14 @@
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
       独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
-      （构造期预算）。全帧 ego 位姿与速度加速度按场景缓存，供轨迹/行为/目标点复用、避免逐样本重复读 LMDB。场分辨率与
+      （构造期预算）。全帧 ego 位姿与速度加速度采用同一有界 LRU 场景缓存，供轨迹/行为/目标点复用且不随场景数涨内存。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
       vis.data_vis.geometry / data.driving_targets。
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Dict
 
 import numpy as np
@@ -61,7 +63,8 @@ class DrivingDataset(SingleFrameSceneBase):
     def __init__(self, cfg: Config) -> None:
         drv_data = cfg.data.driving
         super().__init__(drv_data.scene_root, drv_data.camera,
-                         cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std)
+                         cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std,
+                         cfg.data.scene_cache_size)
         self._cfg_data = drv_data
         bev = cfg.model.driving.bev
         self._fov = bev.fov_deg
@@ -87,7 +90,7 @@ class DrivingDataset(SingleFrameSceneBase):
         self._inview_np = dt.inview_mask(self._bev, self._fov)
         self._inview = torch.from_numpy(self._inview_np)  # 常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
-        self._state_cache: Dict[str, tuple] = {}  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
+        self._state_cache = OrderedDict()  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         scene_dir, frame_idx = self.frame_index[i]
@@ -170,15 +173,19 @@ class DrivingDataset(SingleFrameSceneBase):
         return sample
 
     def _scene_states(self, scene_dir, reader):
-        """惰性缓存全帧 ego 位姿与速度加速度（轻量读 LMDB），供轨迹/行为/目标点复用。"""
+        """以有界 LRU 缓存全帧 ego 位姿与速度加速度，供轨迹/行为/目标点复用。"""
         key = str(scene_dir)
-        if key not in self._state_cache:
+        state = self._state_cache.pop(key, None)
+        if state is None:
             metas = [reader.frame_meta(j) for j in range(reader.num_frames)]
             poses = np.array([meta["ego"]["transform"] for meta in metas], dtype=np.float64)
             velocities = np.array([meta["ego"]["velocity"] for meta in metas], dtype=np.float64)
             sim_times = np.array([meta["sim_time"] for meta in metas], dtype=np.float64)
-            self._state_cache[key] = (poses, dt.speed_accelerations(velocities, sim_times))
-        return self._state_cache[key]
+            state = (poses, dt.speed_accelerations(velocities, sim_times))
+        self._state_cache[key] = state
+        if len(self._state_cache) > self._scene_cache_size:
+            self._state_cache.popitem(last=False)
+        return state
 
     def _trajectory(self, poses: np.ndarray, frame_idx: int, pose):
         """取同场景未来 num_waypoints 帧 ego 世界位姿，变到当前 ego 系得航点与有效掩码。"""

@@ -3,9 +3,11 @@
 模块: train/run.py
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
       model.driving_model.DrivingModel, data.perception_dataset.PerceptionDataset,
-      data.driving_dataset.DrivingDataset, train.optimizer, train.loop, train.checks.run_checks
+      data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
+      train.optimizer, train.loop, train.checks.run_checks
 读取配置:
-    train.device / epochs / batch_size / num_workers / ckpt_dir / resume
+    train.device / epochs / batch_size / num_workers / shuffle / drop_last / pin_memory /
+        persistent_workers / ckpt_dir / resume
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -28,6 +30,7 @@ from torch.utils.data import DataLoader
 from config import load_config
 from data.driving_dataset import DrivingDataset
 from data.perception_dataset import PerceptionDataset
+from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
 from model.perception_model import PerceptionModel
 from train.checks.run_checks import check_runtime
@@ -243,8 +246,12 @@ def main(argv=None) -> None:
     # 驾驶训练：先以感知预训练权重初始化感知子模块（在续训覆盖之前）
     if args.task == "driving" and args.perception_ckpt:
         _load_perception_weights(model, args.perception_ckpt)
-    loader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True,
-                        num_workers=cfg.train.num_workers, drop_last=True, pin_memory=True)
+    batch_sampler = SceneBatchSampler(
+        dataset.frame_index, cfg.train.batch_size, cfg.train.shuffle, cfg.train.drop_last)
+    loader = DataLoader(
+        dataset, batch_sampler=batch_sampler, num_workers=cfg.train.num_workers,
+        pin_memory=cfg.train.pin_memory and device.type == "cuda",
+        persistent_workers=cfg.train.persistent_workers and cfg.train.num_workers > 0)
     optimizer = build_optimizer(model, cfg)
 
     ckpt_dir = _resolve_ckpt_dir(cfg.train.ckpt_dir, args.task)

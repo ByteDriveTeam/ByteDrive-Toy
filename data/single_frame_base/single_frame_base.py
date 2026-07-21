@@ -1,24 +1,26 @@
-"""单帧场景数据集共享基类：场景/帧索引、SceneReader 惰性缓存、RGB 归一化（感知与驾驶数据集复用）。
+"""单帧场景数据集共享基类：场景/帧索引、有界 SceneReader 缓存、RGB 归一化（感知与驾驶数据集复用）。
 
 模块: data/single_frame_base/single_frame_base.py
 依赖: torch, numpy, lmdb, msgpack, vis.data_vis.reader(SceneReader/list_scenes),
       data.single_frame_base.checks.single_frame_base_checks
-读取配置: —（scene_root/camera/dino_mean/dino_std 由子类以参数传入，来源 config.data.*）
+读取配置: —（scene_root/camera/dino_mean/dino_std/scene_cache_size 由子类以参数传入，来源 config.data.*）
 对外接口:
-    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std) -> Dataset
+    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size) -> Dataset
         .frame_index -> list[(Path, int)]       # (场景目录, 帧号)
         .reader(scene_dir) -> SceneReader        # 惰性构造并按 worker 缓存
         .normalize_rgb(bgr) -> Tensor            # BGR uint8 → DINO 归一化 [3,H,W]
         .scene_num_frames(scene_dir) -> int      # 轻量读 LMDB num_frames
 说明: 把感知/驾驶两个单帧数据集的公共读取逻辑收拢一处（DRY，规范 §8）：索引期只用 LMDB 轻量读 num_frames、
       不建 VideoCapture；RGB 由 BGR→RGB、/255、DINO ImageNet 归一化并保持原生分辨率（与 DINOv3 兼容）；
-      SceneReader 惰性按需构造并按 worker 缓存（cv2.VideoCapture 非跨进程安全）。子类只需实现 __getitem__。
+      SceneReader 惰性按需构造并在每个 worker 内做有界 LRU，淘汰时显式关闭视频与 LMDB，避免场景数增长导致 OOM。
+      cv2.VideoCapture 非跨进程安全，故缓存不会跨 worker 共享。子类只需实现 __getitem__。
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import lmdb
 import msgpack
@@ -34,9 +36,10 @@ __all__ = ["SingleFrameSceneBase", "resolve_repo_path"]
 
 
 class SingleFrameSceneBase(Dataset):
-    """单帧场景数据集基类：共享索引、reader 缓存与 RGB 归一化。"""
+    """单帧场景数据集基类：共享索引、有界 reader 缓存与 RGB 归一化。"""
 
-    def __init__(self, scene_root, camera: str, dino_mean, dino_std) -> None:
+    def __init__(self, scene_root, camera: str, dino_mean, dino_std,
+                 scene_cache_size: int) -> None:
         self._root = resolve_repo_path(scene_root)
         check_scene_root(self._root)
         self._camera = camera
@@ -44,7 +47,8 @@ class SingleFrameSceneBase(Dataset):
         self._std = torch.tensor(dino_std, dtype=torch.float32).view(3, 1, 1)
         self._index = _build_frame_index(self._root)
         check_has_frames(self._index, self._root)
-        self._readers: Dict[str, SceneReader] = {}
+        self._scene_cache_size = scene_cache_size
+        self._readers = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._index)
@@ -55,11 +59,16 @@ class SingleFrameSceneBase(Dataset):
         return self._index
 
     def reader(self, scene_dir: Path) -> SceneReader:
-        """惰性构造并缓存该场景的 SceneReader（每 worker 一份，避免跨进程共享解码器）。"""
+        """返回场景 reader；每 worker 采用有界 LRU，淘汰时立即释放原生解码与映射资源。"""
         key = str(scene_dir)
-        if key not in self._readers:
-            self._readers[key] = SceneReader(scene_dir)
-        return self._readers[key]
+        reader = self._readers.pop(key, None)
+        if reader is None:
+            reader = SceneReader(scene_dir)
+        self._readers[key] = reader
+        if len(self._readers) > self._scene_cache_size:
+            _, evicted = self._readers.popitem(last=False)
+            evicted.close()
+        return reader
 
     def normalize_rgb(self, bgr: np.ndarray) -> torch.Tensor:
         """BGR uint8 → RGB → [0,1] → DINO ImageNet 归一化，输出 [3,H,W] float32。"""

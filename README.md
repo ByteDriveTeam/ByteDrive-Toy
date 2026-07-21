@@ -508,7 +508,9 @@ LMDB 主要键：
 
 `SingleFrameSceneBase` 在初始化时只轻量读取各场景 LMDB 的 `num_frames`，把所有帧展开为
 `(scene_dir, frame_idx)` 索引；`SceneReader` 和视频解码器在 DataLoader worker 内惰性创建，避免跨进程共享
-`cv2.VideoCapture`。
+`cv2.VideoCapture`。每个 worker 只保留 `data.scene_cache_size` 个场景的 LRU 缓存，淘汰时显式关闭视频与
+LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同场景连续帧组成，再在 batch 粒度打乱，减少 H.265
+随机 seek；驾驶双帧读取还复用最近已解码帧，避免重叠历史帧回跳重解码。
 
 #### PerceptionDataset 输出
 
@@ -650,7 +652,11 @@ K_{12}\mathcal{L}_{stop\_crossing}
 | `epochs` | 10 | 目标**总** epoch 数，不是本次额外训练轮数 |
 | `batch_size` | 32 | 对显存要求高，首次运行建议先用 1–4 验证 |
 | `num_workers` | 4 | Windows 下入口已有 `if __name__ == "__main__"` 保护 |
-| `lr` | `5e-5` | 驾驶新增模块/感知训练基础学习率 |
+| `data.scene_cache_size` | 2 | 每个 worker 最多常驻的场景 reader 与驾驶状态数 |
+| `shuffle` / `drop_last` | true / true | 同场景连续帧成批后打乱 batch；仅丢全局最终尾批 |
+| `pin_memory` | true | 仅 CUDA 设备实际启用锁页内存 |
+| `persistent_workers` | true | 场景缓存有界后跨 epoch 安全复用 worker |
+| `lr` | `1e-4` | 驾驶新增模块/感知训练基础学习率 |
 | `weight_decay` | `1e-5` | AdamW 权重衰减 |
 | `grad_clip_norm` | 0 | 0 表示关闭裁剪 |
 | `log_every` | 20 | 每 20 step 打印一次 |
@@ -1172,7 +1178,7 @@ ByteDrive-Toy/
 ### 研究边界
 
 - 当前模型是双帧时序、单目、开放环预测，只融合一帧历史 BEV，不包含长时序记忆、车辆控制器和闭环接管；
-- 训练数据默认把所有帧展开并 shuffle，没有官方 train/val/test 划分；
+- 训练数据默认把所有帧展开、同场景连续帧成批并在 batch 粒度 shuffle，没有官方 train/val/test 划分；
 - 默认没有数据增强、学习率调度器、指标评测、早停或 best checkpoint；
 - `clone_loop/` 是占位目录；
 - 当前主配置只启用 `front` 相机，虽然采集器支持多相机 rig；

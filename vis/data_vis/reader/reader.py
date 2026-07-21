@@ -14,7 +14,8 @@
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
-说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）。
+说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）；
+      每路视频仅保留最近一帧，使驾驶双帧数据的重叠历史帧无需回跳重解码，缓存大小恒定。
       数组解码复用 collector.writer.unpack_array，确保与写入端的 (dtype,shape,bytes) 格式单一来源、无损还原；
       为此把采集模块根加入 sys.path（vis 是其数据的消费者）。各传感器模态由采集端开关决定是否存在，故构造时
       探测首帧实际落盘的模态（available），frame() 只返回存在的模态；旧场景缺交通灯状态时返回空列表。
@@ -49,18 +50,25 @@ class _Mp4Reader:
     def __init__(self, path):
         self._cap = cv2.VideoCapture(str(path))
         self._next = 0  # 下一次 read() 将返回的帧序号
+        self._last_idx = None
+        self._last_frame = None
 
     def at(self, idx):
         """返回第 idx 帧 BGR 图（解码失败返回 None）。"""
+        if idx == self._last_idx:
+            return self._last_frame
         if idx != self._next:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             self._next = idx
         ok, frame = self._cap.read()
         self._next = idx + 1 if ok else idx
-        return frame if ok else None
+        self._last_idx = idx if ok else None
+        self._last_frame = frame if ok else None
+        return self._last_frame
 
     def close(self):
         self._cap.release()
+        self._last_frame = None
 
 
 class SceneReader:
