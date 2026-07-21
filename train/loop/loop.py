@@ -13,7 +13,7 @@
 说明: 模型内部已处理 BF16/FP32 混精边界（骨干+主干+头前段 BF16，末段上采样/解码 FP32），故本循环
       不再包 autocast、直接在 FP32 下算损失。BF16 具备 FP32 指数范围，无需 GradScaler。梯度裁剪上限
       为 0 时跳过。日志聚合按样本数加权求均值。感知与驾驶两条路径共用 _LossMeter/裁剪/日志逻辑，仅前向
-      输入组织与损失函数不同（驾驶前向需当前/上一帧、内外参、目标点与帧间刚性变换）。
+      输入组织与损失函数不同（驾驶前向需当前/上一帧、内外参、目标点、ego 速度与帧间刚性变换）。
 """
 
 from __future__ import annotations
@@ -102,10 +102,10 @@ def evaluate_driving(model, loader, cfg: Config, device) -> Dict[str, float]:
 
 
 def _driving_forward(model, batch: Dict[str, torch.Tensor]):
-    """驾驶模型多输入前向：当前/上一帧 RGB + 标定 + 目标点 + 上一帧到当前帧刚性变换。"""
+    """驾驶模型多输入前向：双帧、标定、规划条件与帧间刚性变换。"""
     return model(batch["rgb"], batch["intrinsics"], batch["extrinsics"],
-                 batch["target_point"], batch["previous_rgb"],
-                 batch["previous_to_current"], batch["previous_valid"])
+                 batch["target_point"], batch["ego_velocity"],
+                 batch["previous_rgb"], batch["previous_to_current"], batch["previous_valid"])
 
 
 def _batch_to_device(batch: Dict[str, torch.Tensor], device) -> Dict[str, torch.Tensor]:

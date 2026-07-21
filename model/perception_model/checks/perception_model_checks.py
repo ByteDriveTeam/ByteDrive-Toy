@@ -2,7 +2,7 @@
 
 
 def check_input_frames(frames, patch_size):
-    """校验对象: PerceptionModel.forward 入参 frames —— 4 维 [B,3,H,W] 且 H/W 为 patch 整数倍。"""
+    """校验对象: 视觉编码器/PerceptionModel 的 frames —— 4 维 RGB 且高宽为 patch 整数倍。"""
     if frames.ndim != 4:
         raise ValueError("frames 期望 [B,3,H,W] 四维，实际 ndim={}。".format(frames.ndim))
     if int(frames.shape[1]) != 3:

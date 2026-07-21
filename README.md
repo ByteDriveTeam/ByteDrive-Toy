@@ -51,18 +51,19 @@
 
 ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 
-1. **感知预训练**：以冻结的 DINOv3 ViT-B/16 为视觉骨干，融合浅/中/深层 patch 特征，联合学习
+1. **感知预训练**：以冻结的 DINOv3 ViT-S+/16 为视觉骨干，融合浅/中/深层完整 Token 序列，联合学习
    29 类语义分割与米制深度估计。
-2. **驾驶学习**：复用感知表征，加入相机 frustum 几何编码和导航目标点条件，把当前图像聚合到前向 BEV，
+2. **驾驶学习**：复用感知表征，以相机 frustum 与纯 BEV xyz 几何把当前图像聚合到前向 BEV，
    再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、独立道路线图、8 模态未来轨迹、
-   模态置信度和 8 类行为标签。
+   模态置信度和 8 类行为标签。规划分支以目标点与 ego 平面速度为条件，用 8 个可学习 Mode Token 查询
+   BEV 主干第 3、6 层特征。
 
 项目的核心特点如下。
 
 | 能力 | 当前实现 |
 | --- | --- |
-| 视觉输入 | 当前帧 + 同场景上一帧单目 `front` RGB，默认 `W×H = 384×192`；首帧用 identity + 无效位 |
-| 视觉骨干 | 本地 DINOv3 ViT-B/16，参数永久冻结，提取第 3/6/12 层特征 |
+| 视觉输入 | 当前帧 + 同场景上一帧单目 `front` RGB，默认 `W×H = 768×384`；首帧用 identity + 无效位 |
+| 视觉骨干 | 本地 DINOv3 ViT-S+/16，参数永久冻结，提取第 3/6/12 层完整 Token 序列 |
 | 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
 | 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
 | BEV | 前向 `64 m × 64 m`，工作网格 `32×32`，场输出 `256×256` |
@@ -174,27 +175,29 @@ flowchart TB
 
 ### 张量尺寸总览
 
-以下尺寸按默认配置和当前/上一帧单目输入 `rgb, previous_rgb [B,3,192,384]` 计算。
+以下尺寸按默认配置和当前/上一帧单目输入 `rgb, previous_rgb [B,3,384,768]` 计算。
 
 | 阶段 | 张量 | 默认形状 | 说明 |
 | --- | --- | --- | --- |
-| 输入 | RGB | `[B,3,192,384]` | BGR 解码后转 RGB，并做 DINO ImageNet 归一化 |
-| 输入 | `previous_rgb` | `[B,3,192,384]` | 同场景上一帧；首帧回退当前图像 |
-| DINO 多层特征 | `dino_features` | `[B,3,768,12,24]` | 3 个层级；patch size 16 |
-| 感知共享特征 | `trunk_feat` | `[B,384,12,24]` | 多层融合后经过 6 个残差块 |
-| 语义输出 | `semantic` | `[B,29,192,384]` | 29 类 logits |
-| 深度输出 | `depth` | `[B,2,192,384]` | ch0=Symlog 深度；ch1=量程内 logit |
-| 驾驶图像特征 | `image_feat` | `[B,384,12,24]` | trunk + DINO 原始末层 + frustum 几何 |
-| 初始 BEV 查询 | `bev_query` | `[B,384,32,32]` | BEV xyz 与目标点相对向量编码 |
+| 输入 | RGB | `[B,3,384,768]` | BGR 解码后转 RGB，并做 DINO ImageNet 归一化 |
+| 输入 | `previous_rgb` | `[B,3,384,768]` | 同场景上一帧；首帧回退当前图像 |
+| DINO 多层序列 | `dino_sequences` | `[B,3,1157,384]` | 每层完整保留 1 CLS + 4 register + 1152 patch |
+| Pred Token 序列 | `trunk_tokens` | `[B,1157,384]` | 层融合后经 3 层 Pre-Norm Transformer，特殊 Token 仍保留 |
+| 感知共享特征 | `trunk_feat` | `[B,384,24,48]` | 进入像素头前才取序列末部 patch 还原网格 |
+| 语义输出 | `semantic` | `[B,29,384,768]` | 29 类 logits |
+| 深度输出 | `depth` | `[B,2,384,768]` | ch0=Symlog 深度；ch1=量程内 logit |
+| 驾驶图像特征 | `image_feat` | `[B,384,24,48]` | trunk + DINO 原始末层 + frustum 几何 |
+| 初始 BEV 查询 | `bev_query` | `[B,384,32,32]` | 仅编码 BEV xyz 几何，不注入目标点 |
 | 上一帧 BEV | `previous_bev` | `[B,384,32,32]` | 上一帧图像编码的 BEV 骨干末端输出 |
 | 历史几何 | `previous_geometry` | `[B,384,32,32]` | 上一帧 cell 坐标刚性变换到当前 ego 系后重新编码 |
-| BEV 特征 | `bev_feat` | `[B,384,32,32]` | 当前图像交叉注意力 + 历史 BEV 交叉注意力 + 8 个 ConvNeXt2D 块 |
+| BEV 特征 | `bev_feat` | `[B,384,32,32]` | 两段交叉注意力 + 4 个无位置 BEV 寄存器 + 6 层 Pre-Norm Transformer |
 | 三场输出 | `risk/drivable/distribution` | 各 `[B,1,256,256]` | 三级 PixelShuffle，输出 logits |
 | 道路线图 | `lane_class_logits` | `[B,5,256,256]` | 独立解码器，5 类类别 logits |
 | 道路线方向 | `lane_direction` | `[B,2,256,256]` | 独立解码器，有向切向量原始输出 |
 | 相关停止线 | `stop_line_logits` | `[B,1,256,256]` | 复用道路线高分辨率特征的二值 logits |
 | 停止线灯色 | `traffic_light_state_logits` | `[B,3,256,256]` | red/yellow/green，仅在相关停止线区域监督 |
-| 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 8 个扇区模态、每条 8 个 `(x,y)` 米制航点 |
+| 归一化轨迹 | `trajectory_normalized` | `[B,8,8,2]` | 8 扇区中线基线 + 可学习残差，值域为 Symlog 监督空间 |
+| 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 上述输出逆 Symlog 后的 ego 系米制航点 |
 | 模态置信度 | `confidence` | `[B,8]` | 未归一化 logits |
 | 行为输出 | `behavior_logits` | `[B,8]` | 8 类独立多标签 logits |
 
@@ -202,27 +205,28 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    RGB["RGB<br/>B×3×192×384"] --> DINO["冻结 DINOv3 ViT-B/16<br/>no_grad + eval"]
-    DINO --> L3["Layer 3<br/>B×768×12×24"]
-    DINO --> L6["Layer 6<br/>B×768×12×24"]
-    DINO --> L12["Layer 12<br/>B×768×12×24"]
+    RGB["RGB<br/>B×3×384×768"] --> DINO["冻结 DINOv3 ViT-S+/16<br/>no_grad + eval"]
+    DINO --> L3["Layer 3 完整序列<br/>B×1157×384"]
+    DINO --> L6["Layer 6 完整序列<br/>B×1157×384"]
+    DINO --> L12["Layer 12 完整序列<br/>B×1157×384"]
 
     L3 --> NORM["逐层 RMSNorm"]
     L6 --> NORM
     L12 --> NORM
-    NORM --> CAT["通道拼接<br/>2304 channels"]
-    CAT --> FUSE["1×1 Conv<br/>2304 → 384"]
-    FUSE --> TRUNK["6× 2D 瓶颈残差块<br/>B×384×12×24"]
+    NORM --> CAT["末维拼接<br/>1152 channels"]
+    CAT --> FUSE["Linear<br/>1152 → 384<br/>Token 轴不变"]
+    FUSE --> TRUNK["3× Pre-Norm Transformer<br/>patch-only 2D RoPE<br/>B×1157×384"]
+    TRUNK --> PATCH["取序列尾部 1152 patch<br/>B×384×24×48"]
 
-    TRUNK --> SH["语义头<br/>Residual + 1×1 + 4×PixelShuffle"]
-    TRUNK --> DH["深度头<br/>Residual + 1×1 + 4×PixelShuffle"]
-    SH --> SEG["29 类语义 logits<br/>B×29×192×384"]
-    DH --> DEPTH["Symlog 深度 + 量程 logit<br/>B×2×192×384"]
+    PATCH --> SH["语义头<br/>Residual + 1×1 + 4×PixelShuffle"]
+    PATCH --> DH["深度头<br/>Residual + 1×1 + 4×PixelShuffle"]
+    SH --> SEG["29 类语义 logits<br/>B×29×384×768"]
+    DH --> DEPTH["Symlog 深度 + 量程 logit<br/>B×2×384×768"]
 
     classDef frozen fill:#e0e7ff,stroke:#4f46e5,color:#312e81;
     classDef trainable fill:#d1fae5,stroke:#059669,color:#064e3b;
     class DINO,L3,L6,L12 frozen;
-    class NORM,CAT,FUSE,TRUNK,SH,DH,SEG,DEPTH trainable;
+    class NORM,CAT,FUSE,TRUNK,PATCH,SH,DH,SEG,DEPTH trainable;
 ```
 
 #### 1. 冻结 DINOv3，而不是端到端微调全部骨干
@@ -231,19 +235,22 @@ flowchart LR
 `requires_grad=False`，前向使用 `torch.no_grad()`，并覆写 `train()` 保证外层模型进入训练模式时骨干仍保持
 `eval()`。这样可以：
 
-- 避免在检查点中重复保存约 326.8 MiB 的骨干权重；
+- 避免在检查点中重复保存约 109.5 MiB 的骨干权重；
 - 显著降低反向传播显存占用；
 - 把有限的训练数据和算力集中在任务特定的融合、主干和解码头上。
 
 #### 2. 多层特征融合
 
-DINO 第 3/6/12 层分别偏向局部纹理、中层结构和高层语义。不同层激活尺度不同，因此每层先独立
-`RMSNorm2d`，再沿通道拼接为 `3×768=2304` 通道，最后用 `1×1` 卷积降到 384 维。
+DINO 第 3/6/12 层分别偏向局部纹理、中层结构和高层语义。每层都完整保留
+`[CLS, register..., patch...]` 的 1157 Token 顺序；独立 RMSNorm 后沿末维拼接为
+`3×384=1152` 维，再用 Linear 降到 384 维，Token 轴全程不变。
 
 #### 3. 感知共享主干
 
-融合特征通过 6 个 2D 瓶颈残差块，仅在 patch 空间内继续传播信息，保持 `[12,24]` 的网格分辨率。
-语义与深度头共享此前全部计算，各自再经过 1 个残差块、通道压缩与四级 `2×` PixelShuffle，恢复到原图尺寸。
+融合序列通过 3 层 Pre-Norm 自注意力 + SwiGLU 前馈。每层都对全序列做注意力，
+但二维 RoPE 只施加于 patch query/key：左上 patch 坐标为 `(1,1)`，行列步长都为 1，
+CLS 和 4 个 register Token 不施加位置编码。第 3 层后才取末部 1152 个 patch Token 还原为
+`[24,48]` 网格；语义与深度头共享此前全部计算，再各自上采样到原图尺寸。
 
 #### 4. 深度的两通道定义
 
@@ -261,19 +268,22 @@ y=s\cdot\operatorname{symlog}(x)
 
 ### 驾驶模型
 
+Driving 只构造 `PerceptionFeatureEncoder`（DINOv3 + fusion + trunk），模型树中不存在 Pred 的语义头和深度头；
+从感知检查点初始化时使用 CPU 内存映射，并且只读取 `fusion.*`、`trunk.*` 权重。
+
 ```mermaid
 flowchart TB
-    RGB["当前单目 RGB"] --> P["PerceptionModel.extract_features"]
-    P --> T["感知 trunk 末端<br/>384×12×24"]
-    P --> R["DINO 原始末层<br/>768×12×24"]
+    RGB["当前单目 RGB"] --> P["PerceptionFeatureEncoder.extract_features"]
+    P --> T["感知 trunk 末端<br/>384×24×48"]
+    P --> R["DINO 原始末层<br/>384×24×48"]
 
     T --> NECK["DrivingNeck<br/>双路 RMSNorm + 拼接 + 1×1"]
     R --> NECK
     CALIB["相机内参 fx,fy,cx,cy<br/>外参 x,y,z,roll,pitch,yaw"] --> FR["Frustum Encoding<br/>5 像素 × 165 深度 × xyz"]
     FR --> NECK
-    NECK --> IMG["带几何先验的图像 Token<br/>384×12×24"]
+    NECK --> IMG["带几何先验的图像 Token<br/>384×24×48"]
 
-    TARGET["目标点 target_point<br/>ego xy"] --> QUERY["Target Point Embedding<br/>32×32×111 垂直采样"]
+    GRID["BEV xyz 几何<br/>32×32×111 垂直采样"] --> QUERY["Geometry Query Embedding"]
     QUERY --> BEVQ["BEV Query<br/>384×32×32"]
     IMG --> CROSS["2× BEV→Image<br/>交叉注意力"]
     BEVQ --> CROSS
@@ -281,8 +291,12 @@ flowchart TB
     TF["previous→current<br/>3×3 刚性变换"] --> PGEOM["变换后实际 cell 坐标<br/>共享几何编码"]
     PBEV --> TCROSS["2× Current BEV→Previous BEV"]
     PGEOM --> TCROSS
-    CROSS --> TCROSS --> CNX["8× ConvNeXt2D"]
-    CNX --> BEV["BEV Feature<br/>384×32×32"]
+    CROSS --> TCROSS --> SEQ["4 个无位置 BEV 寄存器<br/>+ 1024 个 BEV Patch"]
+    SEQ --> TRANS3["Pre-Norm Transformer ①–③<br/>BEV Patch 2D RoPE"]
+    TRANS3 --> F3["第 3 层特征"]
+    TRANS3 --> TRANS6["Pre-Norm Transformer ④–⑥"]
+    TRANS6 --> F6["第 6 层特征"]
+    F6 --> BEV["丢弃寄存器<br/>BEV Feature 384×32×32"]
 
     BEV --> FIELD["共享 PixelShuffle 场解码器"]
     FIELD --> RISK["Risk<br/>256×256"]
@@ -293,12 +307,21 @@ flowchart TB
     LANE --> LCLS["5 类道路线 logits<br/>256×256"]
     LANE --> LDIR["有向切向量 dx,dy<br/>2×256×256"]
 
-    BEV --> SECTOR["8 个前向扇区 Token"]
-    SECTOR --> JOINT["2× Token→BEV Cross-Attn<br/>2× Token Self-Attn"]
-    BEHAV["可学习行为 Token"] --> JOINT
-    JOINT --> TRAJ["8×8×2 轨迹"]
-    JOINT --> CONF["8 模态置信度"]
-    JOINT --> ACT["8 类行为 logits"]
+    COND["目标点 + ego vx,vy"] --> SYM["Symlog → Linear → SiLU → Linear"]
+    SYM --> Q1["预查询 ①"]
+    SYM --> PPN["FFN"] --> Q2["预查询 ②"]
+    MODE["8 个随机初始化<br/>可学习 Mode Token"] --> CTB1["规划 CTB ①"]
+    F3 --> A1["RMSNorm → 1×1 CNN → FFN"] --> CTB1
+    Q1 --> CTB1
+    CTB1 --> CTB2["规划 CTB ②"]
+    F6 --> A2["RMSNorm → 1×1 CNN → FFN"] --> CTB2
+    Q2 --> CTB2
+    CTB2 --> PTB["4× Token Self-Attn"]
+    PTB --> RES["Symlog 轨迹残差"]
+    BASE["8 扇区中线基线"] --> RES
+    RES --> TRAJ["逆 Symlog<br/>8×8×2 米制轨迹"]
+    PTB --> CONF["8 模态置信度"]
+    PTB --> ACT["池化 → 8 类行为 logits"]
 ```
 
 #### 1. DrivingNeck：把表观与几何放到同一特征空间
@@ -317,30 +340,30 @@ flowchart TB
 5 个像素，并沿视线从 `0.1 m` 到 `64 m` 做近密远疏采样。默认配置实际产生 165 个深度样本，得到：
 
 ```text
-[B, 12×24 patches, 5 pixels, 165 depths, 3 xyz]
+[B, 24×48 patches, 5 pixels, 165 depths, 3 xyz]
 ```
 
 像素点先从图像平面系变换到传感器系，再依据相机外参变到 ego 系；坐标经 Symlog 归一化后展平，
 由 `Linear → SiLU → Linear` 编码成每个 patch 的 384 维几何特征。
 
-#### 3. Target Point Embedding：导航意图条件化 BEV 查询
+#### 3. BEV Query Embedding：纯几何查询初始化
 
-BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 111 层垂直列。每个采样点拼接：
+BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 111 层垂直列。每个采样点仅包含：
 
 ```text
-(grid_x, grid_y, grid_z, grid_x - target_x, grid_y - target_y)
+(grid_x, grid_y, grid_z)
 ```
 
-5 维向量经过 MLP 后沿 z 求均值，形成该 BEV cell 的初始查询。这样每个查询同时知道“我在哪里”和
-“导航目标相对我在哪里”。
+3 维几何向量经过 MLP 后沿 z 求均值，形成该 BEV cell 的初始查询；查询初始化不再编码目标点。
 
 #### 4. BEV Encoder：先查询当前图像，再查询上一帧 BEV
 
 当前帧的 `32×32=1024` 个 BEV 查询 Token 先通过两层 Pre-Norm 交叉注意力查询当前图像 Token。上一帧以
-同一世界目标点在上一帧 ego 系生成查询，得到其 BEV 骨干末端特征；每个上一帧 cell 的 `(x,y)` 再由
+同一套纯几何查询得到其 BEV 骨干末端特征；每个上一帧 cell 的 `(x,y)` 再由
 `previous_to_current` 刚性变换到当前 ego 系，并通过与当前查询共享的几何 MLP 编码变换后的真实坐标。
-当前查询随后用两层交叉注意力查询这些历史 Token，最后进入 8 个 ConvNeXt2D。场景首帧用 identity 和
-`previous_valid=0` 跳过时序残差，不构造全零历史特征。
+当前查询随后用两层交叉注意力查询这些历史 Token，再与 4 个本编码器自有的可学习寄存器 Token 拼成统一序列，
+进入 6 层 Pre-Norm Transformer。二维 RoPE 只施加于 1024 个 BEV Patch，坐标从 `(1,1)` 起；寄存器无位置，
+用于吸纳噪声并在还原网格前丢弃。场景首帧用 identity 和 `previous_valid=0` 跳过时序残差，不构造全零历史特征。
 
 #### 5. 三场解码
 
@@ -366,14 +389,16 @@ road_boundary / other_marking`。当前 Town01 HD Map 的映射为 `Center / Bro
 始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于“反应距离 + 舒适制动距离 + 安全余量”时激活，
 避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
 
-#### 7. 轨迹与行为联合 Token
+#### 7. 条件化多 Mode 规划 Token
 
-90° 前向视场被均分成 8 个扇区。每个扇区对其覆盖的 BEV cell 做均值池化，并拼接扇区中心方向
-`(sin θ, cos θ)` 形成轨迹 Token；另追加 1 个可学习行为 Token。查询上下文只含 1024 个 BEV Token，末端
-不再注入自车速度或其他自车状态。两层交叉注意力和两层参数独立、结构相同的自注意力后：
+规划使用 8 个随机初始化、在训练中持续更新的 Mode Token。目标点与 ego 平面速度 `(vₓ,vᵧ)` 先经 Symlog
+和 `Linear → SiLU → Linear` 得到第一路预查询，再经 FFN 得到第二路预查询。两个规划 CTB 依次查询 BEV
+六层主干的第 3、6 层特征；两路特征分别做 RMSNorm，共享 `1×1 CNN` 降维，再由独立 FFN 适配。随后四层
+Token 自注意力协调 8 个 Mode：
 
-- 每个轨迹 Token 输出 8 个未来 `(x,y)` 航点和 1 个置信度；
-- 行为 Token 输出 8 个独立 logits；
+- 每个 Mode 只回归其扇区中线基线的 Symlog 残差；残差头零初始化，初始输出严格等于基线；
+- 每个 Mode 输出 8 个未来航点和 1 个置信度，供推理时排序；
+- 8 个 Mode 特征均值输出 8 个独立行为 logits；
 - 行为顺序为：障碍停车、红灯停车、加速、直行、左转、右转、减速、静止；其中红灯停车在相关停止线为红灯时
   提前激活，不再等车辆完全静止。
 
@@ -401,12 +426,12 @@ flowchart TB
 
 | 模型 | 总参数 | 默认可训练参数 | 冻结参数 |
 | --- | ---: | ---: | ---: |
-| `PerceptionModel` | 92,101,391 | 6,440,975 | 85,660,416 |
-| `DrivingModel` | 116,816,246 | 31,155,830 | 85,660,416 |
+| `PerceptionModel` | 35,128,815 | 6,435,951 | 28,692,864 |
+| `DrivingModel` | 58,504,711 | 29,811,847 | 28,692,864 |
 
-默认 `model.driving.freeze_perception=false`，因此驾驶训练的 31.16M 可训练参数包含感知融合/trunk/双头、
-时序 BEV 与独立道路线图解码器；
-DINOv3 的 85.66M 参数始终冻结。若设为 `true`，感知子模块也会完全冻结。
+默认 `model.driving.freeze_perception=false`，因此驾驶模型的 29.81M 非冻结参数包含视觉 fusion/trunk、
+时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
+若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
 混合精度边界不是由训练循环隐式决定，而是模型内部显式划分：
 
@@ -503,8 +528,9 @@ LMDB 主要键：
 | 模型输入 | `previous_to_current/previous_valid` | 上一帧 ego xy 到当前 ego xy 的 `3×3` 刚性矩阵及有效位 |
 | 模型输入 | `intrinsics` | `[fx,fy,cx,cy]` |
 | 模型输入 | `extrinsics` | 相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
-| 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，ego 系 `[x,y]` |
-| 轨迹监督 | `trajectory/traj_valid/sector` | 未来航点、有效掩码、所属扇区 |
+| 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，同时用于规划条件和路线相关监督 |
+| 模型输入 | `ego_velocity` | 世界速度旋转到当前 ego 系后的 `[vₓ,vᵧ]` |
+| 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算 |
 | 行为监督 | `behavior` | 8 类多热向量 |
 | 场监督 | `risk/drivable/distribution/inview` | 三场与视场掩码；drivable 已扣除可见 box 占用 |
 | 道路线监督 | `lane_class/lane_direction` | 5 类道路线索引与 ego 系有向单位切向量 `[2,H,W]` |
@@ -542,14 +568,14 @@ flowchart LR
 flowchart LR
     A["阶段 0<br/>采集/检查数据"] --> B["阶段 1<br/>感知预训练"]
     B --> C["保存 perception checkpoint"]
-    C --> D["阶段 2<br/>初始化驾驶模型感知子模块"]
+    C --> D["阶段 2<br/>初始化驾驶视觉编码器"]
     D --> E["驾驶多任务训练"]
     E --> F["driving_vis 离线检查"]
 ```
 
 #### 阶段 1：感知预训练
 
-默认可训练部分为多层融合、6 层空间主干、语义头和深度头。DINOv3 永久冻结。
+默认可训练部分为多层 Token 融合、3 层 Pre-Norm Transformer、语义头和深度头。DINOv3 永久冻结。
 
 感知总损失：
 
@@ -572,10 +598,11 @@ K_4\mathcal{L}_{depth\_range}
 
 #### 阶段 2：驾驶训练
 
-从感知检查点初始化 `DrivingModel.perception`。默认 `freeze_perception=false`：
+从感知检查点只筛选 `fusion.*`、`trunk.*` 初始化 `DrivingModel.perception`；语义/深度头权重明确排除。
+默认 `freeze_perception=false`：
 
 - 新增驾驶模块学习率：`5e-5`；
-- 感知 fusion/trunk 学习率：`5e-5 × 0.01 = 5e-7`；语义/深度头不参与驾驶前向，故不进入驾驶优化器；
+- 感知 fusion/trunk 学习率：`5e-5 × 0.01 = 5e-7`；Driving 中不构造语义/深度头；
 - DINOv3：始终冻结，不进入优化器。
 
 驾驶总损失：
@@ -605,8 +632,8 @@ K_{12}\mathcal{L}_{stop\_crossing}
 | `distribution` | 视场内空间 softmax，与归一化 GT 高斯软占据做交叉熵 |
 | `lane_class` | 视场内 5 类加权交叉熵，背景权重 0.1，细线类别权重 1.0 |
 | `lane_direction` | 仅道路线像素上的有向余弦距离，保留正反行驶方向 |
-| `trajectory` | Winner-Take-All：只回归 GT 所属扇区的候选轨迹；有效航点 SmoothL1 |
-| `confidence` | 8 扇区分类交叉熵 |
+| `trajectory` | 米制 ADE 做 8×1 匈牙利匹配、Symlog 空间回归；最相似 Mode 全权重，其余 7 个 Mode 以 0.05 小权重更新 |
+| `confidence` | 以匈牙利匹配结果为标签的 8 Mode 交叉熵 |
 | `behavior` | 8 类独立 BCE-with-logits，允许同一帧多个行为同时激活 |
 | `boundary` | 对全部模态/航点可微采样道路外/可见占用距离；超出 BEV 另加坐标越界距离 |
 | `stop_line` | 前景/背景分别归一的均衡 BCE，避免稀疏停止线被背景淹没 |
@@ -697,7 +724,7 @@ train/checkpoints/
 ```text
 ByteDrive-Toy/
 ├── model/
-│   └── dinov3-vitb16-pretrain-lvd1689m/
+│   └── dinov3-vits16plus-pretrain-lvd1689m/
 │       ├── config.json
 │       └── model.safetensors
 ├── train/
@@ -714,7 +741,7 @@ ByteDrive-Toy/
 
 | 文件 | 大小约 | 内容 | 使用方式 |
 | --- | ---: | --- | --- |
-| `model.safetensors` | 326.8 MiB | DINOv3 ViT-B/16 冻结骨干 | 构造任一模型时自动本地加载 |
+| `model.safetensors` | 109.5 MiB | DINOv3 ViT-S+/16 冻结骨干 | 构造任一模型时自动本地加载 |
 | `perception.pt` | 73.9 MiB | 感知 epoch 40；模型+优化器 | 感知推理/续训；初始化驾驶感知模块 |
 | `driving.pt` | 258.2 MiB | 驾驶 epoch 10；模型+优化器 | 驾驶推理/续训 |
 | `Town01_HD_map.npz` | 7.3 MiB | Town01 车道折线 HDMap | 生成可行驶场和越界距离场 |
@@ -801,7 +828,7 @@ python -c "from config import load_config; c=load_config(); print(c.train.device
 python -c "from model.perception_model import PerceptionModel; from config import load_config; m=PerceptionModel(load_config()); print(sum(p.numel() for p in m.parameters()))"
 ```
 
-预期第二条命令能从本地 `model/dinov3-vitb16-pretrain-lvd1689m/` 加载权重，并输出 `92101391`。
+预期第二条命令能从本地 `model/dinov3-vits16plus-pretrain-lvd1689m/` 加载权重，并输出 `35128815`。
 
 ### 2. 采集少量 CARLA 数据
 
@@ -945,7 +972,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 1. 将 `train.batch_size` 从 32 降到 1–4；
 2. 训练驾驶模型时设 `model.driving.freeze_perception: true`；
 3. 降低 `model.driving.fields.up_channels` 的通道数，而不是随意改变列表长度；改变长度会改变场分辨率；
-4. 减少 `model.driving.bev_encoder.num_convnext_blocks`；
+4. 减少 `model.driving.bev_encoder.num_register_tokens`（Transformer 层数固定为 6）；
 5. 谨慎调整 frustum 采样——更小步长会扩大 MLP 输入和中间几何张量。
 
 改变输入宽高时，必须保证二者均可被 `patch_size=16` 整除；语义/深度头四级上采样倍率固定为 16，
@@ -1025,8 +1052,8 @@ sample = PerceptionDataset(cfg)[0]
 with torch.no_grad():
     output = model(sample["rgb"].unsqueeze(0).to(device))
 
-print(output["semantic"].shape)  # [1, 29, 192, 384]
-print(output["depth"].shape)     # [1, 2, 192, 384]
+print(output["semantic"].shape)  # [1, 29, 384, 768]
+print(output["depth"].shape)     # [1, 2, 384, 768]
 ```
 
 ### 驾驶推理
@@ -1042,12 +1069,15 @@ cfg = load_config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = DrivingModel(cfg).to(device).eval()
-ckpt = torch.load("train/ckpt/driving/driving.pt", map_location=device, weights_only=False)
-model.load_state_dict(ckpt["model"], strict=False)
+ckpt = torch.load("train/ckpt/driving/driving.pt", map_location="cpu", weights_only=True, mmap=True)
+current = model.state_dict()
+compatible = {name: value for name, value in ckpt["model"].items()
+              if name in current and value.shape == current[name].shape}
+model.load_state_dict(compatible, strict=False)
 
 sample = DrivingDataset(cfg)[0]
 inputs = [sample[name].unsqueeze(0).to(device) for name in
-          ("rgb", "intrinsics", "extrinsics", "target_point", "previous_rgb",
+          ("rgb", "intrinsics", "extrinsics", "target_point", "ego_velocity", "previous_rgb",
            "previous_to_current", "previous_valid")]
 
 with torch.no_grad():
@@ -1063,8 +1093,8 @@ print(output["behavior_logits"].shape)  # [1, 8]
 ```
 
 模型输出的三场、停止线、置信度、行为和类别图都是 logits；三场/停止线使用 `sigmoid`，道路线/灯色类别用
-`argmax`，方向向量沿通道归一化。轨迹模态选择可对 `confidence` 使用 `softmax`/`argmax`。轨迹坐标已经是
-ego 系米制 `(x,y)`。
+`argmax`，方向向量沿通道归一化。轨迹模态选择可对 `confidence` 使用 `softmax`/`argmax`；
+`trajectory_normalized` 是 Symlog 监督值，`trajectories` 已逆变换为 ego 系米制 `(x,y)`。
 
 ---
 
@@ -1086,16 +1116,16 @@ ByteDrive-Toy/
 │   ├── target_encoding/              # Symlog 物理量监督
 │   └── map/                          # TownXX_HD_map.npz（下载/本地文件）
 ├── model/
-│   ├── dinov3_backbone/              # 冻结本地 DINOv3 多层特征
-│   ├── feature_fusion/               # 逐层 RMSNorm + 拼接 + 1×1 融合
-│   ├── feature_trunk/                # 感知 2D 残差主干
+│   ├── dinov3_backbone/              # 冻结本地 DINOv3 多层完整 Token 序列
+│   ├── feature_fusion/               # 逐层 RMSNorm + 末维拼接 + Linear 融合
+│   ├── feature_trunk/                # 感知 3 层 Pre-Norm Transformer
 │   ├── perception_head/              # 语义/深度 PixelShuffle 头
-│   ├── perception_model/             # 感知总模型
+│   ├── perception_model/             # 共享视觉编码器 + Pred 双头总模型
 │   ├── frustum_encoding/             # patch 视锥 3D 候选编码
 │   ├── driving_neck/                 # 感知+DINO+几何融合
-│   ├── target_point_embedding/       # 目标点条件 BEV 查询
-│   ├── attention/                    # Pre-Norm SDPA + SwiGLU
-│   ├── bev_encoder/                  # BEV↔图像注意力 + ConvNeXt2D
+│   ├── bev_query_embedding/          # 纯 xyz 几何 BEV 查询
+│   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
+│   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
 │   ├── field_decoder/                # 风险/可行驶/轨迹分布三场
 │   ├── trajectory_decoder/           # 多模态轨迹/置信度/行为联合 Token
 │   ├── driving_model/                # 驾驶总模型
@@ -1157,8 +1187,8 @@ ByteDrive-Toy/
 本项目明确使用 `local_files_only=True`，不会自动下载。确认以下两个文件存在：
 
 ```text
-model/dinov3-vitb16-pretrain-lvd1689m/config.json
-model/dinov3-vitb16-pretrain-lvd1689m/model.safetensors
+model/dinov3-vits16plus-pretrain-lvd1689m/config.json
+model/dinov3-vits16plus-pretrain-lvd1689m/model.safetensors
 ```
 
 若放在别处，覆盖 `model.dinov3_backbone.model_dir`。

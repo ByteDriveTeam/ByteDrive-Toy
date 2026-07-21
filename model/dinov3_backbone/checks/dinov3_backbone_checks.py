@@ -41,12 +41,12 @@ def check_backbone_frames(frames, patch_size):
         )
 
 
-def check_patch_tokens(sequence_length, expected_patches, num_register_tokens):
-    """校验对象: 骨干输出序列长度 —— 至少含 1 CLS + register + 全部 patch，避免错切 token。"""
-    minimum = 1 + num_register_tokens + expected_patches
-    if sequence_length < minimum:
+def check_sequence_tokens(sequence_length, expected_patches, num_register_tokens):
+    """校验对象: 骨干完整输出序列 —— 恰为 1 CLS + register + 全部 patch。"""
+    expected = 1 + num_register_tokens + expected_patches
+    if sequence_length != expected:
         raise ValueError(
-            "骨干输出 token 数 {} 少于 1(CLS)+{}(register)+{}(patch)={}，无法取出 patch。".format(
-                sequence_length, num_register_tokens, expected_patches, minimum
+            "骨干输出 token 数 {} 不等于 1(CLS)+{}(register)+{}(patch)={}。".format(
+                sequence_length, num_register_tokens, expected_patches, expected
             )
         )

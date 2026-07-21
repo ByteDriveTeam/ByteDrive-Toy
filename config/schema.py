@@ -1,7 +1,7 @@
 """配置的类型定义与加载期校验（参数约束的唯一来源）。
 
 模块: config/schema.py
-依赖: dataclasses, typing
+依赖: dataclasses, math, typing
 读取配置: —（本文件定义配置结构本身，不读取具体键）
 对外接口:
     - build_config(raw: dict) -> Config        # 由原始 dict 构造强类型配置对象
@@ -11,6 +11,7 @@
       实现文件不再重复（规范 §7.3）。
 """
 
+import math
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Dict, List, get_type_hints
 
@@ -211,7 +212,7 @@ class DataVisCfg:
 class BevGeometryCfg:
     """BEV（ego 前向单目）几何：坐标量程、工作网格分辨率、视场角、z 采样。
 
-    这是驾驶系统 BEV 几何的**单一来源**：目标点嵌入（初始查询）、frustum 视场掩码、
+    这是驾驶系统 BEV 几何的**单一来源**：纯几何查询嵌入、frustum 视场掩码、
     数据侧场 GT 栅格化都从这里取量程，避免多处各写一份坐标范围。
     """
     x_min_m: float
@@ -221,17 +222,16 @@ class BevGeometryCfg:
     height: int          # Hb：BEV 工作网格前向(x)格数（= 初始查询分辨率）
     width: int           # Wb：BEV 工作网格左右(y)格数
     fov_deg: float       # 前向视场角（视场内监督）
-    z_min_m: float       # 目标点嵌入垂直采样下界
+    z_min_m: float       # BEV 查询几何嵌入垂直采样下界
     z_max_m: float
     z_step_m: float
 
 
 @dataclass
 class QueryEmbeddingCfg:
-    """初始 BEV 查询嵌入（由 target_point_embedding 产）的模块参数（几何取自 BevGeometryCfg）。"""
+    """初始 BEV 纯几何查询嵌入参数（几何取自 BevGeometryCfg）。"""
     coord_symlog_scale: float   # symlog(坐标)·scale 归一到[-1,1]
     mlp_hidden: int             # 逐 cell 列 MLP 隐藏维
-    vector_order: str           # 目标点相对向量方向
 
 
 @dataclass
@@ -256,9 +256,10 @@ class BevEncoderCfg:
     cross_layers: int              # BEV 查询 ← 图像特征 交叉注意力层数
     temporal_layers: int           # 当前 BEV 查询 ← 上一帧 BEV 交叉注意力层数
     detach_previous: bool          # 是否截断上一帧 BEV 分支梯度
-    num_convnext_blocks: int
-    convnext_spatial_kernel: int
-    convnext_expansion: int
+    transformer_layers: int        # BEV Pre-Norm Transformer 层数
+    num_register_tokens: int       # BEV 自有无位置寄存器 Token 数
+    register_init_std: float       # 寄存器正态初始化标准差
+    rope_theta: float              # BEV Patch 二维 RoPE 基频
 
 
 @dataclass
@@ -283,13 +284,17 @@ class TrafficControlCfg:
 
 @dataclass
 class TrajectoryCfg:
-    num_modes: int                 # 前向扇区数 = 多模态轨迹条数
+    num_modes: int                 # 可学习 Mode Token 数 = 多模态轨迹条数
     num_waypoints: int             # 每条轨迹航点数 T_wp
-    token_mlp_hidden: int          # 扇区 Token 输入编码 MLP 隐藏维
-    cross_layers: int              # Token ← BEV 特征 交叉注意力层数
-    self_layers: int               # Token 自注意力层数
+    planning_dim: int              # 规划分支工作维
+    condition_mlp_hidden: int      # 目标点+ego 速度条件编码 MLP 隐藏维
+    feature_ffn_hidden: int        # 两路感知特征适配 FFN 隐藏维
+    cross_layers: int              # 规划 CTB 数（固定对应第 3、6 层特征）
+    self_layers: int               # 规划 CTB 后的 TB 层数
     num_heads: int
-    waypoint_scale_m: float        # 航点回归输出的固定尺度（米）：Linear 原始输出乘此值到米制量级
+    mode_token_init_std: float     # 可学习 Mode Token 随机初始化标准差
+    baseline_step_m: float         # 扇区中线基线轨迹航点间距（米）
+    symlog_scale: float            # 条件输入与轨迹输出的 Symlog 缩放
 
 
 @dataclass
@@ -327,7 +332,10 @@ class DinoV3BackboneCfg:
 @dataclass
 class FeatureTrunkCfg:
     channels: int
-    num_blocks: int
+    num_layers: int
+    num_heads: int
+    mlp_ratio: int
+    rope_theta: float
 
 
 @dataclass
@@ -425,7 +433,8 @@ class LossWeightsCfg:
 
 @dataclass
 class DrivingLossWeightsCfg:
-    trajectory: float             # WTA 多模态轨迹回归
+    trajectory: float             # 匈牙利匹配多模态轨迹回归
+    trajectory_unmatched_weight: float  # 未匹配 Mode 的小权重回归系数
     confidence: float             # 模态置信度分类
     behavior: float               # 行为多标签分类
     distribution: float           # 轨迹分布场
@@ -625,10 +634,6 @@ def validate_config(cfg):
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
 
-# 目标点相对向量方向枚举（须与 model/target_point_embedding.py 的分支一致）
-_TPE_VECTOR_ORDERS = {"grid_minus_target", "target_minus_grid"}
-
-
 def _validate_model(model):
     """校验对象: cfg.model —— 网络结构参数。"""
     _validate_dinov3_backbone(model.dinov3_backbone)
@@ -650,17 +655,24 @@ def _validate_dinov3_backbone(bb):
 
 
 def _validate_feature_trunk(ft):
-    """校验对象: cfg.model.feature_trunk —— 2D 残差块单帧主干参数（输入维已由 feature_fusion 对齐）。"""
-    # 2D 瓶颈残差块 C→C/2→C 需二分通道，故 channels 至少为 2
-    assert ft.channels >= 2, "model.feature_trunk.channels 必须 >= 2（瓶颈残差块需二分通道）"
-    assert ft.num_blocks > 0, "model.feature_trunk.num_blocks 必须 > 0"
+    """校验对象: cfg.model.feature_trunk —— 完整 DINOv3 序列的 Pre-Norm Transformer 参数。"""
+    assert ft.channels > 0, "model.feature_trunk.channels 必须 > 0"
+    assert ft.num_layers == 3, "model.feature_trunk.num_layers 必须为 3"
+    assert ft.num_heads > 0 and ft.channels % ft.num_heads == 0, \
+        "model.feature_trunk.num_heads 必须为正且整除 channels"
+    assert (ft.channels // ft.num_heads) % 4 == 0, \
+        "model.feature_trunk 每头维度必须被 4 整除（二维 RoPE）"
+    assert ft.mlp_ratio > 0 and (ft.channels * ft.mlp_ratio) % 2 == 0, \
+        "model.feature_trunk.mlp_ratio 必须 > 0 且 channels·mlp_ratio 为偶数"
+    assert math.isfinite(ft.rope_theta) and ft.rope_theta > 0, \
+        "model.feature_trunk.rope_theta 必须为有限正数"
 
 
 def _validate_heads(hd):
     """校验对象: cfg.model.heads —— 三头解码结构参数。"""
     assert hd.reduce_channels > 0, "model.heads.reduce_channels 必须 > 0"
     assert len(hd.up_channels) > 0, "model.heads.up_channels 至少一级"
-    # 每级像素洗牌前 Conv2d 升到 C_out·4，PixelShuffle(2) 折回 C_out：C_out 须为正整数即可
+    # 每级像素洗牌前 1×1 Conv 升到 C_out·4，PixelShuffle(2) 折回 C_out：C_out 须为正整数即可
     assert all(isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in hd.up_channels), \
         "model.heads.up_channels 每级必须为正整数"
     for name in ("num_classes", "semantic_out", "depth_out"):
@@ -736,6 +748,8 @@ def _validate_train(train, model_lane):
                 "lane_class", "lane_direction", "boundary", "stop_line",
                 "traffic_light_state", "stop_crossing")), \
         "train.driving_loss_weights.* 必须 >= 0"
+    assert 0 < dw.trajectory_unmatched_weight <= 1, \
+        "train.driving_loss_weights.trajectory_unmatched_weight 必须在 (0,1]"
     assert len(dw.lane_class_weights) == len(model_lane.class_names) \
         and all(weight > 0 for weight in dw.lane_class_weights), \
         "train.driving_loss_weights.lane_class_weights 须与道路线类别等长且各项 > 0"
@@ -747,11 +761,9 @@ def _validate_driving(dv):
         "model.driving.work_dim 必须为 >=2 的偶数（残差块瓶颈需二分通道）"
     assert dv.neck_num_residual_blocks > 0, "model.driving.neck_num_residual_blocks 必须 > 0"
     _validate_bev_geometry(dv.bev)
-    # 校验对象: query —— 尺度为正、MLP 隐藏维为正、向量方向枚举合法
+    # 校验对象: query —— 纯几何编码的尺度与 MLP 隐藏维为正
     assert dv.query.coord_symlog_scale > 0 and dv.query.mlp_hidden > 0, \
         "model.driving.query.coord_symlog_scale / mlp_hidden 必须 > 0"
-    assert dv.query.vector_order in _TPE_VECTOR_ORDERS, \
-        "model.driving.query.vector_order 仅支持 {}".format(sorted(_TPE_VECTOR_ORDERS))
     # 校验对象: frustum —— 深度量程与步长为正、近步长 <= 远步长
     fr = dv.frustum
     assert 0 < fr.depth_min_m < fr.depth_max_m, "model.driving.frustum 需 0 < depth_min_m < depth_max_m"
@@ -762,13 +774,20 @@ def _validate_driving(dv):
     assert dv.attention.num_heads > 0 and dv.work_dim % dv.attention.num_heads == 0, \
         "model.driving.attention.num_heads 必须 > 0 且整除 work_dim"
     assert dv.attention.mlp_ratio > 0, "model.driving.attention.mlp_ratio 必须 > 0"
-    # 校验对象: bev_encoder —— 层数/核为正
+    # 校验对象: bev_encoder —— 固定六层、BEV 寄存器和二维 RoPE 参数合法
     be = dv.bev_encoder
-    assert be.cross_layers > 0 and be.temporal_layers > 0 and be.num_convnext_blocks > 0, \
-        "model.driving.bev_encoder.cross_layers / temporal_layers / num_convnext_blocks 必须 > 0"
-    assert be.convnext_spatial_kernel % 2 == 1 and be.convnext_spatial_kernel > 0, \
-        "model.driving.bev_encoder.convnext_spatial_kernel 必须为正奇数"
-    assert be.convnext_expansion > 0, "model.driving.bev_encoder.convnext_expansion 必须 > 0"
+    assert be.cross_layers > 0 and be.temporal_layers > 0, \
+        "model.driving.bev_encoder.cross_layers / temporal_layers 必须 > 0"
+    assert be.transformer_layers == 6, \
+        "model.driving.bev_encoder.transformer_layers 必须为 6"
+    assert be.num_register_tokens > 0, \
+        "model.driving.bev_encoder.num_register_tokens 必须 > 0"
+    assert math.isfinite(be.register_init_std) and be.register_init_std > 0, \
+        "model.driving.bev_encoder.register_init_std 必须为有限正数"
+    assert (dv.work_dim // dv.attention.num_heads) % 4 == 0, \
+        "model.driving.bev_encoder 每头维度必须被 4 整除（二维 RoPE）"
+    assert math.isfinite(be.rope_theta) and be.rope_theta > 0, \
+        "model.driving.bev_encoder.rope_theta 必须为有限正数"
     # 校验对象: fields —— 通道为正、每级像素洗牌通道为正整数
     assert dv.fields.reduce_channels > 0 and dv.fields.feature_channels > 0, \
         "model.driving.fields.reduce_channels / feature_channels 必须 > 0"
@@ -792,13 +811,20 @@ def _validate_driving(dv):
     states = dv.traffic_control.state_names
     assert states and len(states) == len(set(states)) and "red" in states, \
         "model.driving.traffic_control.state_names 须非空、不重复且包含 red"
-    # 校验对象: trajectory —— 模态/航点/层数为正、D 须能被头数整除
+    # 校验对象: trajectory —— 固定 8 Mode、2 个规划 CTB、4 个后续 TB，其余维度与尺度合法
     tj = dv.trajectory
-    for name in ("num_modes", "num_waypoints", "token_mlp_hidden", "cross_layers", "self_layers"):
+    assert tj.num_modes == 8, "model.driving.trajectory.num_modes 必须为 8"
+    assert tj.cross_layers == 2, "model.driving.trajectory.cross_layers 必须为 2（对应第 3/6 层特征）"
+    assert tj.self_layers == 4, "model.driving.trajectory.self_layers 必须为 4"
+    for name in ("num_waypoints", "planning_dim", "condition_mlp_hidden", "feature_ffn_hidden"):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
-    assert tj.num_heads > 0 and dv.work_dim % tj.num_heads == 0, \
-        "model.driving.trajectory.num_heads 必须 > 0 且整除 work_dim"
-    assert tj.waypoint_scale_m > 0, "model.driving.trajectory.waypoint_scale_m 必须 > 0"
+    assert tj.planning_dim < dv.work_dim, \
+        "model.driving.trajectory.planning_dim 必须小于 work_dim（1×1 CNN 执行降维）"
+    assert tj.num_heads > 0 and tj.planning_dim % tj.num_heads == 0, \
+        "model.driving.trajectory.num_heads 必须 > 0 且整除 planning_dim"
+    assert all(math.isfinite(value) and value > 0 for value in (
+        tj.mode_token_init_std, tj.baseline_step_m, tj.symlog_scale)), \
+        "model.driving.trajectory.mode_token_init_std / baseline_step_m / symlog_scale 必须为有限正数"
     # 校验对象: behavior.num_classes —— 固定对应八类行为语义，避免模型头与标签顺序漂移
     assert dv.behavior.num_classes == 8, \
         "model.driving.behavior.num_classes 必须为 8（固定行为语义顺序）"

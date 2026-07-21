@@ -1,36 +1,37 @@
-"""轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列，输出轨迹、置信度与多标签行为。
+"""条件化多 Mode 规划解码器：以 8 个可学习 Token 查询主感知第 3/6 层特征并回归基线残差。
 
 模块: model/trajectory_decoder/trajectory_decoder.py
-依赖: torch, config.schema.DrivingCfg, model.attention.(CrossAttentionBlock, SelfAttentionBlock),
+依赖: torch, config.schema.DrivingCfg, data.target_encoding, model.attention,
       model.trajectory_decoder.checks.trajectory_decoder_checks
 读取配置:
     model.driving.work_dim
-    model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / height / width / fov_deg
-    model.driving.attention.mlp_ratio
-    model.driving.trajectory.num_modes / num_waypoints / token_mlp_hidden / cross_layers / self_layers /
-        num_heads / waypoint_scale_m
+    model.driving.bev.fov_deg
+    model.driving.trajectory.num_modes / num_waypoints / planning_dim / condition_mlp_hidden /
+        feature_ffn_hidden / cross_layers / self_layers / num_heads / mode_token_init_std /
+        baseline_step_m / symlog_scale
     model.driving.behavior.num_classes
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
-        forward(bev_feat) -> dict
-            # trajectories [B,M,T_wp,2] / confidence [B,M] / behavior_logits [B,C_behavior]
-说明: 前向视场按 fov 均分为 num_modes 个扇区（每扇区对应一条候选轨迹）。每个扇区 Token 的初始查询由该扇区
-      内 BEV cell 的均值池化特征（关键点分布代理）拼上扇区中心朝向(sin,cos)，归一化后经 Linear→SiLU→Linear
-      得到。一个可学习行为 Token 追加到 M 个轨迹 Token 后，组成统一查询序列；被查询方为 BEV 特征展平的 Token
-      序列。级联 cross_layers 层 Pre-Norm 交叉注意力只聚合 BEV 信息，不在末端注入自车状态条件；再过
-      self_layers 层 Pre-Norm 自注意力使轨迹/行为互相协调。轨迹 Token
-      解码航点与置信度；行为 Token 输出固定顺序的多标签 logits。精度由外层 autocast 控制。
+        forward(perception_features, target_point, ego_velocity) -> dict
+            # trajectory_normalized/trajectories [B,M,T,2] / confidence [B,M] /
+            # behavior_logits [B,C_behavior]
+说明: 目标点与 ego 平面速度先作 Symlog，再经 MLP 产生第一路预查询，随后经 FFN 产生第二路预查询。
+      8 个随机初始化的可学习 Mode Token 依次在两个规划 CTB 中查询主感知第 3、6 层特征；两路特征分别
+      RMSNorm，共享 1×1 CNN 降维，再经独立 FFN。其后四层 TB 协调各 Mode。轨迹头仅回归 8 个扇区
+      中线基线在 Symlog 空间的残差，且零初始化保证初始预测严格等于基线；物理解码仅供安全损失与推理使用。
 """
 
 from __future__ import annotations
 
-from typing import Dict
+import math
+from typing import Dict, Sequence
 
 import torch
 import torch.nn as nn
 
 from config.schema import DrivingCfg
-from model.attention import CrossAttentionBlock, SelfAttentionBlock
+from data.target_encoding import physics_decode, physics_target
+from model.attention import CrossAttentionBlock, RMSNormTokens, SelfAttentionBlock
 from model.trajectory_decoder.checks.trajectory_decoder_checks import check_trajectory_inputs
 
 
@@ -38,105 +39,100 @@ __all__ = ["TrajectoryDecoder"]
 
 
 class TrajectoryDecoder(nn.Module):
-    """8 扇区轨迹 Token + 1 个行为 Token 的联合解码器。
-
-    Args:
-        cfg_driving: 驾驶配置 `config.model.driving`。
-
-    Shape:
-        bev_feat: `[B, work_dim, Hb, Wb]`；
-        输出: dict，trajectories `[B, num_modes, num_waypoints, 2]`、confidence `[B, num_modes]`、
-        behavior_logits `[B, num_behavior_classes]`。
-    """
+    """目标/速度条件化的 8-Mode 轨迹规划解码器。"""
 
     def __init__(self, cfg_driving: DrivingCfg) -> None:
         super().__init__()
-        d = cfg_driving.work_dim
         tj = cfg_driving.trajectory
-        self.work_dim = d
+        self.work_dim = cfg_driving.work_dim
         self.num_modes = tj.num_modes
         self.num_waypoints = tj.num_waypoints
-        self.num_behavior_classes = cfg_driving.behavior.num_classes
-        self.waypoint_scale = tj.waypoint_scale_m
+        self.symlog_scale = tj.symlog_scale
 
-        # 扇区角掩码 [M,Hb,Wb] 与扇区中心朝向 [M,2]（由 BEV 几何 + fov 推导，随模型搬设备）
-        masks, dirs = _build_sectors(cfg_driving.bev, tj.num_modes)
-        self.register_buffer("sector_masks", masks)
-        self.register_buffer("sector_dirs", dirs)
+        self.mode_tokens = nn.Parameter(torch.empty(1, tj.num_modes, tj.planning_dim))
+        nn.init.normal_(self.mode_tokens, std=tj.mode_token_init_std)
 
-        # 扇区 Token 初始查询：归一(池化特征 ⊕ 朝向) → Linear→SiLU→Linear
-        self.token_norm = nn.LayerNorm(d + 2)
-        self.token_mlp = nn.Sequential(
-            nn.Linear(d + 2, tj.token_mlp_hidden), nn.SiLU(),
-            nn.Linear(tj.token_mlp_hidden, d))
-        # 可学习 Token 使用小幅随机初始化，避免所有样本从完全相同的零查询开始。
-        self.behavior_token = nn.Parameter(torch.empty(1, 1, d))
-        nn.init.normal_(self.behavior_token, mean=0.0, std=0.02)
-        self.cross = nn.ModuleList(
-            CrossAttentionBlock(d, tj.num_heads, cfg_driving.attention.mlp_ratio)
+        self.condition_encoder = nn.Sequential(
+            nn.Linear(4, tj.condition_mlp_hidden), nn.SiLU(),
+            nn.Linear(tj.condition_mlp_hidden, tj.planning_dim))
+        self.condition_ffn = nn.Sequential(
+            nn.Linear(tj.planning_dim, tj.condition_mlp_hidden), nn.SiLU(),
+            nn.Linear(tj.condition_mlp_hidden, tj.planning_dim))
+
+        self.feature_norms = nn.ModuleList(
+            RMSNormTokens(self.work_dim) for _ in range(tj.cross_layers))
+        self.feature_reduce = nn.Conv2d(self.work_dim, tj.planning_dim, kernel_size=1)
+        self.feature_ffns = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(tj.planning_dim, tj.feature_ffn_hidden), nn.SiLU(),
+                nn.Linear(tj.feature_ffn_hidden, tj.planning_dim))
             for _ in range(tj.cross_layers))
-        self.self_attn = nn.ModuleList(
-            SelfAttentionBlock(d, tj.num_heads, cfg_driving.attention.mlp_ratio)
+        self.planning_cross = nn.ModuleList(
+            CrossAttentionBlock(tj.planning_dim, tj.num_heads, cfg_driving.attention.mlp_ratio)
+            for _ in range(tj.cross_layers))
+        self.transformer = nn.ModuleList(
+            SelfAttentionBlock(tj.planning_dim, tj.num_heads, cfg_driving.attention.mlp_ratio)
             for _ in range(tj.self_layers))
 
-        self.waypoint_head = nn.Linear(d, tj.num_waypoints * 2)
-        self.confidence_head = nn.Linear(d, 1)
-        self.behavior_head = nn.Linear(d, self.num_behavior_classes)
+        self.residual_head = nn.Linear(tj.planning_dim, tj.num_waypoints * 2)
+        nn.init.zeros_(self.residual_head.weight)
+        nn.init.zeros_(self.residual_head.bias)
+        self.confidence_head = nn.Linear(tj.planning_dim, 1)
+        self.behavior_head = nn.Linear(tj.planning_dim, cfg_driving.behavior.num_classes)
 
-    def forward(self, bev_feat: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """联合解码多模态轨迹、置信度与多标签行为 logits。"""
-        check_trajectory_inputs(bev_feat, self.work_dim)
-        b = bev_feat.shape[0]
+        baseline = _sector_baselines(
+            tj.num_modes, tj.num_waypoints, cfg_driving.bev.fov_deg, tj.baseline_step_m)
+        self.register_buffer("baseline_normalized", physics_target(baseline, tj.symlog_scale))
 
-        trajectory_tokens = self._sector_tokens(bev_feat)            # [B, M, D]
-        behavior_token = self.behavior_token.expand(b, -1, -1)       # [B, 1, D]
-        tokens = torch.cat((trajectory_tokens, behavior_token), dim=1)  # [B, M+1, D]
-        context = bev_feat.flatten(2).transpose(1, 2)                # [B, Hb*Wb, D]
+    def forward(self, perception_features: Sequence[torch.Tensor], target_point: torch.Tensor,
+                ego_velocity: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """以主感知第 3/6 层特征、目标点和 ego 速度解码多模态轨迹。"""
+        check_trajectory_inputs(
+            perception_features, target_point, ego_velocity, self.work_dim, self.num_modes)
+        batch_size = int(target_point.shape[0])
+        condition = physics_target(
+            torch.cat((target_point, ego_velocity), dim=-1), self.symlog_scale)
+        prequery_one = self.condition_encoder(condition)
+        prequery_two = self.condition_ffn(prequery_one)
+        prequeries = (prequery_one, prequery_two)
+        contexts = self._planning_contexts(perception_features)
 
-        for layer in self.cross:
-            tokens = layer(tokens, context)
-        for layer in self.self_attn:
-            tokens = layer(tokens)
+        tokens = self.mode_tokens.expand(batch_size, -1, -1)
+        for block, prequery, context in zip(self.planning_cross, prequeries, contexts):
+            tokens = block(tokens + prequery[:, None], context)
+        for block in self.transformer:
+            tokens = block(tokens)
 
-        # 乘固定尺度使 Linear 原始输出（初值 ~N(0,1)）落到米制量级，加速收敛；轨迹恒在物理空间（米）
-        trajectory_tokens, behavior_token = tokens[:, :self.num_modes], tokens[:, self.num_modes]
-        trajectories = self.waypoint_head(trajectory_tokens).reshape(
-            b, self.num_modes, self.num_waypoints, 2) * self.waypoint_scale
-        confidence = self.confidence_head(trajectory_tokens).squeeze(-1)  # [B, M]
-        behavior_logits = self.behavior_head(behavior_token)         # [B, C_behavior]
-        return {"trajectories": trajectories, "confidence": confidence,
-                "behavior_logits": behavior_logits}
+        residual = self.residual_head(tokens).reshape(
+            batch_size, self.num_modes, self.num_waypoints, 2)
+        normalized = self.baseline_normalized[None] + residual
+        trajectories = physics_decode(normalized, self.symlog_scale)
+        return {
+            "trajectory_normalized": normalized,
+            "trajectory_residuals": residual,
+            "trajectories": trajectories,
+            "confidence": self.confidence_head(tokens).squeeze(-1),
+            "behavior_logits": self.behavior_head(tokens.mean(dim=1)),
+        }
 
-    def _sector_tokens(self, bev_feat: torch.Tensor) -> torch.Tensor:
-        """每扇区均值池化 BEV 特征 ⊕ 扇区朝向 → 归一 → MLP，得初始查询 Token `[B, M, D]`。"""
-        masks = self.sector_masks.to(bev_feat.dtype)                 # [M,Hb,Wb]
-        counts = masks.flatten(1).sum(-1).clamp_min(1.0)            # [M]
-        # [B,D,Hb,Wb] × [M,Hb,Wb] → [B,M,D] 均值池化
-        pooled = torch.einsum("bdhw,mhw->bmd", bev_feat, masks) / counts[None, :, None]
-        dirs = self.sector_dirs.to(bev_feat.dtype)[None].expand(bev_feat.shape[0], -1, -1)  # [B,M,2]
-        token_in = self.token_norm(torch.cat((pooled, dirs), dim=-1))
-        return self.token_mlp(token_in)
+    def _planning_contexts(self, features: Sequence[torch.Tensor]):
+        """两路特征分别归一、共享降维，再由独立 FFN 适配为 CTB 被查询序列。"""
+        contexts = []
+        for feature, norm, ffn in zip(features, self.feature_norms, self.feature_ffns):
+            batch_size, _, height, width = feature.shape
+            tokens = norm(feature.flatten(2).transpose(1, 2))
+            normalized = tokens.transpose(1, 2).reshape(batch_size, self.work_dim, height, width)
+            reduced = self.feature_reduce(normalized).flatten(2).transpose(1, 2)
+            contexts.append(reduced + ffn(reduced))
+        return tuple(contexts)
 
 
-def _build_sectors(bev, num_modes: int):
-    """前向视场按 fov 均分 num_modes 扇区：返回角掩码 [M,Hb,Wb] 与扇区中心朝向 [M,2]=(sin,cos)。"""
-    import math
-
-    x_cell = (bev.x_max_m - bev.x_min_m) / float(bev.height)
-    y_cell = (bev.y_max_m - bev.y_min_m) / float(bev.width)
-    # 行约定与 target_point_embedding / bev_cell_centers 一致：行 0 = 远、末行 = 近（自车在下沿）
-    xs = bev.x_max_m - (torch.arange(bev.height, dtype=torch.float32) + 0.5) * x_cell
-    ys = bev.y_min_m + (torch.arange(bev.width, dtype=torch.float32) + 0.5) * y_cell
-    gx, gy = torch.meshgrid(xs, ys, indexing="ij")                  # [Hb,Wb]
-    # 朝向角：以前向 x 轴为 0，向右(+y)为正；仅前向 x>0 参与
-    angle = torch.atan2(gy, gx.clamp_min(1e-3))                     # [Hb,Wb]
-    half = math.radians(bev.fov_deg) * 0.5
-    edges = torch.linspace(-half, half, num_modes + 1)             # M+1 个扇区边界
-    in_fov = (gx > 0) & (angle >= -half) & (angle <= half)
-    masks = torch.stack([
-        (in_fov & (angle >= edges[k]) & (angle < edges[k + 1] if k < num_modes - 1
-                                         else angle <= edges[k + 1])).float()
-        for k in range(num_modes)], dim=0)                          # [M,Hb,Wb]
-    centers = 0.5 * (edges[:-1] + edges[1:])                        # [M]
-    dirs = torch.stack((torch.sin(centers), torch.cos(centers)), dim=-1)  # [M,2]
-    return masks, dirs
+def _sector_baselines(num_modes: int, num_waypoints: int, fov_deg: float,
+                      step_m: float) -> torch.Tensor:
+    """沿等分视场的 8 个扇区中线生成固定米制基线 `[M,T,2]`。"""
+    half_fov = math.radians(fov_deg) * 0.5
+    edges = torch.linspace(-half_fov, half_fov, num_modes + 1)
+    angles = 0.5 * (edges[:-1] + edges[1:])
+    distances = torch.arange(1, num_waypoints + 1, dtype=torch.float32) * step_m
+    directions = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
+    return directions[:, None] * distances[None, :, None]

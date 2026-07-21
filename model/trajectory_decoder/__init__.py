@@ -1,4 +1,4 @@
-"""轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 仅查询 BEV。公开 API 重导出入口。
+"""条件化多 Mode 规划解码器：8 个可学习 Token 查询双层感知特征。公开 API 重导出入口。
 
 模块: model/trajectory_decoder/__init__.py
 依赖: model.trajectory_decoder.trajectory_decoder

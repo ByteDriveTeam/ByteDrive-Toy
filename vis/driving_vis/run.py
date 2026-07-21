@@ -17,7 +17,8 @@
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
       读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，行含 RGB/Seg/Depth（透视）与 GT/预测
-      的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）。加载驾驶权重（strict=False，容忍缺失的冻结骨干键）；检查点
+      的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）。加载驾驶权重时只接收当前
+      模型存在且形状相符的键，旧检查点中的感知双头不会进入 Driving；检查点
       不存在则随机初始化并告警，便于仅验证渲染管线。推理沿用模型内部 BF16/FP32 混精边界，渲染委托
       vis.driving_vis.render，结果按场景存 PNG。
 """
@@ -51,16 +52,21 @@ def _resolve_device() -> torch.device:
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def _load_weights(model: DrivingModel, checkpoint: str, device) -> None:
+def _load_weights(model: DrivingModel, checkpoint: str) -> None:
     """加载驾驶权重；检查点不存在则告警并保持随机初始化（仅验证渲染管线）。"""
     path = _resolve(checkpoint)
     if not path.is_file():
         print("[driving_vis] 检查点不存在: {}，使用随机初始化权重（仅验证渲染）。".format(path))
         return
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     state = ckpt.get("model", ckpt)
-    model.load_state_dict(state, strict=False)  # 骨干键不在检查点内，故 strict=False
-    print("[driving_vis] 已加载权重: {}（epoch={}）".format(path, ckpt.get("epoch", "?")))
+    current = model.state_dict()
+    compatible = {name: value for name, value in state.items()
+                  if name in current and tuple(value.shape) == tuple(current[name].shape)}
+    skipped = [name for name in state if name not in compatible]
+    model.load_state_dict(compatible, strict=False)
+    print("[driving_vis] 已加载权重: {}（epoch={}，载入 {} 项，排除 {} 项）".format(
+        path, ckpt.get("epoch", "?"), len(compatible), len(skipped)))
 
 
 def _select_frames(dataset: DrivingDataset, scene: str, max_frames: int):
@@ -144,7 +150,7 @@ def main(argv=None) -> None:
     bev = _bev_params(cfg)
 
     model = DrivingModel(cfg).to(device).eval()
-    _load_weights(model, args.checkpoint or dv.checkpoint, device)
+    _load_weights(model, args.checkpoint or dv.checkpoint)
     dataset = DrivingDataset(cfg)
     scene, indices = _select_frames(dataset, dv.scene, dv.max_frames)
 
@@ -182,6 +188,7 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
         outputs = model(sample["rgb"].unsqueeze(0).to(device), sample["intrinsics"].unsqueeze(0).to(device),
                         sample["extrinsics"].unsqueeze(0).to(device),
                         sample["target_point"].unsqueeze(0).to(device),
+                        sample["ego_velocity"].unsqueeze(0).to(device),
                         sample["previous_rgb"].unsqueeze(0).to(device),
                         sample["previous_to_current"].unsqueeze(0).to(device),
                         sample["previous_valid"].unsqueeze(0).to(device))

@@ -22,7 +22,7 @@ carla_collector:
 
   # 仿真世界
   simulation:
-    map: Town01_Opt          # 仅支持 Opt 地图
+    map: Town02_Opt          # 仅支持 Opt 地图
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
 
@@ -54,8 +54,8 @@ carla_collector:
 
   # 相机阵列：分辨率全局共享；rig 决定相机数量，并分别配置各视角的 FOV 与外参
   cameras:
-    width: 384
-    height: 192
+    width: 768
+    height: 384
     # 各相机模态开关：关闭即不创建对应相机、不落盘。同视角各模态共享 FOV/位姿、像素逐点对齐。
     modalities:
       rgb: true            # RGB 相机 → mp4；关闭则该场景无视频文件
@@ -153,23 +153,26 @@ data_vis:
 # ============================================================
 model:
 
-  # DINOv3 ViT-B/16 视觉骨干（全程冻结 + eval），逐帧输出多层 patch 网格特征
+  # DINOv3 ViT-S+/16 视觉骨干（全程冻结 + eval），逐帧输出选定层完整 Token 序列
   dinov3_backbone:
-    model_dir: model/dinov3-vitb16-pretrain-lvd1689m  # 本地权重目录（相对仓库根）
-    patch_size: 16            # ViT patch 边长；384×192 输入 → 24×12 patch 网格
-    hidden_dim: 768           # 骨干单层输出通道（师生头共享的特征维度）
-    num_register_tokens: 4    # DINOv3 ViT-B 的 register token 数（序列切片下界校验用）
-    feature_layers: [3, 6, 12]  # 取 output_hidden_states 的第 3/6/12 层（12=ViT-B/16 末层），供多层融合
+    model_dir: model/dinov3-vits16plus-pretrain-lvd1689m  # 本地权重目录（相对仓库根）
+    patch_size: 16            # ViT patch 边长；768×384 输入 → 48×24 patch 网格
+    hidden_dim: 384           # 骨干单层输出通道（师生头共享的特征维度）
+    num_register_tokens: 4    # DINOv3 ViT-S+ 的 register token 数（完整序列长与 patch 前缀校验用）
+    feature_layers: [3, 6, 12]  # 取 output_hidden_states 的第 3/6/12 层（12=ViT-S+/16 末层），供多层融合
 
-  # 单帧特征主干：多层 DINO 特征经 feature_fusion 融合到 channels 后，过 6 层 2D 瓶颈残差块提炼空间表征
+  # Pred 特征主干：完整保留 DINOv3 的 CLS/register/patch 序列，过 3 层 Pre-Norm Transformer
   feature_trunk:
-    channels: 384             # 残差块工作通道（= feature_fusion 输出维）；主干内此维恒定，也是喂给双头的输出维
-    num_blocks: 6             # 2D 瓶颈残差块层数
+    channels: 384             # feature_fusion 把多层 DINO 末维降到的 Transformer 工作维
+    num_layers: 3             # Pre-Norm Transformer 层数
+    num_heads: 6              # 多头自注意力头数（每头 64 维，与 DINOv3 一致）
+    mlp_ratio: 4              # SwiGLU 前馈升维倍数
+    rope_theta: 100.0         # patch-only 2D RoPE 基频（沿用 DINOv3）
 
   # 双头解码：各含 1 层 2D 残差块 + 级联像素洗牌上采样至原分辨率（通道逐级压低省显存）
   heads:
     reduce_channels: 128      # 残差块后 1×1 把主干输出 384 压到的头内起始通道 C0
-    up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（12×24 → 192×384）
+    up_channels: [96, 64, 32, 16]   # 四级 2× 像素洗牌各级输出通道（24×48 → 384×768）
     num_classes: 29           # 语义分割类别数（CARLA CityScapes tag 0..28）
     semantic_out: 29          # 语义头输出通道（= num_classes logits）
     depth_out: 2              # 深度头输出通道（ch0=深度 scale·symlog，ch1=范围内 BCE logit）
@@ -181,7 +184,7 @@ model:
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
   # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → 当前图像/上一帧 BEV 交叉注意力
-  # → ConvNeXt → 三场 + 独立道路线图 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
+  # → BEV Transformer → 三场 + 独立道路线图 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
@@ -196,15 +199,14 @@ model:
       height: 32                 # Hb：BEV 工作网格前向格数（= 初始查询分辨率）
       width: 32                  # Wb：BEV 工作网格左右格数
       fov_deg: 90.0              # 前向视场角（仅监督视场内）
-      z_min_m: -3.0              # 目标点嵌入垂直采样下界
+      z_min_m: -3.0              # BEV 查询几何嵌入垂直采样下界
       z_max_m: 8.0               # 垂直采样上界
       z_step_m: 0.1              # 垂直采样步长（[-3,8]@0.1 → 111 层）
 
-    # 初始 BEV 查询嵌入（xyz 逐列 MLP + z 聚合；几何取自 bev）
+    # 初始 BEV 查询嵌入（仅编码 xyz 几何：逐列 MLP + z 聚合；几何取自 bev）
     query:
       coord_symlog_scale: 0.24   # symlog(坐标)·scale 归一到[-1,1]（max~64m: 1/ln(65)≈0.24）
       mlp_hidden: 256            # 逐 cell 垂直列 MLP 隐藏维
-      vector_order: grid_minus_target  # 目标点相对向量方向：栅格中心 - 目标点
 
     # 深度 frustum 位置编码：每 patch 中心+四角 × 深度采样的候选 3D 坐标
     frustum:
@@ -220,14 +222,15 @@ model:
       num_heads: 6               # 须整除 work_dim
       mlp_ratio: 4               # 前馈膨胀率（SwiGLU）
 
-    # BEV 编码器：先查询当前图像，再查询刚性变换到当前 ego 系并重编码实际几何的上一帧 BEV
+    # BEV 编码器：交叉注意力后，以无位置 BEV 寄存器 + 具 2D RoPE 的 BEV Patch 作统一序列
     bev_encoder:
       cross_layers: 2            # BEV 查询 ← 图像特征 级联交叉注意力层数
       temporal_layers: 2         # 当前 BEV 查询 ← 上一帧 BEV 级联交叉注意力层数
       detach_previous: true      # 上一帧分支只作缓存特征，不跨帧反传，控制显存并贴合在线推理
-      num_convnext_blocks: 8     # ConvNeXt2D 层数
-      convnext_spatial_kernel: 7 # 深度可分离空间核（奇数）
-      convnext_expansion: 2      # 逐点卷积膨胀率
+      transformer_layers: 6      # BEV Pre-Norm Transformer 固定层数
+      num_register_tokens: 4     # BEV 自有无位置寄存器 Token 数，用于吸纳噪声
+      register_init_std: 0.02    # BEV 寄存器正态初始化标准差
+      rope_theta: 100.0          # BEV Patch-only 2D RoPE 基频；坐标从 (1,1) 起
 
     # 三场解码：像素洗牌上采样（Hb·2^len(up_channels) = 场分辨率，32×8=256）
     fields:
@@ -248,13 +251,17 @@ model:
 
     # 8 扇区多模态轨迹解码
     trajectory:
-      num_modes: 8               # 前向扇区数 = 多模态轨迹条数
+      num_modes: 8               # 8 个可学习 Mode Token，对应 8 条候选轨迹
       num_waypoints: 8           # 每条轨迹航点数 T_wp（0.5s/点 → 4s）
-      token_mlp_hidden: 256      # 扇区 Token 输入编码 MLP 隐藏维
-      cross_layers: 2            # Token ← BEV 特征 级联交叉注意力层数
-      self_layers: 2             # Token 自注意力层数；两层同结构、参数独立
-      num_heads: 6               # 须整除 work_dim
-      waypoint_scale_m: 1.0      # 航点回归固定尺度（米）：Linear 原始输出乘此值，使初值即在米制量级、加速收敛
+      planning_dim: 256          # 规划分支工作维；主感知第 3/6 层经 1×1 CNN 降到此维
+      condition_mlp_hidden: 256  # 目标点+ego 速度条件编码 MLP 隐藏维
+      feature_ffn_hidden: 512    # 两路感知特征适配 FFN 隐藏维
+      cross_layers: 2            # 两个规划 CTB，分别查询主感知第 3、6 层特征
+      self_layers: 4             # 规划 CTB 后的 TB 层数
+      num_heads: 8               # 须整除 planning_dim
+      mode_token_init_std: 0.02  # 8 个可学习 Mode Token 的随机初始化标准差
+      baseline_step_m: 4.0       # 扇区中线基线轨迹相邻航点距离（米）
+      symlog_scale: 0.24         # 条件输入与轨迹输出的 Symlog 缩放
 
     # 行为多标签分类 Token：与 8 个轨迹 Token 拼成同一注意力序列
     behavior:
@@ -335,6 +342,7 @@ train:
   # 注：distribution 为空间 softmax 交叉熵（能量式），量级天然 ~ln(视场格数)≈11，故权重取小以与 BCE 场平衡
   driving_loss_weights:
     trajectory: 1.0
+    trajectory_unmatched_weight: 0.05  # 匈牙利匹配外的 7 条轨迹仍以该小权重回归，不丢弃候选
     confidence: 0.5
     behavior: 1.0
     distribution: 0.05

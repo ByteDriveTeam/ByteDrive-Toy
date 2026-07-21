@@ -114,7 +114,7 @@ datasets/
 data/preprocessed/
 models/
 checkpoints/
-dinov3-vitb16-pretrain-lvd1689m/
+dinov3-vits16plus-pretrain-lvd1689m/
 dataset/
 *.h5
 *.pt

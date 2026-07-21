@@ -13,7 +13,7 @@
       [-1,1] 后展平，经 Linear→SiLU→Linear 编码为 out_dim 维，作为该 patch 的几何位置特征（由调用方加到
       patch 表观特征上）。反投影约定复刻 vis/data_vis/geometry：像平面系(x右,y下,z前)→传感器系(x前,y右,z上)
       →经外参(相机在 ego 系位姿)变到 ego 系；CARLA 左手系旋转矩阵。几何全程 FP32（关闭 autocast），
-      MLP 在 BF16 autocast 下运行（混精边界外置，同 perception_model / target_point_embedding）。
+      MLP 在 BF16 autocast 下运行（混精边界外置，同 perception_model / bev_query_embedding）。
       深度采样点数 N 在构造期由步长积分确定，决定 MLP 输入维 5·N·3。像素栅格按 (gh,gw) 惰性构建并缓存。
 """
 

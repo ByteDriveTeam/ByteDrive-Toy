@@ -1,4 +1,4 @@
-"""DINO 多层特征融合：逐层 RMSNorm 后拼接并 1×1 卷积降到特征主干工作维。公开 API 重导出入口。
+"""DINO 多层完整序列融合：逐层 RMSNorm 后拼接并线性降到预测主干工作维。公开 API 重导出入口。
 
 模块: model/feature_fusion/__init__.py
 依赖: model.feature_fusion.feature_fusion

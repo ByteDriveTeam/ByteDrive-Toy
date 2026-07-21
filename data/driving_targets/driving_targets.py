@@ -11,7 +11,6 @@
     - inview_mask(bev, fov_deg) -> (H,W) float32                         # 前向视场内=1
     - speed_accelerations(world_velocities, sim_times) -> (F,) float32   # 逐帧标量速度加速度
     - trajectory_targets(future_poses6, current_pose6, num_waypoints) -> (waypoints(K,2), valid(K))
-    - sector_of(waypoints, valid, fov_deg, num_modes) -> int            # GT 所属前向扇区（-1=无效）
     - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
     - risk_field(depth_m, intrinsics4, extrinsic6, bev, fov_deg, depth_max_m) -> (H,W) float32  # 包络外=风险
     - visible_moving_box_occupancy(...) -> (H,W) float32                  # 深度筛选后的运动 box BEV 占用
@@ -56,7 +55,7 @@ from vis.data_vis.geometry import (
 
 __all__ = [
     "BEHAVIOR_CLASSES", "BehaviorParams", "BevParams", "bev_cell_centers", "ego_xy_to_pixel",
-    "inview_mask", "speed_accelerations", "trajectory_targets", "sector_of", "behavior_targets",
+    "inview_mask", "speed_accelerations", "trajectory_targets", "behavior_targets",
     "risk_field", "visible_moving_box_occupancy", "distribution_field",
 ]
 
@@ -146,23 +145,6 @@ def trajectory_targets(future_poses6, current_pose6, num_waypoints: int):
     waypoints[:n] = ego_xyz[:, :2].astype(np.float32)
     valid[:n] = 1.0
     return waypoints, valid
-
-
-def sector_of(waypoints: np.ndarray, valid: np.ndarray, fov_deg: float, num_modes: int) -> int:
-    """GT 轨迹所属前向扇区索引（按最远有效航点方位角分箱）；无有效前向航点返回 -1。"""
-    idx = np.nonzero(valid > 0)[0]
-    if idx.size == 0:
-        return -1
-    far = waypoints[idx[-1]]                                       # 最远有效航点
-    x, y = float(far[0]), float(far[1])
-    if x <= 0:
-        return -1
-    half = math.radians(fov_deg) * 0.5
-    angle = math.atan2(y, x)
-    if angle < -half or angle > half:
-        return -1
-    frac = (angle + half) / (2.0 * half)                          # [0,1]
-    return int(min(max(int(frac * num_modes), 0), num_modes - 1))
 
 
 def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,

@@ -62,20 +62,20 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — 通用 SwiGLU 激活模块（沿维度二等分为 value/gate）
 - [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — 通用 3D RoPE 旋转位置编码（只消费调用方传入的三维坐标，全程 FP32）
 - [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 2D/3D ConvNeXt 块）
-- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，SwiGLU 前馈）
-- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-B 视觉骨干：全程冻结 + eval，逐帧输出多层 patch 网格特征
-- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层特征融合：对选定层逐层 RMSNorm 后沿通道拼接，再 1×1 卷积降到特征主干工作维
-- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 特征主干：已融合到工作维的单帧特征，经多层 2D 瓶颈残差块提炼空间表征
+- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，可选 patch-only 2D RoPE）。
+- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-S+ 视觉骨干：全程冻结 + eval，逐帧输出选定层的完整 Token 序列。
+- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层序列融合：对选定层逐层 RMSNorm 后沿末维拼接，再线性降到预测主干工作维。
+- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 预测特征主干：完整继承 DINOv3 Token 序列，经三层带 patch-only 2D RoPE 的 Pre-Norm Transformer。
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 多任务单帧感知模型：冻结 DINOv3 骨干 + 多层特征融合 + 2D 特征主干 + 语义/深度双头。
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型。
 - [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
-- [model/target_point_embedding/target_point_embedding.py](../model/target_point_embedding/target_point_embedding.py) — 目标点嵌入层：把 BEV 栅格中心 xyz 坐标（含垂直 z 采样）与目标点相对向量编码为初始 BEV 查询网格
+- [model/bev_query_embedding/bev_query_embedding.py](../model/bev_query_embedding/bev_query_embedding.py) — BEV 查询几何嵌入：仅把 BEV 栅格中心 xyz（含垂直 z 采样）编码为初始查询网格
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
-- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：查询当前图像后查询带实际变换几何的上一帧 BEV，再由 ConvNeXt2D 提炼
+- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合当前图像与历史 BEV，再由带无位置寄存器的六层二维 RoPE Transformer 提炼
 - [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
 - [model/lane_map_decoder/lane_map_decoder.py](../model/lane_map_decoder/lane_map_decoder.py) — 道路细线解码器：共享高分辨率特征输出道路线、相关停止线与交通灯状态。
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 轨迹/行为联合解码器：8 扇区轨迹 Token 与行为 Token 组成同一序列，输出轨迹、置信度与多标签行为
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 查询主感知第 3/6 层特征并回归基线残差。
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧开环驾驶模型：融合刚性对齐的历史 BEV，解码三场、道路线、交通控制与驾驶输出。
 
 ## train/ — 训练 / 评估循环

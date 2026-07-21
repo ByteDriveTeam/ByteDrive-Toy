@@ -17,7 +17,7 @@
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
-    model.driving.trajectory.num_waypoints / num_modes
+    model.driving.trajectory.num_waypoints
     model.driving.traffic_control.state_names
     model.physics.depth_max_m（风险场包络排除超范围/天空像素）
 对外接口:
@@ -27,7 +27,8 @@
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
       多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
-      目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系。
+      目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系；
+      当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
       独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
@@ -70,7 +71,6 @@ class DrivingDataset(SingleFrameSceneBase):
         self._bev = dt.BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
                                  bev.height * scale, bev.width * scale)
         self._num_waypoints = cfg.model.driving.trajectory.num_waypoints
-        self._num_modes = cfg.model.driving.trajectory.num_modes
         self._depth_max_m = cfg.model.physics.depth_max_m  # 风险场包络排除超范围/天空像素
         self._box_min_visible_pixels = drv_data.box_min_visible_pixels
         self._target_min = drv_data.target_min_m
@@ -116,8 +116,8 @@ class DrivingDataset(SingleFrameSceneBase):
 
         poses, accelerations = self._scene_states(scene_dir, reader)  # 全帧位姿/加速度（缓存）
         waypoints, valid = self._trajectory(poses, frame_idx, pose)
-        sector = dt.sector_of(waypoints, valid, self._fov, self._num_modes)
         target_point = self._target_point(poses, frame_idx, pose, meta)
+        ego_velocity = (world_to_ego(pose)[:2, :2] @ world_vel[:2]).astype(np.float32)
         hd_map = self._hd_map(meta["map"])
         speed_mps = float(np.linalg.norm(world_vel[:2]))
         traffic = self._traffic_targets(
@@ -152,9 +152,9 @@ class DrivingDataset(SingleFrameSceneBase):
             "intrinsics": torch.tensor(intrinsics4, dtype=torch.float32),
             "extrinsics": torch.tensor(extrinsic6, dtype=torch.float32),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
+            "ego_velocity": torch.from_numpy(ego_velocity),
             "trajectory": torch.from_numpy(waypoints),
             "traj_valid": torch.from_numpy(valid),
-            "sector": torch.tensor(sector, dtype=torch.long),
             "behavior": torch.from_numpy(behavior),
             "risk": torch.from_numpy(risk),
             "drivable": torch.from_numpy(drivable),

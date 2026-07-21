@@ -12,7 +12,7 @@
 说明: 全项目唯一的训练启动点，感知与驾驶两条路径共用装配/续训/保存逻辑，仅模型/数据集/epoch 函数不同
       （--task 选择）。设备取 config，CUDA 不可用回退 CPU。检查点只保存非骨干权重（排除任何含 `backbone.`
       的键），故驾驶模型也不落几十 M 的 DINO 权重、可断点续训。驾驶训练可用 --perception-ckpt 以感知预训练权重
-      初始化其感知子模块（复用深度/分割表征）。num_workers>0 时 DataLoader 在 worker 内惰性建 SceneReader，
+      初始化其视觉 fusion/trunk；语义/深度头权重不会加载到 Driving。num_workers>0 时 DataLoader 在 worker 内惰性建 SceneReader，
       故入口置于 __main__ 守卫下。
 """
 
@@ -75,12 +75,12 @@ def _find_latest_checkpoint(ckpt_dir: Path):
     return max(ckpts)[1] if ckpts else None
 
 
-def _maybe_resume(model, optimizer, ckpt_dir: Path, resume: bool, explicit, device) -> int:
+def _maybe_resume(model, optimizer, ckpt_dir: Path, resume: bool, explicit) -> int:
     """按需从检查点恢复模型+优化器，返回起始 epoch（已完成的 epoch 数）。"""
     path = Path(explicit) if explicit else (_find_latest_checkpoint(ckpt_dir) if resume else None)
     if path is None:
         return 0
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     loaded_names = _load_compatible_model(model, ckpt["model"])
     _load_compatible_optimizer(
         model, optimizer, ckpt.get("optimizer"), ckpt.get("optimizer_param_names"), loaded_names)
@@ -194,26 +194,31 @@ def _is_legacy_feature_group(names):
     return bool(names) and all(name.startswith(prefixes) for name in names)
 
 
-def _load_perception_weights(model: DrivingModel, path, device) -> None:
-    """以感知预训练权重初始化驾驶模型的感知子模块（融合+trunk+双头；骨干仍从 DINO 本地权重加载）。
-
-    感知检查点不含 DINOv3 骨干（保存时排除 backbone.* 键），故 strict=False 下「缺失」的必然是骨干参数——
-    属正常，由本地 DINO 权重单独加载；只有「非骨干缺失」或「多余键」才是检查点与模型不匹配的真问题。
-    """
-    ckpt = torch.load(path, map_location=device)
+def _load_perception_weights(model: DrivingModel, path) -> None:
+    """内存映射感知检查点，仅读取 fusion/trunk 初始化 Driving，排除语义与深度头。"""
+    ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     state = ckpt.get("model", ckpt)  # 兼容 {epoch,model,optimizer} 或纯 state_dict
-    missing, unexpected = model.perception.load_state_dict(state, strict=False)
-    non_backbone_missing = [k for k in missing if "backbone." not in k]
+    current = model.perception.state_dict()
+    expected_features = {name for name in current
+                         if name.startswith(("fusion.", "trunk."))}
+    feature_state = {name: value for name, value in state.items()
+                     if name.startswith(("fusion.", "trunk."))
+                     and name in current and tuple(value.shape) == tuple(current[name].shape)}
+    skipped_features = [name for name in state
+                        if name.startswith(("fusion.", "trunk.")) and name not in feature_state]
+    missing_features = sorted(expected_features.difference(state))
+    ignored_heads = [name for name in state
+                     if name.startswith(("semantic_head.", "depth_head."))]
+    model.perception.load_state_dict(feature_state, strict=False)
 
-    print("[driving] 载入感知预训练权重 {}：融合/trunk/双头 {} 项已载入".format(path, len(state)))
-    if not non_backbone_missing:
-        print("[driving]   缺失的 {} 项均为 DINOv3 骨干（由本地权重加载），属正常。".format(len(missing)))
-    else:
-        print("[driving]   ⚠ {} 个非骨干参数未被覆盖（检查点可能不完整）：{}".format(
-            len(non_backbone_missing), non_backbone_missing[:5]))
-    if unexpected:
-        print("[driving]   ⚠ 检查点含 {} 个模型中无对应的多余键：{}".format(
-            len(unexpected), unexpected[:5]))
+    print("[driving] 载入感知预训练权重 {}：仅 fusion/trunk {} 项已载入；双头 {} 项已排除".format(
+        path, len(feature_state), len(ignored_heads)))
+    if missing_features:
+        print("[driving]   ⚠ {} 个 fusion/trunk 参数在检查点中缺失：{}".format(
+            len(missing_features), missing_features[:5]))
+    if skipped_features:
+        print("[driving]   ⚠ {} 个 fusion/trunk 参数键或形状不兼容：{}".format(
+            len(skipped_features), skipped_features[:5]))
 
 
 def main(argv=None) -> None:
@@ -237,13 +242,13 @@ def main(argv=None) -> None:
     check_runtime(model, dataset)
     # 驾驶训练：先以感知预训练权重初始化感知子模块（在续训覆盖之前）
     if args.task == "driving" and args.perception_ckpt:
-        _load_perception_weights(model, args.perception_ckpt, device)
+        _load_perception_weights(model, args.perception_ckpt)
     loader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True,
                         num_workers=cfg.train.num_workers, drop_last=True, pin_memory=True)
     optimizer = build_optimizer(model, cfg)
 
     ckpt_dir = _resolve_ckpt_dir(cfg.train.ckpt_dir, args.task)
-    start_epoch = _maybe_resume(model, optimizer, ckpt_dir, cfg.train.resume, args.resume, device)
+    start_epoch = _maybe_resume(model, optimizer, ckpt_dir, cfg.train.resume, args.resume)
 
     for epoch in range(start_epoch, cfg.train.epochs):
         stats = epoch_fn(model, loader, optimizer, cfg, device)

@@ -1,8 +1,8 @@
 """双帧开环驾驶模型：融合刚性对齐的历史 BEV，解码三场、道路线、交通控制与驾驶输出。
 
 模块: model/driving_model/driving_model.py
-依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionModel,
-      model.driving_neck.DrivingNeck, model.target_point_embedding.TargetPointEmbedding,
+依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionFeatureEncoder,
+      model.driving_neck.DrivingNeck, model.bev_query_embedding.BevQueryEmbedding,
       model.bev_encoder.BevEncoder, model.field_decoder.FieldDecoder,
       model.lane_map_decoder.LaneMapDecoder, model.trajectory_decoder.TrajectoryDecoder,
       model.driving_model.checks.driving_model_checks
@@ -14,20 +14,20 @@
     model.feature_trunk.channels（trunk 通道）
 对外接口:
     - DrivingModel(cfg) -> nn.Module
-        forward(rgb, intrinsics, extrinsics, target_point, previous_rgb,
+        forward(rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
                 previous_to_current, previous_valid) -> dict
             # 三场 + 道路线/停止线/灯色 + trajectories/confidence/behavior_logits
         trainable_parameters() -> Iterator[nn.Parameter]   # 驾驶各件 + 可选感知 fusion/trunk
-说明: 感知 = 驾驶的前端子任务：PerceptionModel 提供「双头共享 trunk 末端特征 + DINOv3 原始特征」，driving_neck
-      融合并注入 frustum 几何位置编码得图像特征；target_point_embedding 由 ego 目标点生成初始 BEV 查询，
-      bev_encoder 用交叉注意力从图像特征聚合信息并 ConvNeXt 提炼为 BEV 特征；field_decoder 上采样解码三场，
-      上一帧用同一世界目标点在上一帧 ego 系编码查询，得到 BEV 骨干末端特征；其每个 cell 的坐标由
+说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，取得 trunk 末端特征与 DINOv3 原始特征；driving_neck
+      融合并注入 frustum 几何位置编码得图像特征；bev_query_embedding 仅以 BEV xyz 几何初始化查询，
+      bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
+      field_decoder 上采样解码三场。上一帧由同一套纯几何查询得到 BEV 骨干末端特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
       BEV 查询先查图像、再查上一帧 BEV。lane_map_decoder 输出道路线、停止线与灯色；trajectory_decoder
-      末端不再注入自车状态。前向单目，自车位于 BEV 下方中心。
+      以目标点、ego 平面速度为条件，用可学习 Mode Token 依次查询主干第 3/6 层。前向单目，自车位于 BEV 下方中心。
       混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
-      freeze_perception 为真时感知主干冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时仅优化驾驶实际经过的
-      感知 fusion/trunk，未参与 extract_features 前向的语义/深度解码头不进入驾驶优化器。
+      freeze_perception 为真时视觉编码器冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时优化驾驶实际经过的
+      fusion/trunk。语义/深度解码头不构造、不挂入模型树，也不参与驾驶权重加载。
 """
 
 from __future__ import annotations
@@ -40,12 +40,12 @@ import torch.nn as nn
 
 from config.schema import Config
 from model.bev_encoder import BevEncoder
+from model.bev_query_embedding import BevQueryEmbedding
 from model.driving_model.checks.driving_model_checks import check_driving_inputs
 from model.driving_neck import DrivingNeck
 from model.field_decoder import FieldDecoder
 from model.lane_map_decoder import LaneMapDecoder
-from model.perception_model import PerceptionModel
-from model.target_point_embedding import TargetPointEmbedding
+from model.perception_model import PerceptionFeatureEncoder
 from model.trajectory_decoder import TrajectoryDecoder
 
 
@@ -61,7 +61,8 @@ class DrivingModel(nn.Module):
         cfg: 全局配置，读取 `model.driving` 及感知骨干/主干维度。
 
     Shape:
-        当前/上一帧 rgb `[B,3,H,W]`、intrinsics `[B,4]`、extrinsics `[B,6]`、target_point `[B,2]`、
+        当前/上一帧 rgb `[B,3,H,W]`、intrinsics `[B,4]`、extrinsics `[B,6]`、
+        target_point/ego_velocity `[B,2]`、
         previous_to_current `[B,3,3]`、previous_valid `[B]`。
         输出 dict：risk/drivable/distribution/stop_line_logits、交通灯状态、道路线、轨迹与行为。
     """
@@ -74,21 +75,19 @@ class DrivingModel(nn.Module):
         self.freeze_perception = drv.freeze_perception
         self.detach_previous = drv.bev_encoder.detach_previous
 
-        self.perception = PerceptionModel(cfg)
-        # DINOv3 骨干恒冻结（PerceptionModel 内部保证）；freeze_perception=True 时连同融合/trunk/双头一并冻结，
-        # 否则它们保持可训练、由优化器以 train.perception_lr_scale 慢更新（复用其深度/分割预训练表征）。
+        self.perception = PerceptionFeatureEncoder(cfg)
+        # DINOv3 骨干恒冻结；freeze_perception=True 时连同融合/trunk 冻结，否则以较小学习率适配驾驶任务。
         if self.freeze_perception:
             self.perception.requires_grad_(False)
 
         self.neck = DrivingNeck(drv, cfg.model.feature_trunk.channels, bb.hidden_dim, bb.patch_size)
-        self.query = TargetPointEmbedding(
+        self.query = BevQueryEmbedding(
             out_dim=drv.work_dim,
             x_min_m=drv.bev.x_min_m, x_max_m=drv.bev.x_max_m,
             y_min_m=drv.bev.y_min_m, y_max_m=drv.bev.y_max_m,
             height=drv.bev.height, width=drv.bev.width,
             z_min_m=drv.bev.z_min_m, z_max_m=drv.bev.z_max_m, z_step_m=drv.bev.z_step_m,
-            coord_symlog_scale=drv.query.coord_symlog_scale, mlp_hidden=drv.query.mlp_hidden,
-            vector_order=drv.query.vector_order)
+            coord_symlog_scale=drv.query.coord_symlog_scale, mlp_hidden=drv.query.mlp_hidden)
         self.bev_encoder = BevEncoder(drv)
         self.field_decoder = FieldDecoder(drv)
         self.lane_map_decoder = LaneMapDecoder(drv)
@@ -109,8 +108,8 @@ class DrivingModel(nn.Module):
     def param_groups(self, base_lr: float, weight_decay: float, perception_lr_scale: float):
         """优化器参数分组：驾驶各件用 base_lr；感知子模块（若未冻结）用 base_lr·perception_lr_scale 慢更新。
 
-        DINOv3 骨干恒冻结、不出现在任何分组；感知 fusion/trunk 以极小 lr 缓慢适配驾驶任务。语义/深度头不在
-        驾驶前向路径上，故不进入优化器，避免产生永远没有梯度和 AdamW 状态的悬空参数。返回 AdamW 参数组。
+        DINOv3 骨干恒冻结、不出现在任何分组；fusion/trunk 以极小 lr 缓慢适配驾驶任务。驾驶模型不构造
+        语义/深度头，因此模型树和优化器均不存在对应参数。返回 AdamW 参数组。
         """
         groups = [{"params": [p for m in self._driving_modules() for p in m.parameters()],
                    "lr": base_lr, "weight_decay": weight_decay}]
@@ -120,49 +119,46 @@ class DrivingModel(nn.Module):
         return groups
 
     def forward(self, rgb: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
-                target_point: torch.Tensor, previous_rgb: torch.Tensor,
+                target_point: torch.Tensor, ego_velocity: torch.Tensor, previous_rgb: torch.Tensor,
                 previous_to_current: torch.Tensor,
                 previous_valid: torch.Tensor) -> Dict[str, torch.Tensor]:
         """双帧前向：当前图像 → 上一帧 BEV → 当前 BEV → 三场/道路线图/轨迹行为。"""
         check_driving_inputs(
-            rgb, intrinsics, extrinsics, target_point, previous_rgb,
+            rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
             previous_to_current, previous_valid)
         device = rgb.device
+        batch_size = int(rgb.shape[0])
 
         # BF16 段：当前帧先查询图像，随后查询携带变换后真实几何的上一帧 BEV。
         with self._autocast(device, enabled=True):
             image_feat = self._image_features(rgb, intrinsics, extrinsics)
-            previous_target = self._target_in_previous(target_point, previous_to_current)
+            bev_query = self.query(batch_size, device)
             history_context = torch.no_grad() if self.detach_previous else nullcontext()
             with history_context:
                 previous_image = self._image_features(previous_rgb, intrinsics, extrinsics)
-                previous_bev = self.bev_encoder(self.query(previous_target), previous_image)
+                previous_bev = self.bev_encoder(
+                    bev_query, previous_image)
 
-            bev_query = self.query(target_point)
             transformed_grid = self._transformed_previous_grid(previous_to_current)
-            previous_geometry = self.query(target_point, transformed_grid)
-            bev_feat = self.bev_encoder(
-                bev_query, image_feat, previous_bev, previous_geometry, previous_valid)
+            previous_geometry = self.query(batch_size, device, transformed_grid)
+            bev_feat, planning_features = self.bev_encoder(
+                bev_query, image_feat, previous_bev, previous_geometry, previous_valid,
+                return_intermediate=True)
 
         # FP32 段：三场、独立道路线图与轨迹/行为末端解码。
         with self._autocast(device, enabled=False):
             bev_feat = bev_feat.float()
             outputs = self.field_decoder(bev_feat)
             outputs.update(self.lane_map_decoder(bev_feat))
-            outputs.update(self.trajectory_decoder(bev_feat))
+            outputs.update(self.trajectory_decoder(
+                tuple(feature.float() for feature in planning_features),
+                target_point.float(), ego_velocity.float()))
         return outputs
 
     def _image_features(self, rgb, intrinsics, extrinsics):
         with torch.no_grad() if self.freeze_perception else nullcontext():
             trunk_feat, dino_raw = self.perception.extract_features(rgb)
         return self.neck(trunk_feat, dino_raw, intrinsics, extrinsics)
-
-    @staticmethod
-    def _target_in_previous(target_point, previous_to_current):
-        """同一世界目标点由当前 ego 系逆变换到上一帧 ego 系。"""
-        target_h = torch.cat((target_point.float(), torch.ones_like(target_point[:, :1])), dim=1)
-        current_to_previous = torch.linalg.inv(previous_to_current.float())
-        return torch.bmm(current_to_previous, target_h.unsqueeze(-1)).squeeze(-1)[:, :2]
 
     def _transformed_previous_grid(self, previous_to_current):
         """把上一帧每个 BEV cell 中心刚性变换到当前 ego 系，保留真实几何供共享编码器使用。"""

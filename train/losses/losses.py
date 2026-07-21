@@ -1,13 +1,15 @@
 """多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
 
 模块: train/losses/losses.py
-依赖: torch, config.schema.Config, data.target_encoding.physics_decode, train.losses.checks.losses_checks
+依赖: torch, config.schema.Config, data.target_encoding.(physics_decode, physics_target),
+      train.losses.checks.losses_checks
 读取配置:
     model.physics.semantic_ignore_index / symlog_scale / depth_max_m
     train.loss_weights.semantic / depth / depth_grad / depth_range
     train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable /
         lane_class / lane_class_weights / lane_direction / boundary /
-        stop_line / traffic_light_state / stop_crossing
+        stop_line / traffic_light_state / stop_crossing / trajectory_unmatched_weight
+    model.driving.trajectory.symlog_scale
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
     data.driving.traffic_control.stop_margin_m
 对外接口:
@@ -30,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from config.schema import Config
-from data.target_encoding import physics_decode
+from data.target_encoding import physics_decode, physics_target
 from train.losses.checks.losses_checks import check_driving_losses_io, check_losses_io
 
 
@@ -119,10 +121,10 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     风险/可行驶为二值场：可行驶 GT 已从 HDMap 道路中扣除深度确认可见的 box 占用；二者在视场内掩码下做
     BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
     分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
-    占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹为 winner-take-all 多模态：每样本 GT 按
-    其扇区选中对应模态回归（SmoothL1，仅有效航点），并以该扇区为标签对置信度做交叉熵；行为固定八类彼此
-    独立，以 BCE-with-logits 监督同一帧同时激活的多个类别。视场外/无有效前向 GT
-    的样本自动被掩码剔除。独立道路线图以加权 CE 监督类别，并仅在道路线像素上以有符号余弦距离监督单位
+    占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹按米制 ADE 的 8×1 匈牙利代价
+    选择最相似 Mode，在 Symlog 空间全权重回归，其余 Mode 仍小权重更新；置信度学习匹配结果。行为固定八类彼此独立，以
+    BCE-with-logits 监督同一帧同时激活的多个类别；样本始终保留在 batch 归一分母中。独立道路线图以加权
+    CE 监督类别，并仅在道路线像素上以有符号余弦距离监督单位
     切向量；该方向来自 HD Map yaw，保留真实行驶正反向。越界损失把全部候选轨迹航点投影到不可行驶单侧距离场：道路外或可见 box 占用内
     按米制距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
     """
@@ -141,8 +143,9 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     stop_line, traffic_light_state, stop_crossing = _traffic_control_losses(
         outputs, targets, cfg, inview)
     trajectory, confidence = _trajectory_losses(
-        outputs["trajectories"], outputs["confidence"],
-        targets["trajectory"], targets["traj_valid"], targets["sector"])
+        outputs["trajectory_normalized"], outputs["trajectories"], outputs["confidence"],
+        targets["trajectory"], targets["traj_valid"],
+        cfg.model.driving.trajectory.symlog_scale, w.trajectory_unmatched_weight)
     behavior = F.binary_cross_entropy_with_logits(outputs["behavior_logits"], targets["behavior"])
     boundary = _boundary_loss(
         outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
@@ -229,26 +232,41 @@ def _distribution_energy(field_logit: torch.Tensor, target_soft: torch.Tensor,
     return (-contrib.sum(1)).mean()
 
 
-def _trajectory_losses(trajectories: torch.Tensor, confidence: torch.Tensor, gt: torch.Tensor,
-                       valid: torch.Tensor, sector: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """WTA 多模态轨迹回归 + 扇区置信度分类。
+def _trajectory_losses(trajectories_normalized: torch.Tensor, trajectories_meters: torch.Tensor,
+                       confidence: torch.Tensor, gt_meters: torch.Tensor, valid: torch.Tensor,
+                       symlog_scale: float, unmatched_weight: float) -> Tuple[torch.Tensor, torch.Tensor]:
+    """8×1 匈牙利匹配后的 Symlog 轨迹监督，未匹配 Mode 仍小权重更新。
 
-    trajectories `[B,M,T,2]`、confidence `[B,M]`、gt `[B,T,2]`、valid `[B,T]`、sector `[B]`（-1=无效样本）。
-    按 GT 所属扇区选中对应模态回归（SmoothL1，逐航点按 valid 掩码），以扇区为标签对置信度做 CE；无有效前向
-    GT 的样本（sector<0）不计损。
+    每个样本只有一条专家 GT，米制平均位移代价上的矩形匈牙利精确解就是代价最小的 Mode。匹配 Mode
+    权重为 1，其余 Mode 使用 `unmatched_weight`；全部样本仍保留在 batch 均值分母中。缺少未来航点的样本贡献可微零值，
+    不会被数据管线或 batch 过滤掉。
     """
-    b = trajectories.shape[0]
-    sample_valid = sector >= 0                                   # [B]
-    if not bool(sample_valid.any()):
-        zero = trajectories.sum() * 0.0                          # 保持计算图/设备一致的 0
-        return zero, zero
+    waypoint_mask = valid[:, None]                               # [B,1,T]
+    displacement = torch.linalg.vector_norm(trajectories_meters - gt_meters[:, None], dim=-1)
+    valid_count = valid.sum(-1)                                  # [B]
+    matching_cost = (displacement * waypoint_mask).sum(-1) \
+        / valid_count[:, None].clamp_min(_MASK_EPS)
+    matched_modes = _hungarian_single_target(matching_cost)
 
-    picked = trajectories[torch.arange(b, device=trajectories.device), sector.clamp_min(0)]  # [B,T,2]
-    wp_mask = valid * sample_valid[:, None].to(valid.dtype)      # [B,T]
-    per_wp = F.smooth_l1_loss(picked, gt, reduction="none").sum(-1) * wp_mask  # [B,T]
-    trajectory = per_wp.sum() / wp_mask.sum().clamp_min(_MASK_EPS)
-    confidence = F.cross_entropy(confidence[sample_valid], sector[sample_valid])
-    return trajectory, confidence
+    gt_normalized = physics_target(gt_meters, symlog_scale)
+    expanded_gt = gt_normalized[:, None].expand_as(trajectories_normalized)
+    per_waypoint = F.smooth_l1_loss(
+        trajectories_normalized, expanded_gt, reduction="none").sum(-1)
+    per_waypoint = per_waypoint * waypoint_mask                  # [B,M,T]
+    mode_weights = torch.full_like(matching_cost, unmatched_weight)
+    mode_weights.scatter_(1, matched_modes[:, None], 1.0)
+    numerator = (per_waypoint * mode_weights[:, :, None]).sum((1, 2))
+    denominator = valid_count * mode_weights.sum(1)
+    sample_valid = (valid_count > 0).to(numerator.dtype)
+    trajectory = (numerator / denominator.clamp_min(_MASK_EPS) * sample_valid).mean()
+    confidence_loss = F.cross_entropy(confidence, matched_modes, reduction="none")
+    confidence_loss = (confidence_loss * sample_valid).mean()
+    return trajectory, confidence_loss
+
+
+def _hungarian_single_target(cost: torch.Tensor) -> torch.Tensor:
+    """求每个 `[M,1]` 代价矩阵的匈牙利匹配；单 GT 时精确退化为逐 Mode 最小值索引。"""
+    return cost.detach().argmin(dim=1)
 
 
 def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor, bev) -> torch.Tensor:
