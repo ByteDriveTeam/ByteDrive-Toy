@@ -261,7 +261,7 @@ model:
       num_heads: 8               # 须整除 planning_dim
       mode_token_init_std: 0.02  # 8 个可学习 Mode Token 的随机初始化标准差
       baseline_step_m: 4.0       # 扇区中线基线轨迹相邻航点距离（米）
-      symlog_scale: 0.24         # 条件输入与轨迹输出的 Symlog 缩放
+      symlog_scale: 0.24         # 条件输入（目标点/ego 速度）归一化的 Symlog 缩放
 
     # 行为多标签分类 Token：与 8 个轨迹 Token 拼成同一注意力序列
     behavior:

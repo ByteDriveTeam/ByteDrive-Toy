@@ -13,13 +13,14 @@
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
         forward(perception_features, target_point, ego_velocity) -> dict
-            # trajectory_normalized/trajectories [B,M,T,2] / confidence [B,M] /
+            # trajectories/trajectory_residuals [B,M,T,2] / confidence [B,M] /
             # behavior_logits [B,C_behavior]
-说明: 目标点与 ego 平面速度先作 Symlog，再经 MLP 产生第一路预查询，随后经 FFN 产生第二路预查询。
-      主感知第 3、6 层特征分别 RMSNorm 后沿通道拼接，经单个 1×1 CNN 降到 planning_dim；path1 直接、
-      path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个随机初始化的可学习 Mode Token 携各自
-      预查询依次经两个 CTB，其后四层 TB 协调各 Mode。轨迹头仅回归 8 个扇区中线基线在 Symlog 空间的残差，
-      且零初始化保证初始预测严格等于基线；物理解码仅供安全损失与推理使用。
+说明: 目标点与 ego 平面速度先作 Symlog（仅用于把量纲差异大的条件输入压到有界范围喂 MLP），再经 MLP 产生
+      第一路预查询，随后经 FFN 产生第二路预查询。主感知第 3、6 层特征分别 RMSNorm 后沿通道拼接，经单个
+      1×1 CNN 降到 planning_dim；path1 直接、path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个
+      随机初始化的可学习 Mode Token 携各自预查询依次经两个 CTB，其后四层 TB 协调各 Mode。轨迹头直接回归 8 个
+      扇区中线米制基线的物理残差（米），零初始化保证初始预测严格等于基线；轨迹的预测与监督全程在物理空间，
+      不再经 Symlog 编解码。
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import torch
 import torch.nn as nn
 
 from config.schema import DrivingCfg
-from data.target_encoding import physics_decode, physics_target
+from data.target_encoding import physics_target
 from model.attention import CrossAttentionBlock, RMSNormTokens, SelfAttentionBlock
 from model.trajectory_decoder.checks.trajectory_decoder_checks import check_trajectory_inputs
 
@@ -82,7 +83,7 @@ class TrajectoryDecoder(nn.Module):
 
         baseline = _sector_baselines(
             tj.num_modes, tj.num_waypoints, cfg_driving.bev.fov_deg, tj.baseline_step_m)
-        self.register_buffer("baseline_normalized", physics_target(baseline, tj.symlog_scale))
+        self.register_buffer("baseline", baseline)   # 米制基线，残差直接叠加于此（物理空间）
 
     def forward(self, perception_features: Sequence[torch.Tensor], target_point: torch.Tensor,
                 ego_velocity: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -105,10 +106,8 @@ class TrajectoryDecoder(nn.Module):
 
         residual = self.residual_head(tokens).reshape(
             batch_size, self.num_modes, self.num_waypoints, 2)
-        normalized = self.baseline_normalized[None] + residual
-        trajectories = physics_decode(normalized, self.symlog_scale)
+        trajectories = self.baseline[None] + residual   # 物理空间：米制基线 + 米制残差
         return {
-            "trajectory_normalized": normalized,
             "trajectory_residuals": residual,
             "trajectories": trajectories,
             "confidence": self.confidence_head(tokens).squeeze(-1),

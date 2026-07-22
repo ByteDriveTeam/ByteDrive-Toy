@@ -294,7 +294,7 @@ class TrajectoryCfg:
     num_heads: int
     mode_token_init_std: float     # 可学习 Mode Token 随机初始化标准差
     baseline_step_m: float         # 扇区中线基线轨迹航点间距（米）
-    symlog_scale: float            # 条件输入与轨迹输出的 Symlog 缩放
+    symlog_scale: float            # 条件输入（目标点/ego 速度）归一化的 Symlog 缩放（轨迹在物理空间预测）
 
 
 @dataclass

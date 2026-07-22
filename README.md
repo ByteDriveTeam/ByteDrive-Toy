@@ -196,8 +196,8 @@ flowchart TB
 | 道路线方向 | `lane_direction` | `[B,2,256,256]` | 独立解码器，有向切向量原始输出 |
 | 相关停止线 | `stop_line_logits` | `[B,1,256,256]` | 复用道路线高分辨率特征的二值 logits |
 | 停止线灯色 | `traffic_light_state_logits` | `[B,3,256,256]` | red/yellow/green，仅在相关停止线区域监督 |
-| 归一化轨迹 | `trajectory_normalized` | `[B,8,8,2]` | 8 扇区中线基线 + 可学习残差，值域为 Symlog 监督空间 |
-| 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 上述输出逆 Symlog 后的 ego 系米制航点 |
+| 轨迹残差 | `trajectory_residuals` | `[B,8,8,2]` | 轨迹头对 8 扇区中线基线的物理残差（米），零初始化时为 0 |
+| 多模态轨迹 | `trajectories` | `[B,8,8,2]` | 8 扇区中线米制基线 + 物理残差，直接为 ego 系米制航点 |
 | 模态置信度 | `confidence` | `[B,8]` | 未归一化 logits |
 | 行为输出 | `behavior_logits` | `[B,8]` | 8 类独立多标签 logits |
 
@@ -317,9 +317,9 @@ flowchart TB
     F6 --> A2["RMSNorm → 1×1 CNN → FFN"] --> CTB2
     Q2 --> CTB2
     CTB2 --> PTB["4× Token Self-Attn"]
-    PTB --> RES["Symlog 轨迹残差"]
-    BASE["8 扇区中线基线"] --> RES
-    RES --> TRAJ["逆 Symlog<br/>8×8×2 米制轨迹"]
+    PTB --> RES["物理轨迹残差（米）"]
+    BASE["8 扇区中线米制基线"] --> RES
+    RES --> TRAJ["基线 + 残差<br/>8×8×2 米制轨迹"]
     PTB --> CONF["8 模态置信度"]
     PTB --> ACT["池化 → 8 类行为 logits"]
 ```
@@ -396,7 +396,7 @@ road_boundary / other_marking`。当前 Town01 HD Map 的映射为 `Center / Bro
 六层主干的第 3、6 层特征；两路特征分别做 RMSNorm，共享 `1×1 CNN` 降维，再由独立 FFN 适配。随后四层
 Token 自注意力协调 8 个 Mode：
 
-- 每个 Mode 只回归其扇区中线基线的 Symlog 残差；残差头零初始化，初始输出严格等于基线；
+- 每个 Mode 只回归其扇区中线米制基线的物理残差（米）；残差头零初始化，初始输出严格等于基线；
 - 每个 Mode 输出 8 个未来航点和 1 个置信度，供推理时排序；
 - 8 个 Mode 特征均值输出 8 个独立行为 logits；
 - 行为顺序为：障碍停车、红灯停车、加速、直行、左转、右转、减速、静止；其中红灯停车在相关停止线为红灯时
@@ -1100,7 +1100,7 @@ print(output["behavior_logits"].shape)  # [1, 8]
 
 模型输出的三场、停止线、置信度、行为和类别图都是 logits；三场/停止线使用 `sigmoid`，道路线/灯色类别用
 `argmax`，方向向量沿通道归一化。轨迹模态选择可对 `confidence` 使用 `softmax`/`argmax`；
-`trajectory_normalized` 是 Symlog 监督值，`trajectories` 已逆变换为 ego 系米制 `(x,y)`。
+`trajectories` 即 ego 系米制 `(x,y)` 航点（扇区中线基线 + 物理残差），全程物理空间、无 Symlog 编解码。
 
 ---
 

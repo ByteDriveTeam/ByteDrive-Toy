@@ -6,7 +6,7 @@ _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 _DRIVING_OUTPUTS = (
     "risk", "drivable", "distribution", "lane_class_logits", "lane_direction",
     "stop_line_logits", "traffic_light_state_logits",
-    "trajectory_normalized", "trajectories", "confidence", "behavior_logits",
+    "trajectories", "confidence", "behavior_logits",
 )
 _DRIVING_TARGETS = (
     "risk", "drivable", "offroad_distance", "distribution", "lane_class", "lane_direction", "inview",
