@@ -61,7 +61,7 @@ carla_collector:
       rgb: true            # RGB 相机 → mp4；关闭则该场景无视频文件
       depth: true          # 深度相机（BGR 编码）→ 解码为米存 LMDB
       semantic: true       # 语义分割相机 → 单通道标签存 LMDB
-      optical_flow: true   # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
+      optical_flow: false   # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
     rig:                       # 默认 6 视；fov/yaw 为度，x 前向、y 右向、z 上向（米）
       - {name: front,       fov: 90.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
       # - {name: front_far,   fov: 60.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
@@ -289,7 +289,7 @@ data:
     scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
     camera: front             # 前向单目相机名
     map_dir: data/map         # HD 地图目录
-    map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town01_HD_map.npz）
+    map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town02_HD_map.npz）
     previous_frame_offset: 1   # 时序融合使用同场景前一帧；场景开头以 identity + 无效位安全跳过
     dist_sigma_m: 1.0         # 轨迹分布场高斯软标签标准差（米）
     lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
@@ -335,9 +335,9 @@ train:
   weight_decay: 0.00001      # 1e-5
   grad_clip_norm: 0          # 梯度裁剪上限（0 表示不裁剪）
   log_every: 20              # 每多少步打印一次损失
-  ckpt_dir: train/checkpoints   # 权重保存目录（相对仓库根）
+  ckpt_dir: train/ckpt   # 权重保存目录（相对仓库根）
   resume: true               # 断点续训：为真则自动从 ckpt_dir 下最新检查点恢复（模型+优化器+epoch）
-  perception_lr_scale: 0.1   # 驾驶训练：感知子模块（融合+trunk+双头）以下游 lr 的 1/100 慢更新；DINOv3 仍冻结
+  perception_lr_scale: 0.1   # 驾驶训练：感知子模块（融合+trunk）以下游 lr 的 1/10 慢更新；DINOv3 仍冻结
   # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度梯度 SmoothL1 / 深度范围 BCE
   loss_weights:
     semantic: 0.3
@@ -367,7 +367,7 @@ train:
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
 # ============================================================
 pred_vis:
-  checkpoint: train/checkpoints/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）
+  checkpoint: train/ckpt/perception/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）
   scene: ''                  # 指定场景目录名（如 scene_000000）；空=取 scene_root 下第一个
   max_frames: 4              # 单张对照画布最多并排多少帧（0=全部）
   save_dir: vis/pred_vis/out # 渲染结果保存目录（相对仓库根）
@@ -382,7 +382,7 @@ pred_vis:
 # driving_vis —— 驾驶模型可视化（RGB/Seg/Depth + GT/预测 三场/道路线图 + 多模态轨迹）
 # ============================================================
 driving_vis:
-  checkpoint: train/checkpoints/driving/epoch_010.pt  # 驾驶检查点（不存在则随机初始化并告警，仅验管线）
+  checkpoint: train/ckpt/driving/epoch_010.pt  # 驾驶检查点（不存在则随机初始化并告警，仅验管线）
   scene: ''                  # 指定场景目录名（如 scene_000000）；空=取 scene_root 下第一个
   max_frames: 4              # 单张对照画布最多并排多少帧（0=全部）
   save_dir: vis/driving_vis/out  # 渲染结果保存目录（相对仓库根）
