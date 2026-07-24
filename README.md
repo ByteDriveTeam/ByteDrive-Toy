@@ -433,6 +433,28 @@ flowchart TB
 时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
+默认输入分辨率 `384×768`、batch size 为 1 时，单次完整推理的资源统计如下。`DrivingModel` 的口径包含
+当前帧和历史帧两次视觉编码，以及后续 BEV、场、道路线图和轨迹解码；FLOPs 按一次乘法和一次加法分别计数，
+覆盖卷积、线性层与注意力 QK/AV 矩阵乘法，不计归一化、激活、插值等逐元素算子。
+
+| 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `PerceptionModel` | 145.35 GFLOPs | 72.67 GMACs | 134.26 MiB | 38.25 MiB | 172.51 MiB |
+| `DrivingModel` | 390.31 GFLOPs | 195.16 GMACs | 242.60 MiB | 10.25 MiB | 252.85 MiB |
+
+CUDA 静态显存下限只包含 FP32 参数、输入和最终输出，不包含 BF16/FP32 中间激活、CUDA 上下文及算子工作区，
+不能视为实际峰值；实际峰值应在目标 GPU、CUDA 版 PyTorch 和相同输入尺寸下实测。本次统计环境为
+CPU 版 PyTorch 2.12.1，使用 `torch.inference_mode()`、模型默认混合精度边界和 14 个 PyTorch CPU 线程，
+连续运行两次所得结果为：
+
+| 模型 | 模型就绪 RSS | 推理峰值 RSS | 推理 RSS 增量 | 平均延迟 |
+| --- | ---: | ---: | ---: | ---: |
+| `PerceptionModel` | 345.86 MiB | 763.72 MiB | 417.86 MiB | 34.97 s |
+| `DrivingModel` | 459.82 MiB | 961.81 MiB | 501.99 MiB | 37.78 s |
+
+RSS 包含 Python/PyTorch 运行时和 CPU 算子临时内存，只用于当前参考环境的容量判断；它与 CUDA 显存不是同一
+指标，也不宜直接用于不同 CPU、线程数或 PyTorch 构建之间的性能比较。
+
 混合精度边界不是由训练循环隐式决定，而是模型内部显式划分：
 
 ```mermaid
