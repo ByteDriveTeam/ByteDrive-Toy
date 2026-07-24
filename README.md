@@ -1,6 +1,10 @@
 # ByteDrive-Toy
 
 <p align="center">
+  <img alt="ByteDrive Logo" src="assets/logo_full.png" width="391">
+</p>
+
+<p align="center">
   <strong>面向 CARLA 合成数据的单目、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
   冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环驾驶
 </p>
@@ -95,6 +99,17 @@ flowchart LR
 ---
 
 ## 可视化效果
+
+### CARLA 闭环驾驶
+
+下面的视频记录了一次 `clone_loop` 闭环 episode 的在线推理过程：顶部为前向相机与车辆状态，中部为风险场、
+可行驶场、轨迹分布场及道路线/交通控制预测，底部展示全部候选轨迹与最终执行轨迹。
+
+<video src="assets/visualizations/episode_0001_inference.mp4" controls="controls" width="768">
+  当前 Markdown 阅读器不支持内嵌视频，请使用下方链接查看。
+</video>
+
+[▶ 查看或下载 CARLA 闭环驾驶视频](assets/visualizations/episode_0001_inference.mp4)
 
 ### 感知预测与真值对照
 
