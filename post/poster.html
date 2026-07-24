@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root{
+    --bg:#080b16;
+    --panel:#0e1424;
+    --panel2:#121a30;
+    --ink:#eaf0ff;
+    --muted:#93a0c0;
+    --line:#243252;
+    --cyan:#38d6f0;
+    --sky:#4aa8ff;
+    --amber:#f7a13a;
+    --red:#f04a4a;
+    --green:#31d07a;
+    --violet:#8b6cf0;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{background:#000;}
+  .stage{
+    position:relative;width:1400px;height:1980px;overflow:hidden;
+    background:
+      radial-gradient(1200px 700px at 82% -6%, rgba(56,214,240,.14), transparent 60%),
+      radial-gradient(900px 600px at 6% 108%, rgba(139,108,240,.18), transparent 60%),
+      radial-gradient(700px 500px at 100% 100%, rgba(247,161,58,.10), transparent 60%),
+      linear-gradient(160deg,#0a0f1e 0%, #080b16 55%, #060810 100%);
+    color:var(--ink);
+    font-family:"Segoe UI","Helvetica Neue",Arial,"Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* faint engineering grid */
+  .grid-bg{position:absolute;inset:0;
+    background-image:linear-gradient(rgba(120,150,220,.05) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(120,150,220,.05) 1px,transparent 1px);
+    background-size:46px 46px;
+    mask-image:radial-gradient(1100px 900px at 50% 34%,#000 55%,transparent 100%);}
+  .pad{position:relative;padding:64px 72px 56px;}
+
+  /* ---------- HEADER ---------- */
+  .top{display:flex;justify-content:space-between;align-items:flex-start;}
+  .brandrow{display:flex;align-items:center;gap:22px;}
+  .logo{width:84px;height:84px;border-radius:21px;flex:none;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(158deg,#ffffff,#e8f1ff);
+    border:1px solid #cfe0ff;
+    box-shadow:0 0 0 1px rgba(56,214,240,.20) inset, 0 12px 36px rgba(0,0,0,.5), 0 0 34px rgba(56,214,240,.16);}
+  .logo img{width:70px;height:70px;object-fit:contain;}
+  .title{font-size:70px;font-weight:800;letter-spacing:-1.5px;line-height:1.12;padding-bottom:6px;
+    background:linear-gradient(92deg,#ffffff 6%, #bfe6ff 48%, #8fd0ff 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;}
+  .kicker{font-size:15px;letter-spacing:5px;color:var(--cyan);font-weight:700;margin-bottom:10px;text-transform:uppercase;}
+  .sub{margin-top:16px;font-size:22px;color:#cdd8f2;font-weight:500;line-height:1.5;max-width:900px;}
+  .sub b{color:#fff;font-weight:700;}
+  .tags{display:flex;flex-direction:column;gap:10px;align-items:flex-end;}
+  .techrow{display:flex;gap:11px;margin-top:20px;flex-wrap:wrap;}
+  .school{flex:none;text-align:center;}
+  .school img{width:118px;height:118px;border-radius:50%;object-fit:cover;display:block;
+    border:1px solid rgba(120,150,220,.4);
+    box-shadow:0 0 0 4px rgba(255,255,255,.05), 0 10px 34px rgba(0,0,0,.55), 0 0 44px rgba(56,214,240,.20);}
+  .school .cap{margin-top:9px;font-size:12px;letter-spacing:3px;color:#9fb4dc;font-weight:600;}
+  .pill{font-size:14px;font-weight:600;padding:8px 15px;border-radius:999px;white-space:nowrap;
+    border:1px solid var(--line);background:rgba(20,28,50,.7);color:#cdd8f2;}
+  .pill b{color:#fff;}
+  .pill.c{border-color:rgba(56,214,240,.5);color:#bff0fb;}
+  .pill.a{border-color:rgba(247,161,58,.5);color:#ffd9a6;}
+  .pill.v{border-color:rgba(139,108,240,.55);color:#d8ccff;}
+
+  /* ---------- PIPELINE ---------- */
+  .pipe{margin-top:34px;display:flex;align-items:stretch;gap:0;}
+  .node{flex:1;background:linear-gradient(180deg,rgba(20,28,50,.85),rgba(13,19,34,.85));
+    border:1px solid var(--line);border-radius:14px;padding:14px 12px 13px;text-align:center;position:relative;}
+  .node .n-t{font-size:16.5px;font-weight:700;color:#fff;}
+  .node .n-s{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.3;}
+  .node .tag{position:absolute;top:-10px;left:50%;transform:translateX(-50%);
+    font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:2px 9px;border-radius:999px;}
+  .frozen .tag{background:#122a3a;color:#7fe3ff;border:1px solid #2b6f86;}
+  .train .tag{background:#12321f;color:#79f0ad;border:1px solid #2b7a4d;}
+  .arrow{display:flex;align-items:center;justify-content:center;width:34px;color:#4a5c86;font-size:22px;font-weight:800;}
+  .node.frozen{box-shadow:0 0 26px rgba(56,214,240,.10) inset;}
+
+  /* ---------- SHOWCASE ---------- */
+  .show{margin-top:26px;display:grid;grid-template-columns:1fr 372px;gap:22px;}
+  .col-l{display:flex;flex-direction:column;gap:22px;}
+  .card{background:linear-gradient(180deg,var(--panel),#0b1120);border:1px solid var(--line);
+    border-radius:18px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.35);}
+  .card .hd{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;
+    border-bottom:1px solid var(--line);background:rgba(255,255,255,.015);}
+  .card .hd .t{font-size:17px;font-weight:700;color:#fff;display:flex;align-items:center;gap:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;box-shadow:0 0 10px currentColor;}
+  .card .hd .r{font-size:12.5px;color:var(--muted);font-weight:600;}
+  .imgwrap{padding:12px;}
+  .imgwrap img{width:100%;display:block;border-radius:8px;}
+  .legend{display:flex;gap:18px;padding:0 18px 14px;flex-wrap:wrap;}
+  .lg{display:flex;align-items:center;gap:7px;font-size:12.5px;color:#c3cfe8;}
+  .sw{width:22px;height:9px;border-radius:3px;}
+
+  .right{background:linear-gradient(180deg,var(--panel),#0b1120);border:1px solid var(--line);
+    border-radius:18px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35);}
+  .right .hd{padding:13px 16px;border-bottom:1px solid var(--line);}
+  .right .hd .t{font-size:16.5px;font-weight:700;color:#fff;display:flex;align-items:center;gap:9px;}
+  .right .hd .s{font-size:11.5px;color:var(--muted);margin-top:3px;}
+  .right .body{padding:10px;flex:1;display:flex;align-items:flex-start;}
+  .right .body img{width:100%;height:auto;display:block;border-radius:8px;}
+
+  /* ---------- FEATURES ---------- */
+  .feat{margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+  .fc{background:linear-gradient(180deg,rgba(18,26,48,.7),rgba(11,17,32,.7));
+    border:1px solid var(--line);border-radius:14px;padding:16px 17px;position:relative;overflow:hidden;}
+  .fc:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--acc,#38d6f0);}
+  .fc .ic{font-size:20px;margin-bottom:9px;display:block;}
+  .fc h3{font-size:16.5px;font-weight:700;color:#fff;margin-bottom:6px;}
+  .fc p{font-size:13px;line-height:1.5;color:var(--muted);}
+
+  /* training flow + design */
+  .block{background:linear-gradient(180deg,var(--panel),#0b1120);border:1px solid var(--line);
+    border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.35);}
+  .block .hd{display:flex;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid var(--line);
+    font-size:17px;font-weight:700;color:#fff;background:rgba(255,255,255,.015);}
+  .flow{display:flex;align-items:center;padding:18px 16px;gap:0;}
+  .step{flex:1;text-align:center;position:relative;}
+  .step .num{width:34px;height:34px;border-radius:50%;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;
+    font-size:15px;font-weight:800;color:#08101f;background:linear-gradient(160deg,var(--cyan),var(--sky));
+    box-shadow:0 0 16px rgba(56,214,240,.35);}
+  .step .st{font-size:14.5px;font-weight:700;color:#eaf0ff;}
+  .step .ss{font-size:11.5px;color:var(--muted);margin-top:2px;}
+  .flow .ar{width:26px;color:#41537e;font-size:20px;font-weight:800;text-align:center;flex:none;padding-bottom:22px;}
+  .dz{padding:16px 20px 18px;display:grid;grid-template-columns:1fr 1fr;gap:12px 26px;}
+  .dz .d{display:flex;gap:11px;align-items:flex-start;}
+  .dz .d .k{width:8px;height:8px;border-radius:2px;margin-top:6px;flex:none;box-shadow:0 0 8px currentColor;}
+  .dz .d .tx b{color:#fff;font-size:14px;font-weight:700;}
+  .dz .d .tx span{display:block;color:var(--muted);font-size:12.5px;line-height:1.45;margin-top:2px;}
+
+  /* ---------- STATS ---------- */
+  .stats{margin-top:22px;display:grid;grid-template-columns:repeat(5,1fr);gap:16px;
+    background:linear-gradient(180deg,rgba(16,23,42,.7),rgba(10,15,28,.7));
+    border:1px solid var(--line);border-radius:16px;padding:20px 8px;}
+  .st{text-align:center;padding:0 6px;border-right:1px solid rgba(120,150,220,.12);}
+  .st:last-child{border-right:none;}
+  .st .v{font-size:33px;font-weight:800;letter-spacing:-1px;
+    background:linear-gradient(180deg,#fff,#8fd0ff);-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .st .v small{font-size:16px;font-weight:700;color:#8fd0ff;-webkit-text-fill-color:#8fd0ff;}
+  .st .l{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.35;}
+
+  /* ---------- FOOTER ---------- */
+  .foot{margin-top:26px;display:flex;justify-content:space-between;align-items:center;
+    padding-top:20px;border-top:1px solid var(--line);}
+  .foot .l{font-size:14px;color:var(--muted);}
+  .foot .l b{color:#dfe8ff;}
+  .foot .chips{display:flex;gap:10px;}
+  .fchip{font-size:12.5px;color:#c3cfe8;border:1px solid var(--line);border-radius:999px;padding:6px 13px;
+    background:rgba(20,28,50,.6);}
+  .warn{margin-top:14px;font-size:12px;color:#6f7ea3;text-align:center;letter-spacing:.2px;}
+  .botline{margin-top:15px;display:flex;justify-content:space-between;align-items:center;}
+  .warn2{font-size:12.5px;color:#6f7ea3;letter-spacing:.2px;}
+  .author{font-size:15px;color:#dbe4ff;font-weight:600;display:flex;align-items:center;gap:11px;letter-spacing:.5px;}
+  .author .lab{font-size:10.5px;letter-spacing:2.5px;color:var(--cyan);font-weight:700;
+    border:1px solid rgba(56,214,240,.45);border-radius:999px;padding:4px 11px;background:rgba(56,214,240,.06);}
+  .author b{color:#fff;font-weight:800;font-size:16px;}
+  .author .badge{width:42px;height:42px;border-radius:50%;object-fit:cover;flex:none;
+    border:1px solid rgba(120,150,220,.35);box-shadow:0 0 0 3px rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.5);}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="grid-bg"></div>
+  <div class="pad">
+
+    <!-- HEADER -->
+    <div class="top">
+      <div>
+        <div class="kicker">End-to-End Autonomous Driving · Research Prototype</div>
+        <div class="brandrow">
+          <div class="logo"><img src="img/logo_icon.png" alt="ByteDrive"></div>
+          <div class="title">ByteDrive-Toy</div>
+        </div>
+        <div class="sub">面向 <b>CARLA 合成数据</b> 的单目双帧时序、开环端到端驾驶研究框架<br/>
+          冻结 DINOv3 骨干 · 语义/深度感知预训练 · 几何感知 BEV · 三场建模 · 多模态轨迹与行为联合预测</div>
+        <div class="techrow">
+          <div class="pill c"><b>Python</b> 3.12</div>
+          <div class="pill c"><b>CARLA</b> 0.9.15</div>
+          <div class="pill a"><b>PyTorch</b> BF16 + FP32</div>
+          <div class="pill v"><b>License</b> Apache-2.0</div>
+        </div>
+      </div>
+      <div class="school">
+        <img src="img/HeiHeLogo.jpg" alt="天津海河中学">
+        <div class="cap">天津 · 海河中学</div>
+      </div>
+    </div>
+
+    <!-- PIPELINE -->
+    <div class="pipe">
+      <div class="node frozen"><span class="tag">FROZEN ❄</span>
+        <div class="n-t">DINOv3 ViT-S+/16</div><div class="n-s">第 3 / 6 / 12 层<br/>完整 Token 序列</div></div>
+      <div class="arrow">›</div>
+      <div class="node train"><span class="tag">TRAINABLE</span>
+        <div class="n-t">感知预训练</div><div class="n-s">29 类语义<br/>米制深度</div></div>
+      <div class="arrow">›</div>
+      <div class="node train"><span class="tag">GEOMETRY</span>
+        <div class="n-t">Frustum · BEV 查询</div><div class="n-s">视锥深度采样<br/>纯几何 BEV</div></div>
+      <div class="arrow">›</div>
+      <div class="node train"><span class="tag">TEMPORAL</span>
+        <div class="n-t">BEV Encoder</div><div class="n-s">当前图像 + 刚性<br/>对齐历史 BEV</div></div>
+      <div class="arrow">›</div>
+      <div class="node train"><span class="tag">MULTI-TASK</span>
+        <div class="n-t">三场 · 轨迹 · 行为</div><div class="n-s">道路线 · 交通控制<br/>8 模态规划</div></div>
+    </div>
+
+    <!-- SHOWCASE -->
+    <div class="show">
+      <div class="col-l">
+        <div class="card">
+          <div class="hd">
+            <div class="t"><span class="dot" style="color:var(--cyan)"></span>感知阶段 · 模型预测语义与米制深度</div>
+            <div class="r">冻结 DINOv3 → 多层融合 → pred seg / pred depth</div>
+          </div>
+          <div class="imgwrap"><img src="img/persp_day.png" alt="perception prediction"></div>
+          <div class="legend">
+            <div class="lg"><span class="sw" style="background:#6b6f9e"></span>RGB 单目输入</div>
+            <div class="lg"><span class="sw" style="background:linear-gradient(90deg,#7a86c8,#f2a13a,#e34b6a)"></span>29 类语义</div>
+            <div class="lg"><span class="sw" style="background:linear-gradient(90deg,#38d6f0,#31d07a,#f7a13a,#7a1414)"></span>Symlog 深度</div>
+          </div>
+        </div>
+
+        <!-- FEATURES -->
+        <div class="feat">
+          <div class="fc" style="--acc:#f04a4a"><span class="ic">🛡️</span><h3>三场建模</h3>
+            <p>风险场 · 可行驶场 · 轨迹分布场，256×256 高分辨率 BEV 联合解码。</p></div>
+          <div class="fc" style="--acc:#31d07a"><span class="ic">🧭</span><h3>多模态轨迹</h3>
+            <p>8 个可学习 Mode Token 条件化规划，8×8 米制航点 + 置信度。</p></div>
+          <div class="fc" style="--acc:#4aa8ff"><span class="ic">🛣️</span><h3>独立道路线图</h3>
+            <p>5 类道路线 + 有向切向量，保留正反行驶方向语义。</p></div>
+          <div class="fc" style="--acc:#f7a13a"><span class="ic">🚦</span><h3>交通控制</h3>
+            <p>相关停止线检测与红/黄/绿灯态识别，红灯越线安全约束。</p></div>
+          <div class="fc" style="--acc:#8b6cf0"><span class="ic">🕒</span><h3>时序 BEV</h3>
+            <p>上一帧 BEV 经帧间刚性变换对齐，交叉注意力融合历史。</p></div>
+          <div class="fc" style="--acc:#38d6f0"><span class="ic">🎯</span><h3>行为预测</h3>
+            <p>8 类多标签行为联合输出：停车 · 加减速 · 直行 · 转向。</p></div>
+        </div>
+
+        <!-- TRAINING FLOW -->
+        <div class="block">
+          <div class="hd"><span class="dot" style="color:var(--green)"></span>两阶段训练流程</div>
+          <div class="flow">
+            <div class="step"><div class="num">0</div><div class="st">数据采集</div><div class="ss">CARLA 同步多传感器</div></div>
+            <div class="ar">›</div>
+            <div class="step"><div class="num">1</div><div class="st">感知预训练</div><div class="ss">语义 + 深度双头</div></div>
+            <div class="ar">›</div>
+            <div class="step"><div class="num">2</div><div class="st">权重初始化</div><div class="ss">复用 fusion / trunk</div></div>
+            <div class="ar">›</div>
+            <div class="step"><div class="num">3</div><div class="st">驾驶多任务</div><div class="ss">BEV 联合训练</div></div>
+            <div class="ar">›</div>
+            <div class="step"><div class="num">4</div><div class="st">离线可视化</div><div class="ss">GT / Pred 对照</div></div>
+          </div>
+        </div>
+
+        <!-- KEY DESIGN -->
+        <div class="block">
+          <div class="hd"><span class="dot" style="color:var(--violet)"></span>关键技术设计</div>
+          <div class="dz">
+            <div class="d"><span class="k" style="color:var(--cyan)"></span><div class="tx"><b>多层特征融合</b><span>DINO 3/6/12 层逐层 RMSNorm 拼接降维</span></div></div>
+            <div class="d"><span class="k" style="color:var(--violet)"></span><div class="tx"><b>能量分布场</b><span>视场内空间 softmax 交叉熵监督</span></div></div>
+            <div class="d"><span class="k" style="color:var(--red)"></span><div class="tx"><b>风险外缘包络</b><span>深度反投影后按方位取最远观测</span></div></div>
+            <div class="d"><span class="k" style="color:var(--green)"></span><div class="tx"><b>可微边界约束</b><span>全模态航点道路外距离惩罚</span></div></div>
+            <div class="d"><span class="k" style="color:var(--amber)"></span><div class="tx"><b>差分学习率</b><span>感知 0.1× 慢更新，DINO 恒冻结</span></div></div>
+            <div class="d"><span class="k" style="color:var(--sky)"></span><div class="tx"><b>混合精度边界</b><span>BF16 主干 / FP32 场与损失</span></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT RAIL -->
+      <div class="right">
+        <div class="hd">
+          <div class="t"><span class="dot" style="color:var(--amber)"></span>驾驶阶段 · BEV 多任务输出</div>
+          <div class="s">GT / Pred 对照 — 风险 · 可行驶 · 分布 · 道路线 · 交通 · 轨迹</div>
+        </div>
+        <div class="body"><img src="img/bev_fields.png" alt="bev fields"></div>
+      </div>
+    </div>
+
+    <!-- STATS -->
+    <div class="stats">
+      <div class="st"><div class="v">63.6<small>M</small></div><div class="l">驾驶模型参数<br/>(34.9M 可训练)</div></div>
+      <div class="st"><div class="v">29</div><div class="l">语义类别<br/>+ 米制深度</div></div>
+      <div class="st"><div class="v">64<small>×64m</small></div><div class="l">前向 BEV<br/>256×256 场</div></div>
+      <div class="st"><div class="v">8<small>×8</small></div><div class="l">模态 × 航点<br/>多模态轨迹</div></div>
+      <div class="st"><div class="v">2<small>帧</small></div><div class="l">时序开环<br/>刚性对齐历史</div></div>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="foot">
+      <div class="l"><b>数据采集</b> CARLA 双进程异构 · H.265 + LMDB &nbsp;|&nbsp; <b>可视化</b> 感知 / 驾驶离线对照</div>
+      <div class="chips">
+        <div class="fchip">数据采集 ✓</div>
+        <div class="fchip">感知预训练 ✓</div>
+        <div class="fchip">BEV 驾驶训练 ✓</div>
+        <div class="fchip">离线可视化 ✓</div>
+      </div>
+    </div>
+    <div class="botline">
+      <div class="warn2">研究原型 · 双帧开环 (open-loop)，尚未接入 CARLA 闭环接管与评测</div>
+      <div class="author"><span class="lab">DESIGN</span>海河中学 · <b>付子睿</b></div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

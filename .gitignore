@@ -123,3 +123,4 @@ dataset/
 *.ckpt
 map/
 out/
+*.zip

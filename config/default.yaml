@@ -407,3 +407,91 @@ driving_vis:
     unknown_color: [255, 255, 255] # 已知停止线但灯态无效时使用白色
     line_threshold: 0.5            # 预测停止线显示阈值；零初始化旧权重恰为 0.5，不会误显示
     overlay_alpha: 0.85            # 停止线叠加到轨迹 BEV 时的混合强度
+
+# ============================================================
+# clone_loop —— CARLA 0.9.15 行为克隆闭环（Py37 仿真 + 主环境推理）
+# ============================================================
+clone_loop:
+  worker:
+    python_exe: data/carla_data_collector/py37_venv/Scripts/python.exe
+    carla_host: 127.0.0.1
+    carla_port: 2000
+    startup_timeout_s: 60.0
+    command_timeout_s: 120.0
+
+  ipc:
+    frame_name: bytedrive_clone_frame
+
+  simulation:
+    map: Town02_Opt
+    fixed_delta_seconds: 0.1
+    warmup_ticks: 20
+    max_steps: 2000
+    base_seed: 20260724
+    random_weather: false
+
+  route:
+    min_distance_m: 80.0
+    max_distance_m: 300.0
+    max_episodes: 1              # 0 表示运行全部合法路线
+    queue_seed: 20260724
+    sampling_resolution_m: 2.0
+    target_distance_m: 24.0
+    completion_distance_m: 3.0
+    progress_search_points: 80
+
+  traffic:
+    num_vehicles: 30
+    vehicle_filter: vehicle.*
+    tm_port: 8000
+
+  ego:
+    vehicle_filter: vehicle.lincoln.mkz_2020
+
+  camera:
+    width: 768
+    height: 384
+    x: 1.5
+    y: 0.0
+    z: 1.6
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+  inference:
+    checkpoint: train/ckpt/driving/driving.pt
+    device: cuda
+    min_weight_coverage: 0.95
+    confidence_weight: 1.0
+    risk_weight: 2.0
+    drivable_weight: 1.0
+    route_alignment_weight: 0.5
+    max_abs_waypoint_m: 96.0
+
+  control:
+    waypoint_dt_s: 0.5           # 训练数据相邻未来帧间隔
+    speed_horizon: 3
+    min_target_speed_mps: 0.0
+    max_target_speed_mps: 12.0
+    lookahead_m: 6.0
+    wheelbase_m: 2.85
+    max_steer_angle_deg: 70.0
+    steer_smoothing: 0.35
+    longitudinal_kp: 0.45
+    longitudinal_ki: 0.05
+    longitudinal_kd: 0.08
+    integral_limit: 5.0
+    max_throttle: 0.75
+    max_brake: 1.0
+    brake_deadband_mps: 0.35
+    behavior_stop_threshold: 0.65
+    behavior_stop_indices: [0, 1]     # 仅处方式标签：障碍停车、红灯停车；静止是状态描述，不作控制门控
+
+  safety:
+    max_route_deviation_m: 8.0
+    stuck_speed_mps: 0.1
+    stuck_steps: 200
+
+  output:
+    root: clone_loop/out
+    log_every: 20

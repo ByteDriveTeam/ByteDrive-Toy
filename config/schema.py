@@ -521,6 +521,127 @@ class DrivingVisCfg:
 
 
 @dataclass
+class CloneWorkerCfg:
+    python_exe: str
+    carla_host: str
+    carla_port: int
+    startup_timeout_s: float
+    command_timeout_s: float
+
+
+@dataclass
+class CloneIpcCfg:
+    frame_name: str
+
+
+@dataclass
+class CloneSimulationCfg:
+    map: str
+    fixed_delta_seconds: float
+    warmup_ticks: int
+    max_steps: int
+    base_seed: int
+    random_weather: bool
+
+
+@dataclass
+class CloneRouteCfg:
+    min_distance_m: float
+    max_distance_m: float
+    max_episodes: int
+    queue_seed: int
+    sampling_resolution_m: float
+    target_distance_m: float
+    completion_distance_m: float
+    progress_search_points: int
+
+
+@dataclass
+class CloneTrafficCfg:
+    num_vehicles: int
+    vehicle_filter: str
+    tm_port: int
+
+
+@dataclass
+class CloneEgoCfg:
+    vehicle_filter: str
+
+
+@dataclass
+class CloneCameraCfg:
+    width: int
+    height: int
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+
+
+@dataclass
+class CloneInferenceCfg:
+    checkpoint: str
+    device: str
+    min_weight_coverage: float
+    confidence_weight: float
+    risk_weight: float
+    drivable_weight: float
+    route_alignment_weight: float
+    max_abs_waypoint_m: float
+
+
+@dataclass
+class CloneControlCfg:
+    waypoint_dt_s: float
+    speed_horizon: int
+    min_target_speed_mps: float
+    max_target_speed_mps: float
+    lookahead_m: float
+    wheelbase_m: float
+    max_steer_angle_deg: float
+    steer_smoothing: float
+    longitudinal_kp: float
+    longitudinal_ki: float
+    longitudinal_kd: float
+    integral_limit: float
+    max_throttle: float
+    max_brake: float
+    brake_deadband_mps: float
+    behavior_stop_threshold: float
+    behavior_stop_indices: List[int]
+
+
+@dataclass
+class CloneSafetyCfg:
+    max_route_deviation_m: float
+    stuck_speed_mps: float
+    stuck_steps: int
+
+
+@dataclass
+class CloneOutputCfg:
+    root: str
+    log_every: int
+
+
+@dataclass
+class CloneLoopCfg:
+    worker: CloneWorkerCfg
+    ipc: CloneIpcCfg
+    simulation: CloneSimulationCfg
+    route: CloneRouteCfg
+    traffic: CloneTrafficCfg
+    ego: CloneEgoCfg
+    camera: CloneCameraCfg
+    inference: CloneInferenceCfg
+    control: CloneControlCfg
+    safety: CloneSafetyCfg
+    output: CloneOutputCfg
+
+
+@dataclass
 class Config:
     carla_collector: CarlaCollectorCfg
     data_vis: DataVisCfg
@@ -529,6 +650,7 @@ class Config:
     train: TrainCfg
     pred_vis: PredVisCfg
     driving_vis: DrivingVisCfg
+    clone_loop: CloneLoopCfg
 
 
 # ---------- 由 dict 构造 ----------
@@ -635,6 +757,63 @@ def validate_config(cfg):
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
+    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data)
+
+
+def _validate_clone_loop(cl, model, data):
+    """校验对象: cfg.clone_loop —— CARLA 闭环运行、推理、控制与安全参数。"""
+    assert cl.worker.carla_port > 0 and cl.worker.startup_timeout_s > 0 \
+        and cl.worker.command_timeout_s > 0, \
+        "clone_loop.worker 端口与超时必须为正"
+    assert cl.ipc.frame_name, "clone_loop.ipc.frame_name 不得为空"
+    sim = cl.simulation
+    assert sim.map.endswith("_Opt"), "clone_loop.simulation.map 必须是 Opt 地图"
+    assert sim.fixed_delta_seconds > 0 and sim.warmup_ticks >= 0 and sim.max_steps > 0, \
+        "clone_loop.simulation 固定步长/预热/步数取值非法"
+    route = cl.route
+    assert 0 < route.min_distance_m < route.max_distance_m, \
+        "clone_loop.route 需满足 0 < min_distance_m < max_distance_m"
+    assert route.max_episodes >= 0 and route.sampling_resolution_m > 0 \
+        and route.target_distance_m > 0 and route.completion_distance_m > 0 \
+        and route.progress_search_points > 0, "clone_loop.route 参数取值非法"
+    assert cl.traffic.num_vehicles >= 0 and cl.traffic.tm_port > 0, \
+        "clone_loop.traffic 车辆数必须非负且 TM 端口为正"
+    cam = cl.camera
+    assert cam.width > 0 and cam.height > 0, \
+        "clone_loop.camera 分辨率取值非法"
+    assert cam.width % model.dinov3_backbone.patch_size == 0 \
+        and cam.height % model.dinov3_backbone.patch_size == 0, \
+        "clone_loop.camera 宽高必须被模型 patch_size 整除"
+    inf = cl.inference
+    assert 0 < inf.min_weight_coverage <= 1 and inf.max_abs_waypoint_m > 0, \
+        "clone_loop.inference 权重覆盖率/航点范围取值非法"
+    assert all(math.isfinite(value) and value >= 0 for value in (
+        inf.confidence_weight, inf.risk_weight, inf.drivable_weight,
+        inf.route_alignment_weight)), "clone_loop.inference 各评分权重必须为有限非负数"
+    control = cl.control
+    assert control.waypoint_dt_s > 0 and control.speed_horizon > 0 \
+        and 0 <= control.min_target_speed_mps < control.max_target_speed_mps, \
+        "clone_loop.control 航点时间/速度参数取值非法"
+    history_steps = control.waypoint_dt_s / sim.fixed_delta_seconds
+    assert history_steps >= 1 and abs(history_steps - round(history_steps)) < 1e-6, \
+        "clone_loop.control.waypoint_dt_s 必须是仿真固定步长的正整数倍"
+    assert control.lookahead_m > 0 and control.wheelbase_m > 0 \
+        and 0 < control.max_steer_angle_deg < 90, \
+        "clone_loop.control 横向控制参数取值非法"
+    assert 0 <= control.steer_smoothing < 1 and control.integral_limit >= 0 \
+        and 0 < control.max_throttle <= 1 and 0 < control.max_brake <= 1 \
+        and control.brake_deadband_mps >= 0, "clone_loop.control PID/执行器参数取值非法"
+    assert 0 < control.behavior_stop_threshold < 1 \
+        and control.behavior_stop_indices \
+        and all(0 <= index < model.driving.behavior.num_classes
+                for index in control.behavior_stop_indices), \
+        "clone_loop.control 停车行为阈值/索引取值非法"
+    safety = cl.safety
+    assert safety.max_route_deviation_m > 0 and safety.stuck_speed_mps >= 0 \
+        and safety.stuck_steps > 0, "clone_loop.safety 参数取值非法"
+    assert cl.output.log_every > 0, "clone_loop.output.log_every 必须 > 0"
+    assert len(data.dataset.dino_mean) == 3 and len(data.dataset.dino_std) == 3, \
+        "闭环 RGB 归一化要求 data.dataset.dino_mean/std 为三通道"
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------

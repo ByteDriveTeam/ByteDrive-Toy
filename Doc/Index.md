@@ -89,7 +89,36 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 
 ## clone_loop/ — 行为克隆闭环
 
-- _待补充_
+- [clone_loop/README.md](../clone_loop/README.md) — CARLA 0.9.15 异构行为克隆闭环的架构、运行与输出说明
+- [clone_loop/__init__.py](../clone_loop/__init__.py) — CARLA 0.9.15 行为克隆闭环包：连接异构仿真 worker 与主环境模型推理
+- [clone_loop/run.py](../clone_loop/run.py) — CARLA 0.9.15 行为克隆闭环 CLI：加载配置并启动异构 episode 编排
+- [clone_loop/protocol/__init__.py](../clone_loop/protocol/__init__.py) — 闭环控制管道协议的公开 API 重导出入口
+- [clone_loop/protocol/protocol.py](../clone_loop/protocol/protocol.py) — 定义 Py37 仿真 worker 与主环境闭环编排器之间的 JSON 行协议
+- [clone_loop/shared_frame/__init__.py](../clone_loop/shared_frame/__init__.py) — 单帧共享内存区的公开 API 重导出入口
+- [clone_loop/shared_frame/shared_frame.py](../clone_loop/shared_frame/shared_frame.py) — 跨解释器复用固定大小 RGB 缓冲，避免每个闭环步经 JSON 复制图像
+- [clone_loop/routes/__init__.py](../clone_loop/routes/__init__.py) — 闭环路线队列构造的公开 API 重导出入口
+- [clone_loop/routes/routes.py](../clone_loop/routes/routes.py) — 由 CARLA 推荐生成点构造可复现、无重复的闭环评测路线队列
+- [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环模型推理与轨迹选择的公开 API 重导出入口
+- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载驾驶权重、维护双帧状态，并按置信度/安全场/路线一致性选择闭环轨迹
+- [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — 轨迹跟踪控制器的公开 API 重导出入口
+- [clone_loop/control/control.py](../clone_loop/control/control.py) — 把模型选中的 ego 系轨迹转换为 CARLA 归一化转向、油门与制动
+- [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Py37 worker 子进程客户端的公开 API 重导出入口
+- [clone_loop/client/client.py](../clone_loop/client/client.py) — 派生 Py37 CARLA worker，并以同步 JSON RPC 驱动闭环 episode
+- [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — 闭环逐步日志与汇总写入器的公开 API 重导出入口
+- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总
+- [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
+- [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志
+
+Py37 仿真端 `worker/`
+
+- [clone_loop/worker/__init__.py](../clone_loop/worker/__init__.py) — Py37 CARLA 闭环 worker 包标识
+- [clone_loop/worker/run.py](../clone_loop/worker/run.py) — Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB 写入共享帧区
+- [clone_loop/worker/navigation/__init__.py](../clone_loop/worker/navigation/__init__.py) — CARLA 路线进度与局部目标模块的公开 API 重导出入口
+- [clone_loop/worker/navigation/navigation.py](../clone_loop/worker/navigation/navigation.py) — 在 CARLA 全局路线中跟踪主车进度，并生成模型所需的 ego 系近端目标
+- [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — 闭环 RGB、碰撞与压线传感器的公开 API 重导出入口
+- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向 RGB 与安全事件传感器，并按仿真帧严格同步取图
+- [clone_loop/worker/runtime/__init__.py](../clone_loop/worker/runtime/__init__.py) — CARLA 闭环世界生命周期的公开 API 重导出入口
+- [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
 
 ## vis/ — 可视化与日志渲染
 
