@@ -1,8 +1,8 @@
 # ByteDrive-Toy
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的单目、双帧时序、开放环端到端驾驶研究原型</strong><br/>
-  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 道路线图 · 三场建模 · 多模态轨迹与行为联合预测
+  <strong>面向 CARLA 合成数据的单目、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
+  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环驾驶
 </p>
 
 <p align="center">
@@ -13,9 +13,9 @@
 </p>
 
 > [!IMPORTANT]
-> ByteDrive-Toy 当前是**双帧时序开放环（open-loop）研究代码**，不是可直接部署到真实车辆的完整自动驾驶系统。
-> 主流程已经覆盖 CARLA 数据采集、感知预训练、BEV 驾驶训练和离线可视化；闭环行为克隆目录
-> `clone_loop/` 尚未实现，当前也没有在 CARLA 中接管车辆并完成闭环评测的入口。
+> ByteDrive-Toy 当前已经覆盖 CARLA 数据采集、感知预训练、BEV 驾驶训练、离线预测与可视化以及
+> **CARLA 0.9.15 行为克隆闭环驾驶**。`clone_loop/` 可在同步仿真中完成双帧推理、候选轨迹安全重排、
+> 车辆控制、episode 评测与录像。它仍是仿真研究原型，不是可直接部署到真实车辆的完整自动驾驶系统。
 
 > [!IMPORTANT]
 > 此README在GitHub上渲染异常，建议下载到本地用专业MarkDown阅读器阅读。
@@ -58,6 +58,9 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
    模态置信度和 8 类行为标签。规划分支以目标点与 ego 平面速度为条件，用 8 个可学习 Mode Token 查询
    BEV 主干第 3、6 层特征。
 
+训练完成后，闭环运行器把 `DrivingModel` 接入 CARLA 同步仿真，形成“观测 → 双帧推理 → 轨迹选择 →
+纯追踪/PID 控制 → 下一观测”的反馈闭环，并按路线记录终态、进度、控制量、模型诊断和录像。
+
 项目的核心特点如下。
 
 | 能力 | 当前实现 |
@@ -71,6 +74,7 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 | 训练 | AdamW；BF16 主干 + FP32 末端/损失；感知模块差分小学习率 |
 | 数据 | CARLA 0.9.15；RGB/H.265 + 非 RGB/LMDB；严格同步多传感器采集 |
 | 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照 |
+| 闭环驾驶 | CARLA 同步仿真；双帧在线推理；轨迹安全重排；纯追踪横向控制 + 速度 PID；episode 评测与录像 |
 | 检查点 | 自动续训；检查点排除可重新加载的冻结 DINOv3 骨干 |
 
 ### 当前完成度
@@ -81,13 +85,11 @@ flowchart LR
     B --> C["感知预训练<br/>已实现"]
     C --> D["BEV 驾驶训练<br/>已实现"]
     D --> E["离线预测可视化<br/>已实现"]
-    E -.-> F["CARLA 闭环接管/评测<br/>尚未实现"]
-    F -.-> G["行为克隆闭环 clone_loop<br/>占位目录"]
+    D --> F["行为克隆闭环 clone_loop<br/>已实现"]
+    F --> G["CARLA 接管/episode 评测<br/>已实现"]
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    classDef todo fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-dasharray: 5 5;
-    class A,B,C,D,E done;
-    class F,G todo;
+    class A,B,C,D,E,F,G done;
 ```
 
 ---
@@ -156,6 +158,18 @@ flowchart TB
         V3["driving_vis<br/>三场/道路线/交通控制/轨迹预测"]
     end
 
+    subgraph CLOSED["CARLA 行为克隆闭环"]
+        OBS["同步前向 RGB<br/>位姿/速度/路线目标"]
+        INF["DrivingModel<br/>双帧在线推理"]
+        SELECT["置信度 + 风险场 + 可行驶场<br/>+ 路线方向联合重排"]
+        CTRL["纯追踪横向控制<br/>速度 PID"]
+        STEP["apply_control → world.tick<br/>终态/进度/碰撞/压线"]
+        LOG["JSONL · summary<br/>驾驶/推理双路 MP4"]
+        OBS --> INF --> SELECT --> CTRL --> STEP --> OBS
+        INF --> LOG
+        STEP --> LOG
+    end
+
     SIM --> W
     MP4 --> DS1
     DB --> DS1
@@ -164,6 +178,7 @@ flowchart TB
     DB --> V1
     P --> V2
     D --> V3
+    D --> INF
 ```
 
 代码遵循“配置、实现、检查”分离：实验参数集中在 `config/default.yaml`，模块实现放在对应目录，
@@ -947,6 +962,28 @@ python vis/driving_vis/run.py --checkpoint train/ckpt/driving/driving.pt
 > `pred_vis.checkpoint` 当前写的是 `train/checkpoints/epoch_010.pt`。使用训练产物时请显式传
 > `--checkpoint train/checkpoints/perception/epoch_010.pt`，或在环境覆盖文件中修正路径。
 
+### 7. 运行 CARLA 闭环驾驶
+
+先启动 CARLA 0.9.15 服务端，确认 Python 3.7 worker 环境与
+`train/ckpt/driving/driving.pt` 已就绪，然后从仓库根目录执行：
+
+```powershell
+.\.venv\Scripts\python.exe clone_loop\run.py --max-episodes 1
+```
+
+闭环会自动派生 CARLA worker，并循环执行同步观测、双帧推理、候选轨迹重排、车辆控制和下一次
+`world.tick`。运行期间按 `q` 可结束当前 episode 并完整保存结果；使用环境覆盖时可传
+`--env <name>`。每次运行的输出位于 `clone_loop/out/run_<时间>/`：
+
+- `episode_XXXX.jsonl`：逐步状态、控制量、模式评分、置信度和行为概率；
+- `episode_XXXX_driving.mp4`：前向相机驾驶实况；
+- `episode_XXXX_inference.mp4`：三场、道路线、交通控制和候选轨迹诊断；
+- `summary.json`：各路线终态、进度、里程、压线和总体成功率。
+
+闭环默认要求检查点中形状兼容的非 DINO 权重覆盖率不低于 `0.95`；检查点缺失或覆盖率不足会直接失败，
+避免随机或不兼容模型接管车辆。完整架构、评分公式与调参说明见
+[`clone_loop/README.md`](clone_loop/README.md)。
+
 ---
 
 ## 配置系统
@@ -995,6 +1032,8 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
 | `pred_vis/driving_vis` | 权重、场景、帧数、保存目录和配色 |
+| `clone_loop.worker/ipc/simulation/route/traffic` | 闭环 worker、共享帧、同步仿真、路线和交通流 |
+| `clone_loop.inference/control/safety/recording/output` | 在线权重与轨迹评分、车辆控制、终态、录像和日志 |
 
 ### 显存不足时优先调整
 
@@ -1174,7 +1213,14 @@ ByteDrive-Toy/
 │   └── driving_vis/                  # 三场/道路线/交通控制/轨迹预测与 GT 对照
 ├── assets/
 │   └── visualizations/               # README 展示用的可视化结果图
-├── clone_loop/                       # 行为克隆闭环占位，尚未实现
+├── clone_loop/                       # CARLA 0.9.15 行为克隆闭环
+│   ├── run.py                        # 主环境闭环 CLI
+│   ├── orchestrator/                 # 路线队列与 episode 编排
+│   ├── inference/                    # DrivingModel 加载、推理与候选轨迹重排
+│   ├── control/                      # 纯追踪横向控制与纵向 PID
+│   ├── worker/                       # Python 3.7 CARLA 同步仿真 worker
+│   ├── recorder/                     # JSONL、summary 与双路 MP4
+│   └── README.md                     # 闭环架构、运行和调参说明
 ├── Doc/
 │   ├── Index.md                      # 文件与文档索引
 │   └── 开发规范.md                   # 项目开发约定
@@ -1202,10 +1248,11 @@ ByteDrive-Toy/
 
 ### 研究边界
 
-- 当前模型是双帧时序、单目、开放环预测，只融合一帧历史 BEV，不包含长时序记忆、车辆控制器和闭环接管；
+- 当前模型仍是双帧时序、单目架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距维护
+  历史观测，并在 CARLA 中接入轨迹选择和车辆控制；
+- 当前闭环仅面向 CARLA 0.9.15 同步仿真，使用纯追踪横向控制和纵向 PID，不等同于真实车辆部署能力；
 - 训练数据默认把所有帧展开、同场景连续帧成批并在 batch 粒度 shuffle，没有官方 train/val/test 划分；
 - 默认没有数据增强、学习率调度器、指标评测、早停或 best checkpoint；
-- `clone_loop/` 是占位目录；
 - 当前主配置只启用 `front` 相机，虽然采集器支持多相机 rig；
 - 驾驶标签依赖 CARLA 真值深度、语义、交通灯状态和 HDMap，迁移到真实数据需要重新设计监督来源；
 - 代码是研究原型，不应直接用于真实道路安全决策。
@@ -1277,6 +1324,7 @@ python vis/pred_vis/run.py --checkpoint train/checkpoints/perception/epoch_010.p
 - 文件导航：[Doc/Index.md](Doc/Index.md)
 - 开发规范：[Doc/开发规范.md](Doc/开发规范.md)
 - 采集模块详解：[data/carla_data_collector/README.md](data/carla_data_collector/README.md)
+- 闭环模块详解：[clone_loop/README.md](clone_loop/README.md)
 
 项目要求可调参数集中到 `config/`，Python 实现文件使用中文注释/docstring，新增或删除文件时同步维护
 `Doc/Index.md`，输入检查放在模块邻近的 `checks/` 目录。
