@@ -7,7 +7,7 @@
     clone_loop.worker.carla_host / carla_port / startup_timeout_s / command_timeout_s
     clone_loop.simulation.map / fixed_delta_seconds / warmup_ticks / max_steps / random_weather
     clone_loop.route.* / traffic.num_vehicles / vehicle_filter / tm_port
-    clone_loop.ego.vehicle_filter / camera.* / safety.*
+    clone_loop.ego.vehicle_filter / camera.* / safety.max_route_deviation_m
     model.driving.bev.fov_deg
 对外接口:
     - CarlaRuntime(cfg, shared_frame)
@@ -86,7 +86,6 @@ class CarlaRuntime:
         self._navigator = RouteNavigator(
             self._world.get_map(), route["start"], route["end"], self._cfg.route)
         self._steps = 0
-        self._stuck_steps = 0
         self._distance = 0.0
         self._last_location = self._ego.get_location()
 
@@ -117,9 +116,6 @@ class CarlaRuntime:
         current = self._ego.get_location()
         self._distance += current.distance(self._last_location)
         self._last_location = current
-        speed = _speed(self._ego)
-        self._stuck_steps = self._stuck_steps + 1 \
-            if speed <= self._cfg.safety.stuck_speed_mps else 0
         navigation = self._navigator.observe(self._ego.get_transform())
         return self._observation(self._status(navigation), navigation)
 
@@ -130,8 +126,6 @@ class CarlaRuntime:
             return P.STATUS_SUCCESS
         if navigation["route_deviation_m"] > self._cfg.safety.max_route_deviation_m:
             return P.STATUS_OFF_ROUTE
-        if self._stuck_steps >= self._cfg.safety.stuck_steps:
-            return P.STATUS_STUCK
         if self._steps >= self._cfg.simulation.max_steps:
             return P.STATUS_MAX_STEPS
         return P.STATUS_RUNNING

@@ -17,7 +17,7 @@ import json
 __all__ = [
     "CMD_INIT", "CMD_QUERY_ROUTES", "CMD_RESET", "CMD_STEP", "CMD_SHUTDOWN",
     "STATUS_RUNNING", "STATUS_SUCCESS", "STATUS_COLLISION", "STATUS_MAX_STEPS",
-    "STATUS_OFF_ROUTE", "STATUS_STUCK",
+    "STATUS_OFF_ROUTE", "STATUS_MANUAL",
     "make_command", "make_response", "write_message", "read_message",
 ]
 
@@ -33,7 +33,7 @@ STATUS_SUCCESS = "success"
 STATUS_COLLISION = "collision"
 STATUS_MAX_STEPS = "max_steps"
 STATUS_OFF_ROUTE = "off_route"
-STATUS_STUCK = "stuck"
+STATUS_MANUAL = "manual_stop"
 
 
 def make_command(cmd, **args):

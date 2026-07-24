@@ -617,8 +617,6 @@ class CloneControlCfg:
 @dataclass
 class CloneSafetyCfg:
     max_route_deviation_m: float
-    stuck_speed_mps: float
-    stuck_steps: int
 
 
 @dataclass
@@ -820,8 +818,8 @@ def _validate_clone_loop(cl, model, data):
                 for index in control.behavior_stop_indices), \
         "clone_loop.control 停车行为阈值/索引取值非法"
     safety = cl.safety
-    assert safety.max_route_deviation_m > 0 and safety.stuck_speed_mps >= 0 \
-        and safety.stuck_steps > 0, "clone_loop.safety 参数取值非法"
+    assert safety.max_route_deviation_m > 0, \
+        "clone_loop.safety.max_route_deviation_m 必须 > 0"
     recording = cl.recording
     assert isinstance(recording.enabled, bool), "clone_loop.recording.enabled 必须为布尔值"
     assert recording.codec and 0 <= recording.crf <= 51, \

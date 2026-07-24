@@ -490,8 +490,6 @@ clone_loop:
 
   safety:
     max_route_deviation_m: 8.0
-    stuck_speed_mps: 0.1
-    stuck_steps: 200
 
   recording:
     enabled: true

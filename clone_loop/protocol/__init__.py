@@ -17,10 +17,10 @@ from clone_loop.protocol.protocol import (
     CMD_SHUTDOWN,
     CMD_STEP,
     STATUS_COLLISION,
+    STATUS_MANUAL,
     STATUS_MAX_STEPS,
     STATUS_OFF_ROUTE,
     STATUS_RUNNING,
-    STATUS_STUCK,
     STATUS_SUCCESS,
     make_command,
     make_response,
@@ -30,7 +30,7 @@ from clone_loop.protocol.protocol import (
 
 __all__ = [
     "CMD_INIT", "CMD_QUERY_ROUTES", "CMD_RESET", "CMD_SHUTDOWN", "CMD_STEP",
-    "STATUS_COLLISION", "STATUS_MAX_STEPS", "STATUS_OFF_ROUTE", "STATUS_RUNNING",
-    "STATUS_STUCK", "STATUS_SUCCESS", "make_command", "make_response", "read_message",
+    "STATUS_COLLISION", "STATUS_MANUAL", "STATUS_MAX_STEPS", "STATUS_OFF_ROUTE",
+    "STATUS_RUNNING", "STATUS_SUCCESS", "make_command", "make_response", "read_message",
     "write_message",
 ]

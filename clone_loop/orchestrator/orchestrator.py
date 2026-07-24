@@ -1,7 +1,8 @@
 """串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志。
 
 模块: clone_loop/orchestrator/orchestrator.py
-依赖: dataclasses, os, pathlib, numpy, clone_loop.client/control/inference/logger/protocol/recorder/routes/shared_frame,
+依赖: dataclasses, os, pathlib, select, sys, numpy,
+      clone_loop.client/control/inference/logger/protocol/recorder/routes/shared_frame,
       clone_loop.orchestrator.checks.orchestrator_checks
 读取配置:
     clone_loop.worker.python_exe
@@ -19,6 +20,8 @@
 from dataclasses import asdict
 import os
 from pathlib import Path
+import select
+import sys
 
 import numpy as np
 
@@ -57,12 +60,30 @@ def _frame_array(shared, height, width):
     return np.frombuffer(shared.read(), dtype=np.uint8).reshape(height, width, 3).copy()
 
 
+def _manual_stop_requested():
+    """非阻塞读取控制台；Windows 单按 q，其他终端输入 q 后回车。"""
+    if sys.stdin is None or not sys.stdin.isatty():
+        return False
+    if os.name == "nt":
+        import msvcrt
+        requested = False
+        while msvcrt.kbhit():
+            requested = msvcrt.getwch().lower() == "q" or requested
+        return requested
+    readable, _, _ = select.select([sys.stdin], [], [], 0.0)
+    return bool(readable and sys.stdin.readline().strip().lower() == "q")
+
+
 def _episode(worker, shared, policy, controller, recorder, logger, route, seed, cfg):
     """运行一条路线直至 worker 返回终态，并返回 episode 汇总。"""
     policy.reset()
     controller.reset()
     observation = worker.reset(seed, route)
     while observation["status"] == P.STATUS_RUNNING:
+        if _manual_stop_requested():
+            observation = dict(observation, status=P.STATUS_MANUAL)
+            print("[clone_loop] 已手动结束当前 episode")
+            break
         frame = _frame_array(shared, cfg.camera.height, cfg.camera.width)
         decision = policy.infer(frame, observation)
         command = controller.command(
@@ -108,6 +129,8 @@ def run_closed_loop(cfg, max_episodes_override=None):
         check_routes(routes)
         policy = ClosedLoopPolicy(cfg)
         print("[clone_loop] 路线数: {}".format(len(routes)))
+        if sys.stdin is not None and sys.stdin.isatty():
+            print("[clone_loop] 运行中按 q 可结束当前 episode 并继续下一条路线")
         for index, route in enumerate(routes):
             seed = cl.simulation.base_seed + index
             logger.start_episode(index, route, seed)
