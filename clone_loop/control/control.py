@@ -4,7 +4,8 @@
 依赖: math, numpy, clone_loop.control.checks.control_checks
 读取配置:
     clone_loop.control.waypoint_dt_s / speed_horizon / min_target_speed_mps / max_target_speed_mps
-    clone_loop.control.lookahead_m / wheelbase_m / max_steer_angle_deg / steer_smoothing
+    clone_loop.control.lookahead_m / wheelbase_m / max_steer_angle_deg / turn_steer_gain /
+        steer_smoothing
     clone_loop.control.longitudinal_kp / longitudinal_ki / longitudinal_kd / integral_limit
     clone_loop.control.max_throttle / max_brake / brake_deadband_mps
     clone_loop.control.behavior_stop_threshold / behavior_stop_indices
@@ -71,7 +72,8 @@ class TrajectoryController:
         curvature = 2.0 * float(target[1]) / lookahead_sq
         wheel_angle = math.atan(self._cfg.wheelbase_m * curvature)
         raw = float(np.clip(
-            wheel_angle / math.radians(self._cfg.max_steer_angle_deg), -1.0, 1.0))
+            self._cfg.turn_steer_gain
+            * wheel_angle / math.radians(self._cfg.max_steer_angle_deg), -1.0, 1.0))
         smooth = (self._cfg.steer_smoothing * self._previous_steer
                   + (1.0 - self._cfg.steer_smoothing) * raw)
         self._previous_steer = smooth

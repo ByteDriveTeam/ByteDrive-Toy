@@ -476,6 +476,7 @@ clone_loop:
     lookahead_m: 6.0
     wheelbase_m: 2.85
     max_steer_angle_deg: 70.0
+    turn_steer_gain: 0.96        # 略减左右弯转角，使车辆相对原控制结果向弯道外侧修正
     steer_smoothing: 0.35
     longitudinal_kp: 0.45
     longitudinal_ki: 0.05

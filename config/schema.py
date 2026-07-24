@@ -601,6 +601,7 @@ class CloneControlCfg:
     lookahead_m: float
     wheelbase_m: float
     max_steer_angle_deg: float
+    turn_steer_gain: float
     steer_smoothing: float
     longitudinal_kp: float
     longitudinal_ki: float
@@ -807,7 +808,8 @@ def _validate_clone_loop(cl, model, data):
     assert history_steps >= 1 and abs(history_steps - round(history_steps)) < 1e-6, \
         "clone_loop.control.waypoint_dt_s 必须是仿真固定步长的正整数倍"
     assert control.lookahead_m > 0 and control.wheelbase_m > 0 \
-        and 0 < control.max_steer_angle_deg < 90, \
+        and 0 < control.max_steer_angle_deg < 90 \
+        and 0 < control.turn_steer_gain <= 1, \
         "clone_loop.control 横向控制参数取值非法"
     assert 0 <= control.steer_smoothing < 1 and control.integral_limit >= 0 \
         and 0 < control.max_throttle <= 1 and 0 < control.max_brake <= 1 \
