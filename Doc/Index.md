@@ -106,6 +106,8 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/client/client.py](../clone_loop/client/client.py) — 派生 Py37 CARLA worker，并以同步 JSON RPC 驱动闭环 episode
 - [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — 闭环逐步日志与汇总写入器的公开 API 重导出入口
 - [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总
+- [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — 闭环驾驶与逐帧推理录像器的公开 API 重导出入口
+- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码前向驾驶实况，并合成模型全部在线推理输出的诊断录像
 - [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
 - [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志
 

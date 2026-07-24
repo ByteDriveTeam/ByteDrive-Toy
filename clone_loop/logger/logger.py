@@ -7,7 +7,7 @@
     - RunLogger(output_root)
         .start_episode(index, route, seed) -> None
         .write_step(observation, command, decision) -> None
-        .finish_episode(observation) -> dict
+        .finish_episode(observation, artifacts=None) -> dict
         .finish_run() -> dict
         .close() -> None
 """
@@ -52,10 +52,12 @@ class RunLogger:
                 "mode_scores": decision["mode_scores"].tolist(),
                 "confidence": decision["confidence"].tolist(),
                 "behavior_probabilities": decision["behavior_probabilities"].tolist(),
+                "history_valid": decision["history_valid"],
+                "selected_trajectory": decision["trajectory"].tolist(),
             },
         })
 
-    def finish_episode(self, observation):
+    def finish_episode(self, observation, artifacts=None):
         """关闭当前 JSONL 并返回该 episode 的终态摘要。"""
         summary = {
             **self._episode,
@@ -66,6 +68,7 @@ class RunLogger:
             "lane_invasions": observation["lane_invasions"],
             "end_distance_m": observation["end_distance_m"],
             "max_route_deviation_m": self._max_deviation,
+            "artifacts": artifacts or {},
         }
         self._write({"type": "summary", **summary})
         self._stream.close()

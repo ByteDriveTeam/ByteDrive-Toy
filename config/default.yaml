@@ -492,6 +492,12 @@ clone_loop:
     stuck_speed_mps: 0.1
     stuck_steps: 200
 
+  recording:
+    enabled: true
+    codec: libx265                  # 驾驶实况与推理面板均编码为 H.265 MP4
+    crf: 23
+    tile_size_px: 256              # 推理录像每个 BEV 面板的边长；最终画布为 3×3 面板
+
   output:
     root: clone_loop/out
     log_every: 20

@@ -621,6 +621,14 @@ class CloneSafetyCfg:
 
 
 @dataclass
+class CloneRecordingCfg:
+    enabled: bool
+    codec: str
+    crf: int
+    tile_size_px: int
+
+
+@dataclass
 class CloneOutputCfg:
     root: str
     log_every: int
@@ -638,6 +646,7 @@ class CloneLoopCfg:
     inference: CloneInferenceCfg
     control: CloneControlCfg
     safety: CloneSafetyCfg
+    recording: CloneRecordingCfg
     output: CloneOutputCfg
 
 
@@ -811,6 +820,12 @@ def _validate_clone_loop(cl, model, data):
     safety = cl.safety
     assert safety.max_route_deviation_m > 0 and safety.stuck_speed_mps >= 0 \
         and safety.stuck_steps > 0, "clone_loop.safety 参数取值非法"
+    recording = cl.recording
+    assert isinstance(recording.enabled, bool), "clone_loop.recording.enabled 必须为布尔值"
+    assert recording.codec and 0 <= recording.crf <= 51, \
+        "clone_loop.recording.codec 不得为空且 crf 必须在 [0,51]"
+    assert recording.tile_size_px > 0 and recording.tile_size_px % 2 == 0, \
+        "clone_loop.recording.tile_size_px 必须为正偶数"
     assert cl.output.log_every > 0, "clone_loop.output.log_every 必须 > 0"
     assert len(data.dataset.dino_mean) == 3 and len(data.dataset.dino_std) == 3, \
         "闭环 RGB 归一化要求 data.dataset.dino_mean/std 为三通道"

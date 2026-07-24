@@ -1,7 +1,7 @@
 """串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志。
 
 模块: clone_loop/orchestrator/orchestrator.py
-依赖: dataclasses, os, pathlib, numpy, clone_loop.client/control/inference/logger/protocol/routes/shared_frame,
+依赖: dataclasses, os, pathlib, numpy, clone_loop.client/control/inference/logger/protocol/recorder/routes/shared_frame,
       clone_loop.orchestrator.checks.orchestrator_checks
 读取配置:
     clone_loop.worker.python_exe
@@ -33,6 +33,7 @@ from clone_loop.orchestrator.checks.orchestrator_checks import (
     check_output_root,
     check_routes,
 )
+from clone_loop.recorder import EpisodeRecorder
 from clone_loop.routes import build_route_queue
 from clone_loop.shared_frame import SharedFrame
 
@@ -56,7 +57,7 @@ def _frame_array(shared, height, width):
     return np.frombuffer(shared.read(), dtype=np.uint8).reshape(height, width, 3).copy()
 
 
-def _episode(worker, shared, policy, controller, logger, route, seed, cfg):
+def _episode(worker, shared, policy, controller, recorder, logger, route, seed, cfg):
     """运行一条路线直至 worker 返回终态，并返回 episode 汇总。"""
     policy.reset()
     controller.reset()
@@ -67,13 +68,17 @@ def _episode(worker, shared, policy, controller, logger, route, seed, cfg):
         command = controller.command(
             decision["trajectory"], observation["speed_mps"],
             decision["behavior_probabilities"])
+        recorder.write(frame, decision, observation, command)
         observation = worker.step(command)
         logger.write_step(observation, command, decision)
         if observation["step"] % cfg.output.log_every == 0:
             print("[clone_loop] step={} progress={:.1%} speed={:.2f}m/s mode={}".format(
                 observation["step"], observation["route_completion"],
                 observation["speed_mps"], decision["mode"]))
-    return logger.finish_episode(observation)
+    recorder.write_terminal(_frame_array(
+        shared, cfg.camera.height, cfg.camera.width))
+    recorder.close()
+    return logger.finish_episode(observation, recorder.artifacts)
 
 
 def run_closed_loop(cfg, max_episodes_override=None):
@@ -108,8 +113,12 @@ def run_closed_loop(cfg, max_episodes_override=None):
             logger.start_episode(index, route, seed)
             print("[clone_loop] episode={} route={}->{} seed={}".format(
                 index, route["start_idx"], route["end_idx"], seed))
-            summary = _episode(
-                worker, shared, policy, controller, logger, route, seed, cl)
+            recorder = EpisodeRecorder(logger.run_dir, index, cfg)
+            try:
+                summary = _episode(
+                    worker, shared, policy, controller, recorder, logger, route, seed, cl)
+            finally:
+                recorder.close()
             print("[clone_loop] episode={} status={} progress={:.1%} steps={}".format(
                 index, summary["status"], summary["route_completion"], summary["steps"]))
         aggregate = logger.finish_run()

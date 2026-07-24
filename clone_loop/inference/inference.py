@@ -6,6 +6,7 @@
 读取配置:
     clone_loop.inference.checkpoint / device / min_weight_coverage / confidence_weight /
         risk_weight / drivable_weight / route_alignment_weight / max_abs_waypoint_m
+    clone_loop.recording.enabled
     clone_loop.camera.width / height
     clone_loop.control.waypoint_dt_s / clone_loop.simulation.fixed_delta_seconds
     data.dataset.dino_mean / dino_std
@@ -45,6 +46,7 @@ class ClosedLoopPolicy:
         self._cfg = cfg
         self._inference_cfg = cfg.clone_loop.inference
         self._camera_cfg = cfg.clone_loop.camera
+        self._record_outputs = cfg.clone_loop.recording.enabled
         self._device = self._resolve_device(self._inference_cfg.device)
         self._mean = torch.tensor(
             cfg.data.dataset.dino_mean, dtype=torch.float32).view(3, 1, 1)
@@ -113,6 +115,7 @@ class ClosedLoopPolicy:
             outputs = self._model(**inputs)
             selected, scores = self._select(outputs, inputs["target_point"])
             behavior = torch.sigmoid(outputs["behavior_logits"][0])
+            visualization = self._visualization(outputs) if self._record_outputs else None
 
         self._history.append((current_rgb.detach(), current_pose.copy()))
         return {
@@ -121,7 +124,30 @@ class ClosedLoopPolicy:
             "mode": int(selected),
             "mode_scores": scores.float().cpu().numpy(),
             "confidence": outputs["confidence"][0].float().cpu().numpy(),
+            "history_valid": bool(history_ready),
+            "visualization": visualization,
         }
+
+    @staticmethod
+    def _visualization(outputs):
+        """把每帧模型多任务输出转成录像渲染所需的紧凑 CPU 数组。"""
+        fields = {
+            name: torch.sigmoid(outputs[name][0, 0].float()).cpu().numpy()
+            for name in ("risk", "drivable", "distribution")
+        }
+        direction = outputs["lane_direction"][0].float()
+        direction = direction / torch.linalg.vector_norm(
+            direction, dim=0, keepdim=True).clamp_min(1e-12)
+        fields.update({
+            "trajectories": outputs["trajectories"][0].float().cpu().numpy(),
+            "lane_class": outputs["lane_class_logits"][0].argmax(dim=0).cpu().numpy(),
+            "lane_direction": direction.cpu().numpy(),
+            "stop_line": torch.sigmoid(
+                outputs["stop_line_logits"][0, 0].float()).cpu().numpy(),
+            "traffic_state": outputs["traffic_light_state_logits"][0].argmax(
+                dim=0).cpu().numpy(),
+        })
+        return fields
 
     def _normalize(self, bgr):
         """BGR uint8 → DINO 所需的归一化 RGB `[1,3,H,W]`。"""
