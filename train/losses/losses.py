@@ -38,6 +38,7 @@ from train.losses.checks.losses_checks import check_driving_losses_io, check_los
 __all__ = ["compute_losses", "compute_driving_losses"]
 
 _MASK_EPS = 1.0  # 掩码归一分母下限：一帧全超范围时避免除零，且不放大极少数有效像素的损失
+_VECTOR_EPS = 1e-6  # 向量运算仅需规避零模长，不能沿用掩码计数下限
 _DIST_WEIGHT_MIN = 0.1  # 距离加权下限：depth=depth_max_m 处的权重，近处线性升至 1
 
 
@@ -203,9 +204,9 @@ def _traffic_control_losses(outputs, targets, cfg, inview):
 
 def _lane_direction_loss(pred, target, lane_class, inview):
     """仅道路线像素上的有向余弦距离；`v` 与 `-v` 不等价，保留真实行驶方向。"""
-    pred_unit = F.normalize(pred, dim=1, eps=_MASK_EPS)
-    target_unit = F.normalize(target, dim=1, eps=_MASK_EPS)
-    direction_valid = target.square().sum(1) > _MASK_EPS
+    pred_unit = F.normalize(pred, dim=1, eps=_VECTOR_EPS)
+    target_unit = F.normalize(target, dim=1, eps=_VECTOR_EPS)
+    direction_valid = target.square().sum(1) > _VECTOR_EPS ** 2
     mask = ((lane_class > 0) & direction_valid).to(pred.dtype) * inview
     per = (1.0 - (pred_unit * target_unit).sum(1)) * mask
     return per.sum() / mask.sum().clamp_min(_MASK_EPS)
