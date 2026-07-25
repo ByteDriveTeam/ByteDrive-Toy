@@ -417,7 +417,7 @@ road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Bro
 读取每盏灯的 `get_affected_lane_waypoints()` 与 `get_stop_waypoints()`，再和 BehaviorAgent 当前规划匹配，
 直接记录路线最先到达的原生停止 waypoint；离线端据其位置、方向和车道宽度生成停止线。历史数据没有该字段时，
 自动回退到 HD Map `Trigger_Volumes/TrafficLight` 四边形与当前路线走廊相交的旧算法，多候选仍取沿路线
-最先到达者，无需迁移旧 LMDB。红灯状态始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于
+最先到达者；该走廊默认沿未来专家路线搜索 64 m，无需迁移旧 LMDB。红灯状态始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于
 “反应距离 + 舒适制动距离 + 安全余量”时激活，避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
 
 #### 7. 条件化多 Mode 规划 Token
@@ -583,7 +583,7 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | 模型输入 | `previous_to_current/previous_valid` | 上一帧 ego xy 到当前 ego xy 的 `3×3` 刚性矩阵及有效位 |
 | 模型输入 | `intrinsics` | `[fx,fy,cx,cy]` |
 | 模型输入 | `extrinsics` | 相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
-| 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，同时用于规划条件和路线相关监督 |
+| 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，用作规划条件 |
 | 模型输入 | `ego_velocity` | 世界速度旋转到当前 ego 系后的 `[vₓ,vᵧ]` |
 | 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算 |
 | 行为监督 | `behavior` | 8 类多热向量 |

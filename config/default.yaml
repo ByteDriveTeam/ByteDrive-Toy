@@ -74,9 +74,9 @@ carla_collector:
 
   # 语义分割 Lidar（sensor.lidar.ray_cast_semantic）
   lidar:
-    enabled: false              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
+    enabled: true              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
     channels: 64
-    range_m: 100.0
+    range_m: 64.0
     points_per_second: 1300000
     rotation_frequency: 10.0   # 与 1/fixed_delta_seconds 对齐，保证每帧一整圈
     upper_fov: 10.0
@@ -305,6 +305,7 @@ data:
         "NONE": 3            # 地图中未细分样式的道路边界
       unknown_class: 4        # 其余非 Trigger_Volumes 道路标线
     traffic_control:
+      route_lookahead_m: 64.0       # 旧数据回退：未来专家路线走廊的前向搜索弧长
       route_corridor_m: 0.75        # 路线中心线膨胀半宽；触发区与该走廊相交才视为相关
       line_expand_m: 0.50           # 停止区栅格额外膨胀半径，缓解 256×256 细线正样本稀疏
       actor_match_radius_m: 0.10    # HD Map ParentActor 与采集交通灯 actor 的世界平面匹配半径

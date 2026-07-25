@@ -395,6 +395,7 @@ class LaneMapTargetCfg:
 
 @dataclass
 class TrafficControlTargetCfg:
+    route_lookahead_m: float        # 旧数据路线走廊前向搜索弧长
     route_corridor_m: float         # 路线与停止区相关性判定的走廊半宽
     line_expand_m: float            # 栅格化停止区的额外膨胀半径
     actor_match_radius_m: float     # 地图 ParentActor 与场景交通灯 actor 匹配半径
@@ -913,10 +914,11 @@ def _validate_data(data, model_lane):
                                       for i in class_ids), \
         "data.driving.lane_map 类别索引须落在 model.driving.lane_map.class_names 的非背景范围"
     traffic = dr.traffic_control
-    assert traffic.route_corridor_m > 0 and traffic.line_expand_m >= 0 \
+    assert traffic.route_lookahead_m > 0 and traffic.route_corridor_m > 0 \
+        and traffic.line_expand_m >= 0 \
         and traffic.actor_match_radius_m > 0 and traffic.stop_margin_m >= 0 \
         and traffic.reaction_time_s >= 0 and traffic.comfortable_decel_mps2 > 0, \
-        "data.driving.traffic_control 走廊/膨胀/匹配/制动参数取值非法"
+        "data.driving.traffic_control 前视/走廊/膨胀/匹配/制动参数取值非法"
     assert dr.box_min_visible_pixels >= 10, \
         "data.driving.box_min_visible_pixels 必须 >= 10"
     assert "{map}" in dr.map_name_template, \

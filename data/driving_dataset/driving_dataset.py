@@ -8,8 +8,8 @@
         dist_sigma_m / lane_half_width_m
     data.scene_cache_size
     data.driving.lane_map.line_width_m / type_to_class / unknown_class
-    data.driving.traffic_control.route_corridor_m / line_expand_m / actor_match_radius_m / stop_margin_m /
-        reaction_time_s / comfortable_decel_mps2
+    data.driving.traffic_control.route_lookahead_m / route_corridor_m / line_expand_m /
+        actor_match_radius_m / stop_margin_m / reaction_time_s / comfortable_decel_mps2
     data.driving.box_min_visible_pixels
     data.driving.target_min_m / target_max_m（目标点采样距离窗口）
     data.driving.behavior.stationary_speed_mps / acceleration_threshold_mps2 / turn_angle_deg /
@@ -211,15 +211,20 @@ class DrivingDataset(SingleFrameSceneBase):
         return ego_pt[0, :2].astype(np.float32)
 
     def _route_polyline(self, poses, frame_idx, pose, target_point):
-        """截取未来专家路径的目标距离窗口；长时间等灯时仍能延伸到路口之后。"""
+        """按旧版交通控制前视距离截取未来专家路径；长时间等灯时仍能延伸到路口之后。"""
         future = poses[frame_idx + 1:, :3]
         future_ego = transform_points(future, world_to_ego(pose))[:, :2].astype(np.float32)
         route = np.vstack((np.zeros((1, 2), dtype=np.float32), future_ego))
-        arclength = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))]
-        end = min(int(np.searchsorted(arclength, self._target_max, side="right")) + 1, len(route))
-        route = route[:end]
         if len(route) < 2 or np.linalg.norm(target_point) > np.linalg.norm(route[-1]) + 1e-3:
             route = np.vstack((route, target_point))
+        arclength = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))]
+        lookahead = self._traffic_cfg.route_lookahead_m
+        end = int(np.searchsorted(arclength, lookahead, side="left"))
+        if end < len(route):
+            start = end - 1
+            ratio = (lookahead - arclength[start]) / (arclength[end] - arclength[start])
+            boundary = route[start] + ratio * (route[end] - route[start])
+            route = np.vstack((route[:end], boundary.astype(np.float32)))
         return route
 
     def _traffic_targets(self, hd_map, poses, frame_idx, pose, target_point, meta, frame, speed_mps):
