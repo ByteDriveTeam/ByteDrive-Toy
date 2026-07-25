@@ -79,7 +79,8 @@ def _run_chunk(state):
     try:
         status, frames = collect.collect_chunk(
             drive["world"], drive["ego"], drive["agent"], drive["rig"], drive["crowd"],
-            drive["traffic_lights"], state["allocator"], cc.collection,
+            drive["traffic_lights"], drive["traffic_light_metadata"],
+            state["allocator"], cc.collection,
             cc.worker.command_timeout_s, drive["counters"])
     except Exception:
         _cleanup_drive(state)  # 采集中途异常也要销毁 actor，避免泄漏

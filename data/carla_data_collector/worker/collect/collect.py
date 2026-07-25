@@ -1,38 +1,31 @@
 """单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引。
 
 模块: worker/collect/collect.py
-依赖: carla, numpy, common.protocol, common.shm, worker.annotations, worker.geometry, worker.collect.checks.collect_checks
+依赖: numpy, common.protocol, common.shm, worker.annotations, worker.traffic_control,
+      worker.collect.checks.collect_checks
 读取配置: 由调用方接收 simulation(warmup_ticks/fixed_delta) 与 collection(max_frames/capture_every_n)，自身不读 config
 对外接口:
     - prepare_drive(world, agent, sim_cfg, destination)
         -> (reachable, static_bboxes, traffic_lights, traffic_light_metadata)
-    - collect_chunk(world, ego, agent, rig, crowd, traffic_lights, allocator, collection_cfg,
-                    timeout_s, counters) -> (status, frames)
+    - collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
+                    allocator, collection_cfg, timeout_s, counters) -> (status, frames)
 说明: 大块张量（RGB/Depth/语义图/光流/语义Lidar）写入 arena（仅记 offset/size/shape/dtype）；小元数据（位姿/控制/
-      包围框/交通灯状态）内联进帧索引随控制管道回传。RGB 与 Depth 均存 BGR 三通道（丢 alpha 省内存），depth 的
+      包围框/交通灯状态/当前路线相关控制点）内联进帧索引随控制管道回传。RGB 与 Depth 均存 BGR 三通道
+      （丢 alpha 省内存），depth 的
       编码值交由 collector 解码；语义图只取标签所在的 R 通道存单通道 uint8（标签已是最终值，无需解码）；
       光流存 (H,W,2) float32 运动矢量、无需解码。实际采集哪些模态由 config 开关决定，本文件按 sample 中的 key 自适应。
       一次行驶被切成多段：每填满一次 arena 即返回 partial（本段落盘后复用同一世界续采）；counters 跨段
       累计帧数与 tick，故总帧上限与采样节拍按整次行驶统计。碰撞→当前未落盘段丢弃、行驶结束（Design ④）。
 """
 
-import carla
 import numpy as np
 
 from common import protocol as P
 from common.shm import ArenaFull
-from worker import annotations
-from worker.geometry import transform_to_list
+from worker import annotations, traffic_control
 from worker.collect.checks.collect_checks import check_destination
 
 _LIDAR_ITEMSIZE = np.dtype(P.SEMANTIC_LIDAR_DTYPE).itemsize
-_TRAFFIC_LIGHT_STATE_NAMES = {
-    int(carla.TrafficLightState.Red): "red",
-    int(carla.TrafficLightState.Yellow): "yellow",
-    int(carla.TrafficLightState.Green): "green",
-    int(carla.TrafficLightState.Off): "off",
-    int(carla.TrafficLightState.Unknown): "unknown",
-}
 
 
 def _camera_bgr(image):
@@ -95,32 +88,6 @@ def _ego_state(ego):
     }
 
 
-def _traffic_light_metadata(traffic_lights):
-    """生成交通灯静态元数据；触发区位置转换到世界坐标，供下游计算主车距离。"""
-    metadata = []
-    for light in traffic_lights:
-        transform = light.get_transform()
-        trigger = light.trigger_volume
-        trigger_location = carla.Location(
-            x=trigger.location.x, y=trigger.location.y, z=trigger.location.z)
-        transform.transform(trigger_location)
-        metadata.append({
-            "id": light.id,
-            "transform": transform_to_list(transform),
-            "trigger_location": [trigger_location.x, trigger_location.y, trigger_location.z],
-            "trigger_extent": [trigger.extent.x, trigger.extent.y, trigger.extent.z],
-        })
-    return metadata
-
-
-def _traffic_light_states(traffic_lights):
-    """读取当前仿真帧内全部交通灯状态，保持按 actor ID 排序的稳定顺序。"""
-    state_codes = [int(light.state) for light in traffic_lights]
-    return [{"id": light.id, "state": _TRAFFIC_LIGHT_STATE_NAMES.get(code, "unknown"),
-             "state_code": code}
-            for light, code in zip(traffic_lights, state_codes)]
-
-
 def prepare_drive(world, agent, sim_cfg, destination):
     """一次行驶的准备：预热、设目标、可达性判定、采静态框与交通灯。仅在 start_scene 调一次。
 
@@ -142,17 +109,18 @@ def prepare_drive(world, agent, sim_cfg, destination):
         return False, [], [], []  # 规划不出路线，交由 collector 换组合/种子
     traffic_lights = sorted(world.get_actors().filter("*traffic_light*"), key=lambda light: light.id)
     return (True, annotations.static_bboxes(world), traffic_lights,
-            _traffic_light_metadata(traffic_lights))
+            traffic_control.traffic_light_metadata(traffic_lights))
 
 
-def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, allocator, collection_cfg,
-                  timeout_s, counters):
+def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
+                  allocator, collection_cfg, timeout_s, counters):
     """采集一段（填满一次 arena 为止）。counters 跨段累计，使总帧上限/采样节拍按整次行驶统计。
 
     参数:
         world/ego/agent/rig: 已布置好的世界、主车、行为体、传感器阵列
         crowd:     行人群管理器（WalkerCrowd），逐 tick 重派到达者目标使行人持续漫游
         traffic_lights: 场景准备阶段缓存的全部交通灯 actor（按 ID 排序）
+        traffic_light_metadata: 原生受控车道与停止点等场景级交通灯元数据
         allocator: 写入共享内存的顺序分配器（调用前须已 reset，本段写满即返回 partial）
         collection_cfg: collection 配置片段（max_frames_per_scene 为整次行驶总帧上限 / capture_every_n_ticks）
         timeout_s: 单次 gather 等待传感器的超时
@@ -183,13 +151,16 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, allocator, coll
             # 触发越界的这一帧已 tick/gather 但只部分写入，直接丢弃（下一段从新 tick 重采）。
             return P.STATUS_PARTIAL, frames
 
+        traffic_states = traffic_control.traffic_light_states(traffic_lights)
         frames.append({
             "frame_id": frame_id,
             "sim_time": world.get_snapshot().timestamp.elapsed_seconds,
             "ego": _ego_state(ego),
             "blobs": blobs,
             "bboxes": annotations.dynamic_bboxes(world, ego.id),
-            "traffic_light_states": _traffic_light_states(traffic_lights),
+            "traffic_light_states": traffic_states,
+            "relevant_traffic_control": traffic_control.relevant_traffic_control(
+                ego, agent, traffic_light_metadata, traffic_states),
         })
         counters["total"] += 1
 

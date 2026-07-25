@@ -11,6 +11,7 @@
       才换种子重试（Design ④）。读帧时用生成器惰性消费 arena，使内存只驻留一帧（深度解码、lidar 还原
       均在此 Py312 侧做）。RGB→mp4、其余→LMDB（Design ⑧）；具体落哪些模态由 cameras.modalities 与
       lidar.enabled 开关决定（关闭即不读盘、不落盘，RGB 关则无 mp4），光流与深度同法逐相机入 LMDB。
+      worker 生成的 CARLA 原生路线相关交通控制点随帧元数据落盘；字段缺失不补默认值，使下游能识别旧数据。
 """
 
 import os
@@ -76,10 +77,14 @@ def _frame_payloads(arena, frames, cam_names, mods, lidar_on):
                            for cam in cam_names})
         if lidar_on:
             arrays["lidar"] = np.array(_blob_array(arena, fr["blobs"]["lidar"]))  # 拷出结构化数组
-        yield {"meta": {"frame_id": fr["frame_id"], "sim_time": fr["sim_time"],
-                        "ego": fr["ego"], "bboxes": fr["bboxes"],
-                        "traffic_light_states": fr["traffic_light_states"]},
-               "arrays": arrays}
+        metadata = {
+            "frame_id": fr["frame_id"], "sim_time": fr["sim_time"],
+            "ego": fr["ego"], "bboxes": fr["bboxes"],
+            "traffic_light_states": fr["traffic_light_states"],
+        }
+        if "relevant_traffic_control" in fr:
+            metadata["relevant_traffic_control"] = fr["relevant_traffic_control"]
+        yield {"meta": metadata, "arrays": arrays}
 
 
 def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on):

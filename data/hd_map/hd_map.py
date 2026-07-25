@@ -16,8 +16,9 @@
       解析世界系 xyz、Type 与每点 yaw 对应的有向单位切向量。栅格化时按 ego 世界位姿把折线与方向搬到 ego 系
       （复用 vis.data_vis.geometry 的 CARLA
       变换，避免重复实现），投到 BEV 像素后用 cv2 粗线（宽 = 2·车道半宽）画出，其并集近似路面可行驶区域——
-      稠密且不受语义投影稀疏之苦（用户口径）。交通灯相关性由「触发区与当前路线走廊相交」确定；若多条相交，取沿
-      路线弧长最先到达者，避免横向道路或转弯后的灯误关联。逐折线用外接圆半径对 ego 做粗过滤，仅栅格化附近折线。
+      稠密且不受语义投影稀疏之苦（用户口径）。新数据直接消费采集端按 CARLA 受控车道与 Agent 规划选出的
+      停止 waypoint；字段缺失的旧数据才用「触发区与当前路线走廊相交」回退，多候选取路线弧长最先到达者。
+      逐折线用外接圆半径对 ego 做粗过滤，仅栅格化附近折线。
 """
 
 from __future__ import annotations
@@ -108,14 +109,18 @@ class HdMap:
 
     def traffic_control_bev(self, ego_pose6, route_xy, traffic_lights, states,
                             bev: BevParams, route_corridor_m: float, line_expand_m: float,
-                            actor_match_radius_m: float, state_names):
+                            actor_match_radius_m: float, state_names, relevant_control=None):
         """生成与当前路线相关的交通灯停止区及状态监督。
 
-        相关性要求触发区位于 ego 前方、落入 BEV，且与路线走廊相交；多候选取沿路线投影弧长最小者。
-        返回的停止点是原始触发区中心，方向取路线在该处的切向，供红灯越线损失定义线前/线后。
+        新数据传入 relevant_control 时直接栅格化 CARLA 原生停止 waypoint；即使其 valid=false 也不回退，
+        避免把“明确无相关灯”误解成“缺少标注”。旧数据字段缺失（None）时沿用触发区与路线走廊相交算法。
         """
-        check_traffic_control_inputs(route_xy, state_names)
+        check_traffic_control_inputs(route_xy, state_names, relevant_control)
         out = _empty_traffic_control(bev)
+        if relevant_control is not None:
+            return _native_traffic_control(
+                relevant_control, ego_pose6, bev, line_expand_m, state_names, out)
+
         route = _clean_route(route_xy)
         if len(route) < 2 or not self._control_polygons:
             return out
@@ -204,6 +209,46 @@ def _empty_traffic_control(bev):
         "stop_distance": np.float32(0.0),
         "red_stop_valid": np.float32(0.0),
     }
+
+
+def _native_stop_line_mask(center, direction, lane_width, bev, expand_m):
+    """把 CARLA 停止 waypoint 栅格化为横跨当前受控车道的细线。"""
+    normal = np.array([-direction[1], direction[0]], dtype=np.float64)
+    endpoints = center + np.array([-0.5, 0.5])[:, None] * lane_width * normal
+    rows, cols = ego_xy_to_pixel(endpoints, bev)
+    points = np.stack((cols, rows), axis=1).round().astype(np.int32)
+    pixels_per_m = 0.5 * (
+        bev.height / (bev.x_max - bev.x_min)
+        + bev.width / (bev.y_max - bev.y_min))
+    thickness = max(int(round(2.0 * expand_m * pixels_per_m)), 1)
+    mask = np.zeros((bev.height, bev.width), dtype=np.uint8)
+    cv2.line(mask, tuple(points[0]), tuple(points[1]), color=1, thickness=thickness)
+    return mask.astype(np.float32)
+
+
+def _native_traffic_control(control, ego_pose6, bev, line_expand_m, state_names, out):
+    """把采集端已选定的 CARLA 原生停止点转换到当前 ego-BEV。"""
+    if not control["valid"]:
+        return out
+    w2e = world_to_ego(ego_pose6)
+    center = transform_points(
+        np.asarray([control["stop_location"]], dtype=np.float64), w2e)[0, :2]
+    yaw = math.radians(float(control["stop_yaw"]))
+    world_direction = np.array([math.cos(yaw), math.sin(yaw)], dtype=np.float64)
+    direction = world_direction @ w2e[:2, :2].T
+    direction /= np.linalg.norm(direction).clip(1e-6)
+    line = _native_stop_line_mask(
+        center, direction, float(control["lane_width"]), bev, line_expand_m)
+    state = control.get("state", "unknown")
+    out["stop_line"] = line
+    out["stop_point"] = center.astype(np.float32)
+    out["stop_direction"] = direction.astype(np.float32)
+    out["stop_distance"] = np.float32(control["route_distance"])
+    if state in state_names:
+        out["traffic_light_state"].fill(state_names.index(state))
+        out["traffic_light_state_valid"] = line
+    out["red_stop_valid"] = np.float32(state == "red")
+    return out
 
 
 def _select_relevant_control(control_polygons, actor_ids, world_to_ego_matrix,

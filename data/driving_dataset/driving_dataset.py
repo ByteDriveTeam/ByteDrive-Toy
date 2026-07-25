@@ -28,6 +28,8 @@
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
       多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
+      新场景逐帧携带 CARLA 原生受控车道/Agent 规划关联结果，直接生成停止线；旧场景缺该字段时自动回退到
+      HD Map 触发区与未来专家路线走廊相交算法，无需迁移历史 LMDB。
       目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系；
       当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
@@ -226,7 +228,8 @@ class DrivingDataset(SingleFrameSceneBase):
             pose, self._route_polyline(poses, frame_idx, pose, target_point),
             meta["traffic_lights"], frame["traffic_light_states"], self._bev,
             self._traffic_cfg.route_corridor_m, self._traffic_cfg.line_expand_m,
-            self._traffic_cfg.actor_match_radius_m, self._traffic_state_names)
+            self._traffic_cfg.actor_match_radius_m, self._traffic_state_names,
+            frame["meta"].get("relevant_traffic_control"))
         stopping_distance = (speed_mps * self._traffic_cfg.reaction_time_s
                              + speed_mps ** 2 / (2.0 * self._traffic_cfg.comfortable_decel_mps2)
                              + self._traffic_cfg.stop_margin_m)

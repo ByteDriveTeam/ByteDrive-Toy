@@ -22,7 +22,7 @@
 | ⑩ | 仅内存积累；超阈值强制结束先落盘；单场景上限 1k 帧；场景结束统一处理写入 | 共享内存 arena 即「场景内存缓冲」，容量即阈值（写满→`arena_full` 提前结束）；帧上限 `collection.max_frames_per_scene` |
 | ⑪ | 仅 Opt 地图；关闭静态车辆图层（规避已知 API 问题） | `session.py`：仅接受 `*_Opt`；`world.unload_map_layer(carla.MapLayer.ParkedVehicles)` |
 | ⑫ | 采集带语义的包围框 | `worker/annotations.py`：动态 actor（逐帧）+ 静态环境物体 level bbs（每场景一次），均带语义标签 |
-| ⑬ | 采集全部交通灯状态 | `worker/collect.py`：场景准备时缓存全部交通灯及触发区位置；每个采样帧记录 ID、状态名和 CARLA 原始状态码 |
+| ⑬ | 采集交通灯状态与路线相关控制点 | `worker/traffic_control.py`：缓存原生受控车道/停止 waypoint；逐帧按 BehaviorAgent 当前规划选择下一控制点并记录灯色 |
 
 ---
 
@@ -78,7 +78,8 @@ data/carla_data_collector/
     actors.py                 # 主车+BehaviorAgent、TM 车流、导航网格行人
     sensors.py                # RGB/Depth/语义/光流 按开关共享多相机、语义 Lidar、碰撞；按帧收齐
     annotations.py            # 带语义包围框（动态逐帧 + 静态每场景）
-    collect.py                # 单场景严格同步采集循环 → 写 arena + 帧索引/交通灯状态
+    collect.py                # 单场景严格同步采集循环 → 写 arena + 帧索引
+    traffic_control.py        # CARLA 原生受控车道/停止点与 Agent 当前规划关联
     geometry.py               # carla 几何转换 + 相机内参推导
   collector/                  # Py312：编排与处理
     worker_proc.py            # 派生/驱动 worker 子进程的控制管道客户端
@@ -110,9 +111,9 @@ data/carla_data_collector/
 
 | 键 | 内容 |
 | --- | --- |
-| `meta` | 场景级元数据：scene_id、seed、天气、路线、地图、fps、相机内外参、lidar 外参、静态包围框、交通灯静态位置、视频文件名 |
+| `meta` | 场景级元数据：scene_id、seed、天气、路线、地图、fps、相机内外参、lidar 外参、静态包围框、交通灯及其受控车道/停止点、视频文件名 |
 | `num_frames` | 帧数 |
-| `{i}/meta` | 第 i 帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态 |
+| `{i}/meta` | 第 i 帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态、当前路线下一交通控制点 |
 | `{i}/depth/{cam}` | 第 i 帧该相机深度图（解码为米、float32 H×W）；`depth` 开关关闭则无 |
 | `{i}/semantic/{cam}` | 第 i 帧该相机语义图（CityScapes 标签、uint8 H×W；与同名 RGB/Depth 像素对齐）；`semantic` 关则无 |
 | `{i}/optical_flow/{cam}` | 第 i 帧该相机光流（float32 H×W×2 运动矢量）；`optical_flow` 关则无（默认关） |
@@ -133,9 +134,11 @@ data/carla_data_collector/
   RGB 存 BGR 三通道编码进 mp4，Depth 在 arena 也存 BGR 三通道（丢 alpha 省内存）、由 collector 解码为米后入库，
   语义图只取标签所在的 R 通道存单通道 uint8（标签即最终值、无需解码）。内参 `fx=W/(2·tan(fov/2))`。
 - **内存**：新增语义图使单帧内存约增 ~10%（每相机 H×W×1 字节）；如需更长场景，调大 `ipc.arena_size_mb`。
-- **交通灯**：场景级 `traffic_lights` 保存每盏灯的 `id/transform/trigger_location/trigger_extent`；帧级
-  `traffic_light_states` 保存 `id/state/state_code`。状态名为 `red/yellow/green/off/unknown`，对应 CARLA
-  原始码 `0/1/2/3/4`。仅实际落盘的采样帧记录状态；HUD 显示全场统计及最近 `vis.traffic_lights.nearest_count` 盏灯。
+- **交通灯**：场景级 `traffic_lights` 在旧字段 `id/transform/trigger_location/trigger_extent` 之外，新增
+  `opendrive_id/pole_index/affected_lane_waypoints/stop_waypoints`。帧级 `traffic_light_states` 保存全部灯的
+  `id/state/state_code`；`relevant_traffic_control` 根据 BehaviorAgent 当前规划与受控车道选择下一停止点，
+  始终写入布尔 `valid`。状态名为 `red/yellow/green/off/unknown`，对应 CARLA 原始码 `0/1/2/3/4`。
+  下游以该字段是否存在区分新旧数据：存在且 `valid=false` 表示明确无相关灯，字段缺失才启用旧 HD Map 几何回退。
 - **可复现**：`tm.set_random_device_seed(seed)` + Python/np 随机种子，seed 随场景元数据落盘。
 - **碰撞**：碰撞传感器置标志；命中即丢弃整场景缓冲、换新 seed 重跑同一路线，队列不前进，超重试上限则跳过该路线。
 - **路线过滤**：用起终点直线距离（实际行驶路径由 BehaviorAgent 规划）；如需真实路网里程，可后续接 GlobalRoutePlanner。

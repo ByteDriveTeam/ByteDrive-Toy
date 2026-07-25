@@ -24,10 +24,26 @@ def check_drivable_mask(drivable, bev):
         raise ValueError("drivable 期望形状 {}，实际 {}。".format(expected, tuple(drivable.shape)))
 
 
-def check_traffic_control_inputs(route_xy, state_names):
-    """校验对象: HdMap.traffic_control_bev —— 路线须为 [N,2]，灯色类别须非空且含 red。"""
+def check_traffic_control_inputs(route_xy, state_names, relevant_control=None):
+    """校验对象: HdMap.traffic_control_bev —— 路线、灯色类别及可选原生控制标注须满足契约。"""
     route = np.asarray(route_xy)
     if route.ndim != 2 or route.shape[1] != 2:
         raise ValueError("route_xy 期望 [N,2]，实际 {}。".format(tuple(route.shape)))
     if not state_names or "red" not in state_names:
         raise ValueError("state_names 须非空且包含 red。")
+    if relevant_control is None:
+        return
+    if not isinstance(relevant_control, dict) or not isinstance(relevant_control.get("valid"), bool):
+        raise ValueError("relevant_control 须为含布尔 valid 的 dict。")
+    if not relevant_control["valid"]:
+        return
+    required = {
+        "stop_location", "stop_yaw", "lane_width", "route_distance", "state",
+    }
+    missing = sorted(required - set(relevant_control))
+    if missing:
+        raise KeyError("有效 relevant_control 缺字段: {}。".format(missing))
+    if np.asarray(relevant_control["stop_location"]).shape != (3,):
+        raise ValueError("relevant_control.stop_location 期望 [3]。")
+    if relevant_control["lane_width"] <= 0 or relevant_control["route_distance"] < 0:
+        raise ValueError("relevant_control 车道宽度须为正、路线距离须非负。")

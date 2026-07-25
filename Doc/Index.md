@@ -44,6 +44,7 @@ Py37 采集端 `worker/`（仅 py37_venv 运行）
 - [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — 主车、交通流与行人的生成与销毁
 - [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — 传感器阵列：逐视角按开关创建 RGB/Depth/语义/光流相机、语义分割 Lidar、碰撞传感器
 - [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — 带语义的包围框抽取：动态 actor（逐帧）与静态环境物体（每场景）
+- [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — CARLA 原生交通灯车道拓扑与 Agent 当前规划关联，生成可落盘交通控制真值。
 - [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — 单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引
 - [worker/geometry/geometry.py](../data/carla_data_collector/worker/geometry/geometry.py) — carla 几何对象与纯数值的转换，及相机内参推导
 

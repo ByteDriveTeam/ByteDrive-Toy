@@ -413,11 +413,12 @@ road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Bro
 非触发区标线落入 `other_marking`。另一路输出每个道路线像素的有向单位切向量 `(dx,dy)`；方向直接由 HD Map
 采样点 yaw 变换到当前 ego 系，因此 `v` 与 `-v` 表示相反行驶方向。
 
-交通控制头复用道路线图的细线高分辨率特征，只新增停止线二值头和三类灯色头。HD Map 的
-`Trigger_Volumes/TrafficLight` 四边形与当前路线走廊相交才算候选；多候选取沿路线最先到达者，避免把横向道路
-或转弯后的灯关联给当前车道。四边形的 `ParentActor_Location` 与场景交通灯 actor 匹配后读取逐帧状态。红灯状态
-始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于“反应距离 + 舒适制动距离 + 安全余量”时激活，
-避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
+交通控制头复用道路线图的细线高分辨率特征，只新增停止线二值头和三类灯色头。新采集数据由 CARLA Worker
+读取每盏灯的 `get_affected_lane_waypoints()` 与 `get_stop_waypoints()`，再和 BehaviorAgent 当前规划匹配，
+直接记录路线最先到达的原生停止 waypoint；离线端据其位置、方向和车道宽度生成停止线。历史数据没有该字段时，
+自动回退到 HD Map `Trigger_Volumes/TrafficLight` 四边形与当前路线走廊相交的旧算法，多候选仍取沿路线
+最先到达者，无需迁移旧 LMDB。红灯状态始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于
+“反应距离 + 舒适制动距离 + 安全余量”时激活，避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
 
 #### 7. 条件化多 Mode 规划 Token
 
@@ -548,9 +549,9 @@ LMDB 主要键：
 
 | 键 | 内容 |
 | --- | --- |
-| `meta` | 场景 ID、地图、天气、路线、seed、相机内外参、静态框、交通灯等 |
+| `meta` | 场景 ID、地图、天气、路线、seed、相机内外参、静态框、交通灯及其受控车道/停止点等 |
 | `num_frames` | 场景帧数 |
-| `{i}/meta` | 第 i 帧时间、ego 状态、动态框、交通灯状态 |
+| `{i}/meta` | 第 i 帧时间、ego 状态、动态框、全部交通灯状态及当前路线下一控制点 |
 | `{i}/depth/{cam}` | 米制 `float32 [H,W]` 深度 |
 | `{i}/semantic/{cam}` | CityScapes/CARLA 标签 `uint8 [H,W]` |
 | `{i}/optical_flow/{cam}` | `float32 [H,W,2]` 光流，可选 |
