@@ -1,4 +1,4 @@
-"""BEV 编码器：融合当前图像与历史 BEV，再由带无位置寄存器的六层二维 RoPE Transformer 提炼。
+"""BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼。
 
 模块: model/bev_encoder/bev_encoder.py
 依赖: torch, config.schema.DrivingCfg, model.attention.CrossAttentionBlock,
@@ -13,7 +13,7 @@
         forward(bev_query, image_feat, previous_bev=None, previous_geometry=None,
                 previous_valid=None, return_intermediate=False) -> Tensor | (Tensor, tuple[Tensor, Tensor])
             # 默认返回末层；规划路径可同时取得第 3、6 层 [B, work_dim, Hb, Wb]
-说明: 把 BEV 查询网格展平为 Token，先以图像 patch 特征为 KV 级联查询；若提供历史帧，则再以
+说明: 把 BEV 查询网格展平为 Token，先以三路图像 patch 拼接序列为 KV 级联查询；若提供历史帧，则再以
       `上一帧 BEV 骨干末端特征 + 刚性变换后实际 cell 坐标的共享几何编码`为 KV 级联查询。场景首帧通过
       previous_valid 在残差层面跳过时序结果，不使用全零伪历史。随后在 BEV Patch 前拼接本编码器自己的
       可学习寄存器 Token，共同经过六层 Pre-Norm Transformer；二维 RoPE 仅编码从 (1,1) 起的 BEV Patch，
@@ -40,7 +40,7 @@ class BevEncoder(nn.Module):
         cfg_driving: 驾驶配置 `config.model.driving`。
 
     形状:
-        bev_query: `[B, work_dim, Hb, Wb]`，image_feat: `[B, work_dim, gh, gw]`；
+        bev_query: `[B, work_dim, Hb, Wb]`，image_feat: `[B,3,work_dim,gh,gw]`；
         输出: `[B, work_dim, Hb, Wb]`。
     """
 
@@ -70,7 +70,7 @@ class BevEncoder(nn.Module):
             bev_query, image_feat, self.work_dim, previous_bev, previous_geometry, previous_valid)
         b, c, hb, wb = bev_query.shape
         query = bev_query.flatten(2).transpose(1, 2)   # [B, Hb*Wb, C]
-        context = image_feat.flatten(2).transpose(1, 2)  # [B, gh*gw, C]
+        context = image_feat.permute(0, 1, 3, 4, 2).reshape(b, -1, c)  # [B, 3*gh*gw, C]
         for layer in self.image_cross:
             query = layer(query, context)
         if previous_bev is not None:

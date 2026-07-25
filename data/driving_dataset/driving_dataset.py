@@ -1,10 +1,10 @@
-"""驾驶模型双帧数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
+"""驾驶模型双帧三目数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
 
 模块: data/driving_dataset/driving_dataset.py
 依赖: torch, numpy, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
       data.driving_targets, data.hd_map.HdMap, vis.data_vis.geometry, data.driving_dataset.checks.*
 读取配置:
-    data.driving.scene_root / camera / map_dir / map_name_template / previous_frame_offset /
+    data.driving.scene_root / cameras / map_dir / map_name_template / previous_frame_offset /
         dist_sigma_m / lane_half_width_m
     data.scene_cache_size
     data.driving.lane_map.line_width_m / type_to_class / unknown_class
@@ -24,7 +24,8 @@
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
-说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。每个样本同时返回同场景上一帧 RGB 及把
+说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。三路相机严格按 data.driving.cameras 堆叠；
+      每个样本同时返回同场景上一帧三目 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
       多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
@@ -60,14 +61,15 @@ __all__ = ["DrivingDataset"]
 
 
 class DrivingDataset(SingleFrameSceneBase):
-    """以当前帧为索引、同时读取上一帧的双帧驾驶数据集。"""
+    """以当前帧为索引、同时读取上一帧的双帧三目驾驶数据集。"""
 
     def __init__(self, cfg: Config) -> None:
         drv_data = cfg.data.driving
-        super().__init__(drv_data.scene_root, drv_data.camera,
+        super().__init__(drv_data.scene_root, drv_data.cameras[0],
                          cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std,
                          cfg.data.scene_cache_size)
         self._cfg_data = drv_data
+        self._cameras = tuple(drv_data.cameras)
         bev = cfg.model.driving.bev
         self._fov = bev.fov_deg
         self._previous_offset = drv_data.previous_frame_offset
@@ -98,24 +100,37 @@ class DrivingDataset(SingleFrameSceneBase):
         scene_dir, frame_idx = self.frame_index[i]
         reader = self.reader(scene_dir)
         meta = reader.meta
-        cam = self._camera
-        check_camera_calib(meta, cam)
+        cameras = self._cameras
+        check_camera_calib(meta, cameras)
 
         previous_idx = max(frame_idx - self._previous_offset, 0)
         previous_valid = float(frame_idx >= self._previous_offset)
         previous_meta = reader.frame_meta(previous_idx) if previous_valid else None
-        previous_rgb = reader.rgb(previous_idx, cam) if previous_valid else None
+        previous_rgb = (
+            np.stack([reader.rgb(previous_idx, camera) for camera in cameras])
+            if previous_valid else None)
 
         frame = reader.frame(frame_idx, modalities=("depth", "semantic"))  # 驾驶只用深度/语义，跳过光流/lidar 解码
-        check_behavior_annotations(meta, frame, cam)
-        intr = meta["intrinsics"][cam]
-        extrinsic6 = [float(v) for v in meta["extrinsics"][cam]]
-        intrinsics4 = [float(intr["fx"]), float(intr["fy"]), float(intr["cx"]), float(intr["cy"])]
+        check_behavior_annotations(meta, frame, cameras)
+        intrinsics = [meta["intrinsics"][camera] for camera in cameras]
+        extrinsics = np.asarray(
+            [meta["extrinsics"][camera] for camera in cameras], dtype=np.float32)
+        intrinsics4 = np.asarray([
+            [intr["fx"], intr["fy"], intr["cx"], intr["cy"]] for intr in intrinsics
+        ], dtype=np.float32)
+        rgb = np.stack([frame["rgb"][camera] for camera in cameras])
+        depth = np.stack([
+            np.ascontiguousarray(frame["depth"][camera]).astype(np.float32)
+            for camera in cameras
+        ])
+        semantic = np.stack([
+            np.ascontiguousarray(frame["semantic"][camera]) for camera in cameras
+        ])
 
         pose = [float(v) for v in frame["ego"]["transform"]]
         world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
         previous_meta = previous_meta or frame["meta"]
-        previous_rgb = previous_rgb if previous_rgb is not None else frame["rgb"][cam]
+        previous_rgb = previous_rgb if previous_rgb is not None else rgb
         previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
         previous_to_current = _planar_previous_to_current(previous_pose, pose)
 
@@ -130,12 +145,12 @@ class DrivingDataset(SingleFrameSceneBase):
         behavior = dt.behavior_targets(
             waypoints, valid, speed_mps, float(accelerations[frame_idx]),
             frame["bboxes"], meta["traffic_lights"], frame["traffic_light_states"],
-            meta["static_bboxes"], frame["semantic"][cam], pose, intr, extrinsic6,
+            meta["static_bboxes"], semantic, pose, intrinsics, extrinsics,
             self._bev, self._fov, self._behavior_params,
             red_light_relevant=bool(traffic["red_stop_valid"]))
 
-        depth = np.ascontiguousarray(frame["depth"][cam]).astype(np.float32)
-        risk = dt.risk_field(depth, intrinsics4, extrinsic6, self._bev, self._fov, self._depth_max_m)
+        risk = dt.risk_field(
+            depth, intrinsics4, extrinsics, self._bev, self._fov, self._depth_max_m)
         map_drivable = hd_map.drivable_bev(
             pose, self._bev, self._cfg_data.lane_half_width_m)
         lane_cfg = self._cfg_data.lane_map
@@ -143,19 +158,19 @@ class DrivingDataset(SingleFrameSceneBase):
             pose, self._bev, lane_cfg.line_width_m,
             lane_cfg.type_to_class, lane_cfg.unknown_class)
         box_occupancy = dt.visible_moving_box_occupancy(
-            frame["bboxes"], depth, intr, pose, extrinsic6,
+            frame["bboxes"], depth, intrinsics, pose, extrinsics,
             self._bev, self._depth_max_m, self._box_min_visible_pixels)
         drivable = map_drivable * (1.0 - box_occupancy)
         offroad_distance = offroad_distance_field(drivable, self._bev)
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
 
         sample = {
-            "rgb": self.normalize_rgb(frame["rgb"][cam]),
-            "previous_rgb": self.normalize_rgb(previous_rgb),
+            "rgb": torch.stack([self.normalize_rgb(image) for image in rgb]),
+            "previous_rgb": torch.stack([self.normalize_rgb(image) for image in previous_rgb]),
             "previous_to_current": torch.from_numpy(previous_to_current),
             "previous_valid": torch.tensor(previous_valid, dtype=torch.float32),
-            "intrinsics": torch.tensor(intrinsics4, dtype=torch.float32),
-            "extrinsics": torch.tensor(extrinsic6, dtype=torch.float32),
+            "intrinsics": torch.from_numpy(intrinsics4),
+            "extrinsics": torch.from_numpy(extrinsics),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
             "ego_velocity": torch.from_numpy(ego_velocity),
             "trajectory": torch.from_numpy(waypoints),

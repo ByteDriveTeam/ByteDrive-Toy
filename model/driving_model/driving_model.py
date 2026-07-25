@@ -1,4 +1,4 @@
-"""双帧开环驾驶模型：融合刚性对齐的历史 BEV，解码三场、道路线、交通控制与驾驶输出。
+"""双帧三目开环驾驶模型：融合三路几何图像与刚性对齐的历史 BEV，解码驾驶多任务输出。
 
 模块: model/driving_model/driving_model.py
 依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionFeatureEncoder,
@@ -18,13 +18,14 @@
                 previous_to_current, previous_valid) -> dict
             # 三场 + 道路线/停止线/灯色 + trajectories/confidence/behavior_logits
         trainable_parameters() -> Iterator[nn.Parameter]   # 驾驶各件 + 可选感知 fusion/trunk
-说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，取得 trunk 末端特征与 DINOv3 原始特征；driving_neck
-      融合并注入 frustum 几何位置编码得图像特征；bev_query_embedding 仅以 BEV xyz 几何初始化查询，
+说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，三路共享全部视觉参数；相机轴展平到 batch 后，
+      driving_neck 按各自标定注入 frustum 几何位置编码，再把三路 patch Token 拼为 BEV 的图像上下文；
+      bev_query_embedding 仅以 BEV xyz 几何初始化查询，
       bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
       field_decoder 上采样解码三场。上一帧由同一套纯几何查询得到 BEV 骨干末端特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
       BEV 查询先查图像、再查上一帧 BEV。lane_map_decoder 输出道路线、停止线与灯色；trajectory_decoder
-      以目标点、ego 平面速度为条件，用可学习 Mode Token 依次查询主干第 3/6 层。前向单目，自车位于 BEV 下方中心。
+      以目标点、ego 平面速度为条件，用可学习 Mode Token 依次查询主干第 3/6 层。前向三目，自车位于 BEV 下方中心。
       混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
       freeze_perception 为真时视觉编码器冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时优化驾驶实际经过的
       fusion/trunk。语义/深度解码头不构造、不挂入模型树，也不参与驾驶权重加载。
@@ -55,13 +56,13 @@ _LOW_PRECISION = torch.bfloat16
 
 
 class DrivingModel(nn.Module):
-    """双帧开环驾驶模型（复用感知主干并融合上一帧 BEV）。
+    """双帧三目开环驾驶模型（复用感知主干并融合上一帧 BEV）。
 
     Args:
         cfg: 全局配置，读取 `model.driving` 及感知骨干/主干维度。
 
     Shape:
-        当前/上一帧 rgb `[B,3,H,W]`、intrinsics `[B,4]`、extrinsics `[B,6]`、
+        当前/上一帧 rgb `[B,3,3,H,W]`、intrinsics `[B,3,4]`、extrinsics `[B,3,6]`、
         target_point/ego_velocity `[B,2]`、
         previous_to_current `[B,3,3]`、previous_valid `[B]`。
         输出 dict：risk/drivable/distribution/stop_line_logits、交通灯状态、道路线、轨迹与行为。
@@ -122,7 +123,7 @@ class DrivingModel(nn.Module):
                 target_point: torch.Tensor, ego_velocity: torch.Tensor, previous_rgb: torch.Tensor,
                 previous_to_current: torch.Tensor,
                 previous_valid: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """双帧前向：当前图像 → 上一帧 BEV → 当前 BEV → 三场/道路线图/轨迹行为。"""
+        """双帧三目前向：当前图像 → 上一帧 BEV → 当前 BEV → 三场/道路线图/轨迹行为。"""
         check_driving_inputs(
             rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
             previous_to_current, previous_valid)
@@ -156,9 +157,16 @@ class DrivingModel(nn.Module):
         return outputs
 
     def _image_features(self, rgb, intrinsics, extrinsics):
+        """把相机轴展平进 batch 共享视觉参数，再恢复为三路 patch 特征。"""
+        batch_size, views, channels, height, width = rgb.shape
+        flat_rgb = rgb.reshape(batch_size * views, channels, height, width)
+        flat_intrinsics = intrinsics.reshape(batch_size * views, 4)
+        flat_extrinsics = extrinsics.reshape(batch_size * views, 6)
         with torch.no_grad() if self.freeze_perception else nullcontext():
-            trunk_feat, dino_raw = self.perception.extract_features(rgb)
-        return self.neck(trunk_feat, dino_raw, intrinsics, extrinsics)
+            trunk_feat, dino_raw = self.perception.extract_features(flat_rgb)
+        features = self.neck(
+            trunk_feat, dino_raw, flat_intrinsics, flat_extrinsics)
+        return features.reshape(batch_size, views, *features.shape[1:])
 
     def _transformed_previous_grid(self, previous_to_current):
         """把上一帧每个 BEV cell 中心刚性变换到当前 ego 系，保留真实几何供共享编码器使用。"""

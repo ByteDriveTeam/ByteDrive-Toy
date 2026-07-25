@@ -3,13 +3,13 @@
 
 def check_bev_encoder_inputs(bev_query, image_feat, work_dim, previous_bev=None,
                              previous_geometry=None, previous_valid=None):
-    """校验对象: BevEncoder.forward 入参 —— 当前查询/图像与可选历史 BEV 的形状、通道、批次须一致。"""
-    if bev_query.ndim != 4 or image_feat.ndim != 4:
-        raise ValueError("bev_query / image_feat 期望 (B,C,H,W) 四维，实际 {} / {}。".format(
+    """校验对象: BevEncoder.forward 入参 —— 当前查询/三目图像与可选历史 BEV 的形状须一致。"""
+    if bev_query.ndim != 4 or image_feat.ndim != 5:
+        raise ValueError("bev_query / image_feat 期望 (B,C,H,W)/(B,V,C,H,W)，实际 {} / {}。".format(
             tuple(bev_query.shape), tuple(image_feat.shape)))
-    if int(bev_query.shape[1]) != work_dim or int(image_feat.shape[1]) != work_dim:
+    if int(bev_query.shape[1]) != work_dim or int(image_feat.shape[2]) != work_dim:
         raise ValueError("bev_query / image_feat 通道须等于 work_dim={}，实际 {} / {}。".format(
-            work_dim, int(bev_query.shape[1]), int(image_feat.shape[1])))
+            work_dim, int(bev_query.shape[1]), int(image_feat.shape[2])))
     if int(bev_query.shape[0]) != int(image_feat.shape[0]):
         raise ValueError("bev_query 与 image_feat 批次须一致，实际 {} / {}。".format(
             int(bev_query.shape[0]), int(image_feat.shape[0])))

@@ -214,7 +214,7 @@ class DataVisCfg:
 
 @dataclass
 class BevGeometryCfg:
-    """BEV（ego 前向单目）几何：坐标量程、工作网格分辨率、视场角、z 采样。
+    """BEV（ego 前向三目）几何：坐标量程、工作网格分辨率、联合视场角、z 采样。
 
     这是驾驶系统 BEV 几何的**单一来源**：纯几何查询嵌入、frustum 视场掩码、
     数据侧场 GT 栅格化都从这里取量程，避免多处各写一份坐标范围。
@@ -225,7 +225,7 @@ class BevGeometryCfg:
     y_max_m: float
     height: int          # Hb：BEV 工作网格前向(x)格数（= 初始查询分辨率）
     width: int           # Wb：BEV 工作网格左右(y)格数
-    fov_deg: float       # 前向视场角（视场内监督）
+    fov_deg: float       # 三目联合前向视场角（视场内监督）
     z_min_m: float       # BEV 查询几何嵌入垂直采样下界
     z_max_m: float
     z_step_m: float
@@ -408,7 +408,7 @@ class TrafficControlTargetCfg:
 class DrivingDatasetCfg:
     """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
     scene_root: str
-    camera: str
+    cameras: List[str]              # 三目相机轴统一顺序
     map_dir: str                  # HD 地图目录
     map_name_template: str        # 地图文件名模板，如 "{map}_HD_map.npz"
     previous_frame_offset: int    # 时序融合采用的同场景历史帧偏移
@@ -574,18 +574,6 @@ class CloneEgoCfg:
 
 
 @dataclass
-class CloneCameraCfg:
-    width: int
-    height: int
-    x: float
-    y: float
-    z: float
-    roll: float
-    pitch: float
-    yaw: float
-
-
-@dataclass
 class CloneInferenceCfg:
     checkpoint: str
     device: str
@@ -646,7 +634,6 @@ class CloneLoopCfg:
     route: CloneRouteCfg
     traffic: CloneTrafficCfg
     ego: CloneEgoCfg
-    camera: CloneCameraCfg
     inference: CloneInferenceCfg
     control: CloneControlCfg
     safety: CloneSafetyCfg
@@ -698,6 +685,7 @@ def build_config(raw):
 
 # 默认设计约定的视角集合与分辨率/FOV，用于「与 Design 默认一致性」软校验
 EXPECTED_RIG_NAMES = {"front", "back", "left", "right", "front_left", "front_right"}
+DRIVING_CAMERA_ORDER = ["front", "front_left", "front_right"]
 
 
 def validate_config(cfg):
@@ -767,15 +755,15 @@ def validate_config(cfg):
 
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
-    _validate_data(cfg.data, cfg.model.driving.lane_map)
+    _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
-    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data)
+    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data, cc.cameras)
 
 
-def _validate_clone_loop(cl, model, data):
+def _validate_clone_loop(cl, model, data, cameras):
     """校验对象: cfg.clone_loop —— CARLA 闭环运行、推理、控制与安全参数。"""
     assert cl.worker.carla_port > 0 and cl.worker.startup_timeout_s > 0 \
         and cl.worker.command_timeout_s > 0, \
@@ -793,12 +781,10 @@ def _validate_clone_loop(cl, model, data):
         and route.progress_search_points > 0, "clone_loop.route 参数取值非法"
     assert cl.traffic.num_vehicles >= 0 and cl.traffic.tm_port > 0, \
         "clone_loop.traffic 车辆数必须非负且 TM 端口为正"
-    cam = cl.camera
-    assert cam.width > 0 and cam.height > 0, \
-        "clone_loop.camera 分辨率取值非法"
-    assert cam.width % model.dinov3_backbone.patch_size == 0 \
-        and cam.height % model.dinov3_backbone.patch_size == 0, \
-        "clone_loop.camera 宽高必须被模型 patch_size 整除"
+    # 校验对象: carla_collector.cameras —— 闭环复用采集端三目分辨率，须适配模型 patch
+    assert cameras.width % model.dinov3_backbone.patch_size == 0 \
+        and cameras.height % model.dinov3_backbone.patch_size == 0, \
+        "carla_collector.cameras 宽高必须被模型 patch_size 整除"
     inf = cl.inference
     assert 0 < inf.min_weight_coverage <= 1 and inf.max_abs_waypoint_m > 0, \
         "clone_loop.inference 权重覆盖率/航点范围取值非法"
@@ -895,7 +881,7 @@ def _validate_physics(ph):
     # semantic_ignore_index 允许为负（如 -100 表示不忽略任何类），故不校验符号
 
 
-def _validate_data(data, model_lane):
+def _validate_data(data, model_lane, camera_rig):
     """校验对象: cfg.data —— 数据加载参数。"""
     assert data.scene_cache_size > 0, "data.scene_cache_size 必须 > 0"
     ds = data.dataset
@@ -904,6 +890,12 @@ def _validate_data(data, model_lane):
     assert all(s > 0 for s in ds.dino_std), "data.dataset.dino_std 每通道必须 > 0"
     # 校验对象: data.driving —— 高斯软标签/车道半宽为正，地图模板含 {map} 占位
     dr = data.driving
+    # 校验对象: data.driving.cameras —— 固定三目顺序须唯一且全部存在于采集 rig
+    rig_names = {camera.name for camera in camera_rig}
+    assert dr.cameras == DRIVING_CAMERA_ORDER, \
+        "data.driving.cameras 必须严格为 front/front_left/front_right 顺序"
+    assert all(name in rig_names for name in dr.cameras), \
+        "data.driving.cameras 中每个名称都必须存在于 carla_collector.cameras.rig"
     assert dr.previous_frame_offset > 0, "data.driving.previous_frame_offset 必须 > 0"
     assert dr.dist_sigma_m > 0 and dr.lane_half_width_m > 0, \
         "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
@@ -1046,7 +1038,7 @@ def _validate_bev_geometry(bev):
     assert bev.x_min_m < bev.x_max_m, "model.driving.bev 需满足 x_min_m < x_max_m"
     assert bev.y_min_m < bev.y_max_m, "model.driving.bev 需满足 y_min_m < y_max_m"
     assert bev.height > 0 and bev.width > 0, "model.driving.bev.height/width 必须 > 0"
-    assert 0 < bev.fov_deg < 180, "model.driving.bev.fov_deg 必须在 (0,180)"
+    assert 0 < bev.fov_deg <= 180, "model.driving.bev.fov_deg 必须在 (0,180]"
     assert bev.z_min_m < bev.z_max_m and bev.z_step_m > 0, \
         "model.driving.bev 需满足 z_min_m < z_max_m 且 z_step_m > 0"
 

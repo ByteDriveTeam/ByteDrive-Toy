@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的单目、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
+  <strong>面向 CARLA 合成数据的三目、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
   冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环驾驶
 </p>
 
@@ -57,7 +57,7 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 
 1. **感知预训练**：以冻结的 DINOv3 ViT-S+/16 为视觉骨干，融合浅/中/深层完整 Token 序列，联合学习
    29 类语义分割与米制深度估计。
-2. **驾驶学习**：复用感知表征，以相机 frustum 与纯 BEV xyz 几何把当前图像聚合到前向 BEV，
+2. **驾驶学习**：复用感知表征，以三路相机 frustum 与纯 BEV xyz 几何把当前图像聚合到前向 BEV，
    再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、独立道路线图、8 模态未来轨迹、
    模态置信度和 8 类行为标签。规划分支以目标点与 ego 平面速度为条件，用 8 个可学习 Mode Token 查询
    BEV 主干第 3、6 层特征。
@@ -69,7 +69,7 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 
 | 能力 | 当前实现 |
 | --- | --- |
-| 视觉输入 | 当前帧 + 同场景上一帧单目 `front` RGB，默认 `W×H = 768×384`；首帧用 identity + 无效位 |
+| 视觉输入 | 当前帧 + 同场景上一帧 `front/front_left/front_right` RGB，每路默认 `768×384`；首帧用 identity + 无效位 |
 | 视觉骨干 | 本地 DINOv3 ViT-S+/16，参数永久冻结，提取第 3/6/12 层完整 Token 序列 |
 | 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
 | 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
@@ -102,7 +102,7 @@ flowchart LR
 
 ### CARLA 闭环驾驶
 
-下面的视频记录了一次 `clone_loop` 闭环 episode 的在线推理过程：顶部为前向相机与车辆状态，中部为风险场、
+下面的视频记录了一次 `clone_loop` 闭环 episode 的在线推理过程：顶部为左/前/右三目与车辆状态，中部为风险场、
 可行驶场、轨迹分布场及道路线/交通控制预测，底部展示全部候选轨迹与最终执行轨迹。
 
 <video src="assets/visualizations/episode_0001_inference.mp4" controls="controls" width="768">
@@ -159,7 +159,7 @@ flowchart TB
 
     subgraph LEARN["训练数据与模型"]
         DS1["PerceptionDataset"]
-        DS2["DrivingDataset<br/>双帧/轨迹/行为/三场/道路线图/HDMap"]
+        DS2["DrivingDataset<br/>双帧三目/轨迹/行为/三场/道路线图/HDMap"]
         P["PerceptionModel"]
         D["DrivingModel"]
         DS1 --> P
@@ -174,7 +174,7 @@ flowchart TB
     end
 
     subgraph CLOSED["CARLA 行为克隆闭环"]
-        OBS["同步前向 RGB<br/>位姿/速度/路线目标"]
+        OBS["同步前向三目 RGB<br/>位姿/速度/路线目标"]
         INF["DrivingModel<br/>双帧在线推理"]
         SELECT["置信度 + 风险场 + 可行驶场<br/>+ 路线方向联合重排"]
         CTRL["纯追踪横向控制<br/>速度 PID"]
@@ -205,18 +205,19 @@ flowchart TB
 
 ### 张量尺寸总览
 
-以下尺寸按默认配置和当前/上一帧单目输入 `rgb, previous_rgb [B,3,384,768]` 计算。
+以下尺寸按默认配置和当前/上一帧三目输入 `rgb, previous_rgb [B,3,3,384,768]` 计算；视觉编码时
+相机轴展平为 `B×3`，三路共享全部参数。
 
 | 阶段 | 张量 | 默认形状 | 说明 |
 | --- | --- | --- | --- |
-| 输入 | RGB | `[B,3,384,768]` | BGR 解码后转 RGB，并做 DINO ImageNet 归一化 |
-| 输入 | `previous_rgb` | `[B,3,384,768]` | 同场景上一帧；首帧回退当前图像 |
-| DINO 多层序列 | `dino_sequences` | `[B,3,1157,384]` | 每层完整保留 1 CLS + 4 register + 1152 patch |
-| Pred Token 序列 | `trunk_tokens` | `[B,1157,384]` | 层融合后经 3 层 Pre-Norm Transformer，特殊 Token 仍保留 |
-| 感知共享特征 | `trunk_feat` | `[B,384,24,48]` | 进入像素头前才取序列末部 patch 还原网格 |
+| 输入 | RGB | `[B,3,3,384,768]` | 相机轴为 front/front_left/front_right，逐路 DINO 归一化 |
+| 输入 | `previous_rgb` | `[B,3,3,384,768]` | 同场景上一帧三目；首帧回退当前三目 |
+| DINO 多层序列 | `dino_sequences` | `[B×3,3,1157,384]` | 相机轴展平后，每层保留 CLS/register/patch |
+| Pred Token 序列 | `trunk_tokens` | `[B×3,1157,384]` | 三路共享同一感知主干参数 |
+| 感知共享特征 | `trunk_feat` | `[B×3,384,24,48]` | 逐相机 patch 网格 |
 | 语义输出 | `semantic` | `[B,29,384,768]` | 29 类 logits |
 | 深度输出 | `depth` | `[B,2,384,768]` | ch0=Symlog 深度；ch1=量程内 logit |
-| 驾驶图像特征 | `image_feat` | `[B,384,24,48]` | trunk + DINO 原始末层 + frustum 几何 |
+| 驾驶图像特征 | `image_feat` | `[B,3,384,24,48]` | 每路按自身内外参注入 frustum 几何 |
 | 初始 BEV 查询 | `bev_query` | `[B,384,32,32]` | 仅编码 BEV xyz 几何，不注入目标点 |
 | 上一帧 BEV | `previous_bev` | `[B,384,32,32]` | 上一帧图像编码的 BEV 骨干末端输出 |
 | 历史几何 | `previous_geometry` | `[B,384,32,32]` | 上一帧 cell 坐标刚性变换到当前 ego 系后重新编码 |
@@ -303,21 +304,22 @@ Driving 只构造 `PerceptionFeatureEncoder`（DINOv3 + fusion + trunk），模�
 
 ```mermaid
 flowchart TB
-    RGB["当前单目 RGB"] --> P["PerceptionFeatureEncoder.extract_features"]
+    RGB["当前 front/front_left/front_right RGB"] --> FLAT["相机轴展平为 B×3"]
+    FLAT --> P["共享 PerceptionFeatureEncoder.extract_features"]
     P --> T["感知 trunk 末端<br/>384×24×48"]
     P --> R["DINO 原始末层<br/>384×24×48"]
 
     T --> NECK["DrivingNeck<br/>双路 RMSNorm + 拼接 + 1×1"]
     R --> NECK
-    CALIB["相机内参 fx,fy,cx,cy<br/>外参 x,y,z,roll,pitch,yaw"] --> FR["Frustum Encoding<br/>5 像素 × 165 深度 × xyz"]
+    CALIB["三路独立内参/外参"] --> FR["逐路 Frustum Encoding<br/>5 像素 × 165 深度 × xyz"]
     FR --> NECK
-    NECK --> IMG["带几何先验的图像 Token<br/>384×24×48"]
+    NECK --> IMG["拼接三路几何图像 Token<br/>3×24×48"]
 
     GRID["BEV xyz 几何<br/>32×32×111 垂直采样"] --> QUERY["Geometry Query Embedding"]
     QUERY --> BEVQ["BEV Query<br/>384×32×32"]
     IMG --> CROSS["2× BEV→Image<br/>交叉注意力"]
     BEVQ --> CROSS
-    PRGB["上一帧 RGB"] --> PBEV["上一帧 BEV 骨干末端"]
+    PRGB["上一帧三目 RGB"] --> PBEV["上一帧 BEV 骨干末端"]
     TF["previous→current<br/>3×3 刚性变换"] --> PGEOM["变换后实际 cell 坐标<br/>共享几何编码"]
     PBEV --> TCROSS["2× Current BEV→Previous BEV"]
     PGEOM --> TCROSS
@@ -364,13 +366,13 @@ flowchart TB
 两路分别 RMSNorm 后拼接并用 `1×1` 卷积投影到 384 维，再叠加 frustum 几何位置编码，最后通过 2 个
 2D 残差块提炼。
 
-#### 2. Frustum Encoding：给单目 patch 注入可能的 3D 位置
+#### 2. Frustum Encoding：给三目 patch 注入各自可能的 3D 位置
 
-单目图像没有唯一深度，因此模型没有把 patch 强行投到单个 3D 点。对每个 patch，代码选取中心和四角
+每路图像都没有唯一深度，因此模型没有把 patch 强行投到单个 3D 点。对每路每个 patch，代码选取中心和四角
 5 个像素，并沿视线从 `0.1 m` 到 `64 m` 做近密远疏采样。默认配置实际产生 165 个深度样本，得到：
 
 ```text
-[B, 24×48 patches, 5 pixels, 165 depths, 3 xyz]
+[B×3, 24×48 patches, 5 pixels, 165 depths, 3 xyz]
 ```
 
 像素点先从图像平面系变换到传感器系，再依据相机外参变到 ego 系；坐标经 Symlog 归一化后展平，
@@ -386,9 +388,10 @@ BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 
 
 3 维几何向量经过 MLP 后沿 z 求均值，形成该 BEV cell 的初始查询；查询初始化不再编码目标点。
 
-#### 4. BEV Encoder：先查询当前图像，再查询上一帧 BEV
+#### 4. BEV Encoder：先查询三目 Token，再查询上一帧 BEV
 
-当前帧的 `32×32=1024` 个 BEV 查询 Token 先通过两层 Pre-Norm 交叉注意力查询当前图像 Token。上一帧以
+当前帧的 `32×32=1024` 个 BEV 查询 Token 先通过两层 Pre-Norm 交叉注意力查询拼接后的
+`3×24×48=3456` 个三目图像 Token。三路共享视觉参数，仅由各自 frustum 几何编码区分空间来源。上一帧以
 同一套纯几何查询得到其 BEV 骨干末端特征；每个上一帧 cell 的 `(x,y)` 再由
 `previous_to_current` 刚性变换到当前 ego 系，并通过与当前查询共享的几何 MLP 编码变换后的真实坐标。
 当前查询随后用两层交叉注意力查询这些历史 Token，再与 4 个本编码器自有的可学习寄存器 Token 拼成统一序列，
@@ -439,7 +442,7 @@ Token 自注意力协调 8 个 Mode：
 flowchart TB
     FAR["x = 64 m · BEV 上沿 · row 0"]
     LEFT["y = -32 m · 左侧"]
-    CENTER["前向相机 90° FOV<br/>工作网格 32×32<br/>场网格 256×256"]
+    CENTER["三目联合 180° FOV<br/>工作网格 32×32<br/>场网格 256×256"]
     RIGHT["y = +32 m · 右侧"]
     EGO["ego · x = 0 m<br/>BEV 下沿中心"]
 
@@ -449,7 +452,7 @@ flowchart TB
 ```
 
 约定与 CARLA ego 坐标保持一致：`x` 向前，`y` 向右，`z` 向上；BEV 图像第 0 行对应远端，最后一行
-对应近端。三场和道路线图只在 90° 前向视场内计主要监督，视场外通过 `inview` 掩码剔除。
+对应近端。三场和道路线图在三目联合 180° 前半平面内计主要监督，视场外通过 `inview` 掩码剔除。
 
 ### 参数量与精度边界
 
@@ -464,24 +467,22 @@ flowchart TB
 时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
-默认输入分辨率 `384×768`、batch size 为 1 时，单次完整推理的资源统计如下。`DrivingModel` 的口径包含
-当前帧和历史帧两次视觉编码，以及后续 BEV、场、道路线图和轨迹解码；FLOPs 按一次乘法和一次加法分别计数，
-覆盖卷积、线性层与注意力 QK/AV 矩阵乘法，不计归一化、激活、插值等逐元素算子。
+三目化没有新增任何参数，所以上表参数量与旧驾驶权重的 state-dict 键及形状保持不变。运行时当前帧和历史帧
+各编码三路图像，视觉计算量与激活量相对旧单目路径约为三倍；BEV 与各解码器计算量保持不变。下表仅保留
+不受三目化影响的感知模型实测口径，驾驶显存应在目标硬件上按实际 batch 重新测量。
 
 | 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `PerceptionModel` | 145.35 GFLOPs | 72.67 GMACs | 134.26 MiB | 38.25 MiB | 172.51 MiB |
-| `DrivingModel` | 390.31 GFLOPs | 195.16 GMACs | 242.60 MiB | 10.25 MiB | 252.85 MiB |
 
 CUDA 静态显存下限只包含 FP32 参数、输入和最终输出，不包含 BF16/FP32 中间激活、CUDA 上下文及算子工作区，
 不能视为实际峰值；实际峰值应在目标 GPU、CUDA 版 PyTorch 和相同输入尺寸下实测。本次统计环境为
-CPU 版 PyTorch 2.12.1，使用 `torch.inference_mode()`、模型默认混合精度边界和 14 个 PyTorch CPU 线程，
-连续运行两次所得结果为：
+CPU 版 PyTorch 2.12.1，使用 `torch.inference_mode()` 和 14 个 PyTorch CPU 线程；三目驾驶模型须重新实测，
+因此这里只保留不受本次改造影响的感知结果：
 
 | 模型 | 模型就绪 RSS | 推理峰值 RSS | 推理 RSS 增量 | 平均延迟 |
 | --- | ---: | ---: | ---: | ---: |
 | `PerceptionModel` | 345.86 MiB | 763.72 MiB | 417.86 MiB | 34.97 s |
-| `DrivingModel` | 459.82 MiB | 961.81 MiB | 501.99 MiB | 37.78 s |
 
 RSS 包含 Python/PyTorch 运行时和 CPU 算子临时内存，只用于当前参考环境的容量判断；它与 CUDA 显存不是同一
 指标，也不宜直接用于不同 CPU、线程数或 PyTorch 构建之间的性能比较。
@@ -578,11 +579,11 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 
 | 类别 | 键 | 含义 |
 | --- | --- | --- |
-| 模型输入 | `rgb` | 归一化单目图像 |
-| 模型输入 | `previous_rgb` | 同场景上一帧归一化单目图像；场景首帧回退当前图像 |
+| 模型输入 | `rgb` | `[3,3,H,W]` 三目归一化图像，相机轴顺序由 `data.driving.cameras` 固定 |
+| 模型输入 | `previous_rgb` | 同场景上一帧 `[3,3,H,W]`；场景首帧回退当前三目 |
 | 模型输入 | `previous_to_current/previous_valid` | 上一帧 ego xy 到当前 ego xy 的 `3×3` 刚性矩阵及有效位 |
-| 模型输入 | `intrinsics` | `[fx,fy,cx,cy]` |
-| 模型输入 | `extrinsics` | 相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
+| 模型输入 | `intrinsics` | 三路 `[3,4]`，每路为 `[fx,fy,cx,cy]` |
+| 模型输入 | `extrinsics` | 三路 `[3,6]`，每路为相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
 | 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，用作规划条件 |
 | 模型输入 | `ego_velocity` | 世界速度旋转到当前 ego 系后的 `[vₓ,vᵧ]` |
 | 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算 |
@@ -600,7 +601,7 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 
 ```mermaid
 flowchart LR
-    DEP["当前帧 GT 深度"] --> PC["反投影到 ego 点云"] --> ENV["按方位取最远观测包络"] --> R["包络外 = Risk"]
+    DEP["当前帧三路 GT 深度"] --> PC["按各自标定反投影并合并 ego 点云"] --> ENV["按方位取最远观测包络"] --> R["包络外 = Risk"]
     MAP["TownXX_HD_map.npz"] --> POLY["车道折线变换到 ego"] --> RASTER["按车道宽度栅格化"]
     POLY --> LTYPE["Type → 5 类道路线"]
     MAP --> YAW["逐点 yaw → ego 有向切向量"]
@@ -994,7 +995,7 @@ python vis/driving_vis/run.py --checkpoint train/ckpt/driving/driving.pt
 `--env <name>`。每次运行的输出位于 `clone_loop/out/run_<时间>/`：
 
 - `episode_XXXX.jsonl`：逐步状态、控制量、模式评分、置信度和行为概率；
-- `episode_XXXX_driving.mp4`：前向相机驾驶实况；
+- `episode_XXXX_driving.mp4`：左/前/右三目拼接驾驶实况；
 - `episode_XXXX_inference.mp4`：三场、道路线、交通控制和候选轨迹诊断；
 - `summary.json`：各路线终态、进度、里程、压线和总体成功率。
 
@@ -1045,7 +1046,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `model.dinov3_backbone` | 本地骨干路径、patch size、抽取层 |
 | `model.feature_trunk/heads/physics` | 感知主干、双头和物理量编码 |
 | `model.driving.bev/query/frustum` | BEV 几何、目标查询和视锥采样 |
-| `model.driving.attention/bev_encoder` | 当前图像/上一帧 BEV 注意力和 BEV 空间提炼 |
+| `model.driving.attention/bev_encoder` | 三目图像 Token/上一帧 BEV 注意力和 BEV 空间提炼 |
 | `model.driving.fields/lane_map/traffic_control/trajectory/behavior` | 三场、道路线、停止线灯色、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
@@ -1268,12 +1269,12 @@ ByteDrive-Toy/
 
 ### 研究边界
 
-- 当前模型仍是双帧时序、单目架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距维护
+- 当前模型是双帧时序、三目架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距维护
   历史观测，并在 CARLA 中接入轨迹选择和车辆控制；
 - 当前闭环仅面向 CARLA 0.9.15 同步仿真，使用纯追踪横向控制和纵向 PID，不等同于真实车辆部署能力；
 - 训练数据默认把所有帧展开、同场景连续帧成批并在 batch 粒度 shuffle，没有官方 train/val/test 划分；
 - 默认没有数据增强、学习率调度器、指标评测、早停或 best checkpoint；
-- 当前主配置只启用 `front` 相机，虽然采集器支持多相机 rig；
+- 驾驶路径固定使用 `front/front_left/front_right`；感知预训练仍只使用 `front`；
 - 驾驶标签依赖 CARLA 真值深度、语义、交通灯状态和 HDMap，迁移到真实数据需要重新设计监督来源；
 - 代码是研究原型，不应直接用于真实道路安全决策。
 

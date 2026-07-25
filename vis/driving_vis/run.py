@@ -1,4 +1,4 @@
-"""驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹并保存。
+"""三目驾驶可视化入口 CLI：逐帧渲染三路透视模态与 GT/预测 BEV 多任务结果。
 
 模块: vis/driving_vis/run.py
 依赖: argparse, pathlib, cv2, numpy, torch, config.load_config, model.driving_model.DrivingModel,
@@ -10,13 +10,14 @@
     driving_vis.lane_map.*（道路线类别配色与方向箭头样式）
     driving_vis.traffic_control.*（灯态配色、停止线阈值与轨迹叠加强度）
     data.dataset.dino_mean / dino_std（RGB 去归一化展示）
-    data.driving.camera（读原始 Seg/Depth 展示）
+    data.driving.cameras（三目轴顺序与原始 Seg/Depth 展示）
     model.driving.bev.*（BEV 场几何与视场）/ fields.up_channels（场分辨率）
     model.driving.traffic_control.state_names（灯态显示名）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
-      读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，行含 RGB/Seg/Depth（透视）与 GT/预测
+      读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，RGB/Seg/Depth 行内均按左/前/右拼接，
+      其后展示 GT/预测
       的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）；GT 交通控制面板同时标明
       CARLA 原生车道拓扑或旧版 HD Map 回退来源。加载驾驶权重时只接收当前
       模型存在且形状相符的键，旧检查点中的感知双头不会进入 Driving；检查点
@@ -151,7 +152,7 @@ def main(argv=None) -> None:
     device = _resolve_device()
     mean = np.asarray(cfg.data.dataset.dino_mean, dtype=np.float32)
     std = np.asarray(cfg.data.dataset.dino_std, dtype=np.float32)
-    camera = cfg.data.driving.camera
+    cameras = tuple(cfg.data.driving.cameras)
     fov = cfg.model.driving.bev.fov_deg
     bev = _bev_params(cfg)
 
@@ -162,7 +163,7 @@ def main(argv=None) -> None:
 
     panels = {name: [] for name in _ROW_ORDER}
     for idx in indices:
-        _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, mean, std, panels)
+        _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, mean, std, panels)
 
     rows = [(label, panels[label]) for label in _ROW_ORDER
             if panels[label] and (dv.show_ground_truth or not label.startswith("gt "))]
@@ -184,7 +185,7 @@ _ROW_ORDER = ("rgb", "seg", "depth",
               "gt traffic", "pred traffic", "gt traj", "pred traj")
 
 
-def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, mean, std, panels):
+def _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, mean, std, panels):
     """对单帧推理并把各模态面板追加进 panels（每列一帧）。"""
     sample = dataset[idx]
     scene_dir, frame_idx = dataset.frame_index[idx]
@@ -201,21 +202,29 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
     pred = _predict_fields(outputs)
     inview = sample["inview"].numpy()
     gt = {k: sample[k].numpy() for k in ("risk", "drivable", "distribution")}
-    _append_perspective_panels(sample, frame, camera, dv, mean, std, panels)
+    _append_perspective_panels(sample, frame, cameras, dv, mean, std, panels)
     _append_field_panels(gt, pred, inview, dv.field_colormap, panels)
     _append_lane_panels(sample, outputs, inview, dv.lane_map, panels)
     traffic_layers = _append_traffic_panels(sample, outputs, frame["meta"], cfg, dv, inview, panels)
     _append_trajectory_panels(sample, outputs, gt, pred, traffic_layers, dv, bev, fov, panels)
 
 
-def _append_perspective_panels(sample, frame, camera, dv, mean, std, panels):
-    """追加 RGB、语义和深度透视面板。"""
-    rgb = sample["rgb"].cpu().numpy() * std[:, None, None] + mean[:, None, None]
-    panels["rgb"].append(render.to_display_bgr(rgb))
-    panels["seg"].append(render.colorize_semantic(np.ascontiguousarray(frame["semantic"][camera])))
-    panels["depth"].append(render.colorize_depth(
-        np.ascontiguousarray(frame["depth"][camera]).astype(np.float32),
-        dv.depth_colormap, dv.depth_max_display_m, dv.depth_min_display_m, dv.depth_log))
+def _append_perspective_panels(sample, frame, cameras, dv, mean, std, panels):
+    """按左/前/右拼接三路 RGB、语义和深度透视面板。"""
+    indices = [cameras.index(name) for name in ("front_left", "front", "front_right")]
+    rgb = (sample["rgb"].cpu().numpy() * std[None, :, None, None]
+           + mean[None, :, None, None])
+    panels["rgb"].append(np.hstack([render.to_display_bgr(rgb[index]) for index in indices]))
+    panels["seg"].append(np.hstack([
+        render.colorize_semantic(np.ascontiguousarray(frame["semantic"][cameras[index]]))
+        for index in indices
+    ]))
+    panels["depth"].append(np.hstack([
+        render.colorize_depth(
+            np.ascontiguousarray(frame["depth"][cameras[index]]).astype(np.float32),
+            dv.depth_colormap, dv.depth_max_display_m, dv.depth_min_display_m, dv.depth_log)
+        for index in indices
+    ]))
 
 
 def _append_field_panels(gt, pred, inview, colormap, panels):

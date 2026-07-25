@@ -9,7 +9,8 @@
     clone_loop.ipc.frame_name
     clone_loop.simulation.base_seed
     clone_loop.route.min_distance_m / max_distance_m / max_episodes / queue_seed
-    clone_loop.camera.width / height
+    carla_collector.cameras.width / height
+    data.driving.cameras
     clone_loop.control.* / clone_loop.simulation.fixed_delta_seconds
     clone_loop.output.root / log_every
     （模型推理、worker 与各子模块继续读取其文件头所列配置）
@@ -55,9 +56,10 @@ def _resolve_output(path):
     return output
 
 
-def _frame_array(shared, height, width):
-    """复制当前共享帧，使下一次 worker 写入与本步 PyTorch 消费完全解耦。"""
-    return np.frombuffer(shared.read(), dtype=np.uint8).reshape(height, width, 3).copy()
+def _frame_array(shared, views, height, width):
+    """复制当前三目共享帧，使下一次 worker 写入与本步 PyTorch 消费完全解耦。"""
+    return np.frombuffer(shared.read(), dtype=np.uint8).reshape(
+        views, height, width, 3).copy()
 
 
 def _manual_stop_requested():
@@ -76,6 +78,9 @@ def _manual_stop_requested():
 
 def _episode(worker, shared, policy, controller, recorder, logger, route, seed, cfg):
     """运行一条路线直至 worker 返回终态，并返回 episode 汇总。"""
+    cl = cfg.clone_loop
+    camera_cfg = cfg.carla_collector.cameras
+    views = len(cfg.data.driving.cameras)
     policy.reset()
     controller.reset()
     observation = worker.reset(seed, route)
@@ -84,7 +89,7 @@ def _episode(worker, shared, policy, controller, recorder, logger, route, seed, 
             observation = dict(observation, status=P.STATUS_MANUAL)
             print("[clone_loop] 已手动结束当前 episode")
             break
-        frame = _frame_array(shared, cfg.camera.height, cfg.camera.width)
+        frame = _frame_array(shared, views, camera_cfg.height, camera_cfg.width)
         decision = policy.infer(frame, observation)
         command = controller.command(
             decision["trajectory"], observation["speed_mps"],
@@ -92,12 +97,12 @@ def _episode(worker, shared, policy, controller, recorder, logger, route, seed, 
         recorder.write(frame, decision, observation, command)
         observation = worker.step(command)
         logger.write_step(observation, command, decision)
-        if observation["step"] % cfg.output.log_every == 0:
+        if observation["step"] % cl.output.log_every == 0:
             print("[clone_loop] step={} progress={:.1%} speed={:.2f}m/s mode={}".format(
                 observation["step"], observation["route_completion"],
                 observation["speed_mps"], decision["mode"]))
     recorder.write_terminal(_frame_array(
-        shared, cfg.camera.height, cfg.camera.width))
+        shared, views, camera_cfg.height, camera_cfg.width))
     recorder.close()
     return logger.finish_episode(observation, recorder.artifacts)
 
@@ -106,8 +111,10 @@ def run_closed_loop(cfg, max_episodes_override=None):
     """执行配置的 CARLA 闭环路线队列并返回运行级汇总。"""
     check_episode_override(max_episodes_override)
     cl = cfg.clone_loop
+    camera_cfg = cfg.carla_collector.cameras
+    views = len(cfg.data.driving.cameras)
     output_root = _resolve_output(cl.output.root)
-    frame_size = cl.camera.width * cl.camera.height * 3
+    frame_size = views * camera_cfg.width * camera_cfg.height * 3
     frame_name = "{}_{}".format(cl.ipc.frame_name, os.getpid())
     backing_path = output_root / (frame_name + ".bin")
     shared = SharedFrame(frame_name, frame_size, backing_path, create=True)
@@ -139,7 +146,7 @@ def run_closed_loop(cfg, max_episodes_override=None):
             recorder = EpisodeRecorder(logger.run_dir, index, cfg)
             try:
                 summary = _episode(
-                    worker, shared, policy, controller, recorder, logger, route, seed, cl)
+                    worker, shared, policy, controller, recorder, logger, route, seed, cfg)
             finally:
                 recorder.close()
             print("[clone_loop] episode={} status={} progress={:.1%} steps={}".format(

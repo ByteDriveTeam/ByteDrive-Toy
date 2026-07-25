@@ -20,7 +20,8 @@
       1×1 CNN 降到 planning_dim；path1 直接、path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个
       随机初始化的可学习 Mode Token 携各自预查询依次经两个 CTB，其后四层 TB 协调各 Mode。轨迹头直接回归 8 个
       扇区中线米制基线的物理残差（米），零初始化保证初始预测严格等于基线；轨迹的预测与监督全程在物理空间，
-      不再经 Symlog 编解码。
+      不再经 Symlog 编解码。baseline 保留原 state-dict 键以兼容旧权重，但加载时始终按当前 FOV 配置重建，
+      避免旧 90° 派生缓存覆盖三目 180° 基线。
 """
 
 from __future__ import annotations
@@ -84,6 +85,16 @@ class TrajectoryDecoder(nn.Module):
         baseline = _sector_baselines(
             tj.num_modes, tj.num_waypoints, cfg_driving.bev.fov_deg, tj.baseline_step_m)
         self.register_buffer("baseline", baseline)   # 米制基线，残差直接叠加于此（物理空间）
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        """保留旧检查点结构，但配置派生基线始终采用当前模型构造值。"""
+        key = prefix + "baseline"
+        if key in state_dict:
+            state_dict[key] = self.baseline
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
 
     def forward(self, perception_features: Sequence[torch.Tensor], target_point: torch.Tensor,
                 ego_velocity: torch.Tensor) -> Dict[str, torch.Tensor]:

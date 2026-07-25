@@ -1,11 +1,12 @@
-"""逐 episode 编码前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
+"""逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
 
 模块: clone_loop/recorder/recorder.py
 依赖: fractions, pathlib, av, cv2, numpy, data.driving_targets, vis.driving_vis.render,
       clone_loop.recorder.checks.recorder_checks
 读取配置:
     clone_loop.recording.enabled / codec / crf / tile_size_px
-    clone_loop.camera.width / height
+    carla_collector.cameras.width / height
+    data.driving.cameras
     clone_loop.simulation.fixed_delta_seconds
     model.driving.bev.* / model.driving.fields.up_channels
     driving_vis.field_colormap / lane_map.* / traffic_control.*
@@ -15,7 +16,7 @@
         .write_terminal(frame_bgr) -> None
         .artifacts -> dict
         .close() -> None
-说明: 驾驶录像保存原始前向 RGB；推理录像为三行画布：相机/HUD、三场、道路线/交通控制/多模态轨迹。
+说明: 驾驶录像按左/前/右横向拼接三路 RGB；推理录像为三行画布：三目/HUD、三场、道路线/交通控制/轨迹。
 """
 
 from fractions import Fraction
@@ -75,6 +76,10 @@ class EpisodeRecorder:
         self._driving = None
         self._inference = None
         self._artifacts = {}
+        camera_names = list(cfg.data.driving.cameras)
+        self._display_indices = [
+            camera_names.index(name) for name in ("front_left", "front", "front_right")
+        ]
         if not self._enabled:
             return
         self._prepare_geometry()
@@ -89,7 +94,8 @@ class EpisodeRecorder:
         try:
             self._driving = _VideoSink(
                 Path(run_dir) / driving_name, self._recording.codec, self._recording.crf,
-                fps, cfg.clone_loop.camera.width, cfg.clone_loop.camera.height)
+                fps, cfg.carla_collector.cameras.width * len(camera_names),
+                cfg.carla_collector.cameras.height)
             canvas_size = self._recording.tile_size_px * 3
             self._inference = _VideoSink(
                 Path(run_dir) / inference_name, self._recording.codec, self._recording.crf,
@@ -110,14 +116,19 @@ class EpisodeRecorder:
         """写入当前模型输入画面和与之对应的全部推理输出画布。"""
         if not self._enabled:
             return
-        self._driving.write(frame_bgr)
+        triptych = self._triptych(frame_bgr)
+        self._driving.write(triptych)
         self._inference.write(
-            self._render_inference(frame_bgr, decision, observation, command))
+            self._render_inference(triptych, decision, observation, command))
 
     def write_terminal(self, frame_bgr):
         """终态没有下一次模型推理，仅把最后一帧追加到驾驶实况。"""
         if self._enabled:
-            self._driving.write(frame_bgr)
+            self._driving.write(self._triptych(frame_bgr))
+
+    def _triptych(self, frames):
+        """把统一相机轴重排为左/前/右，横向拼成驾驶实况画面。"""
+        return np.ascontiguousarray(np.hstack(frames[self._display_indices]))
 
     @property
     def artifacts(self):

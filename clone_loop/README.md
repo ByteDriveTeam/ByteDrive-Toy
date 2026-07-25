@@ -7,7 +7,7 @@
 主环境（PyTorch）                         Py37 worker（CARLA 0.9.15）
 ────────────────────                     ─────────────────────────
 路线队列 / episode 编排 ─── JSON ───────► 重载地图、布置交通流
-DrivingModel ◄──────── 共享 RGB 帧 ────── 前向相机严格同步
+DrivingModel ◄──────── 三目共享 RGB 帧 ── 三路相机严格同步
 轨迹安全重排
 纯追踪 + 速度 PID ─────── JSON control ─► apply_control → world.tick
 逐步 JSONL / summary ◄──── 状态元数据 ─── 路线进度、碰撞、压线、终态
@@ -16,7 +16,8 @@ DrivingModel ◄──────── 共享 RGB 帧 ────── 前�
 
 ## 关键口径
 
-- 输入与训练一致：BGR 转 RGB、ImageNet/DINO 归一化；相机内外参与 `DrivingDataset` 顺序一致。
+- 输入与训练一致：三路 BGR 转 RGB、ImageNet/DINO 归一化；相机轴、内外参均按
+  `data.driving.cameras` 的 `front/front_left/front_right` 顺序。
 - 时序与训练一致：主环境按 `waypoint_dt_s / fixed_delta_seconds` 缓存对应时距的历史 RGB/位姿；
   历史未满时以当前帧回填且 `previous_valid=0`。
 - 导航目标来自 CARLA 全局路线前方固定弧长点，并转换为 ego 左手系 `(x 前, y 右)`。
@@ -54,7 +55,7 @@ DrivingModel ◄──────── 共享 RGB 帧 ────── 前�
 每次运行会在 `clone_loop.output.root/run_<时间>/` 下生成：
 
 - `episode_XXXX.jsonl`：每步观测、控制、模式评分、置信度与行为概率；
-- `episode_XXXX_driving.mp4`：原始前向相机驾驶实况，包含终态帧；
+- `episode_XXXX_driving.mp4`：左/前/右三目横向拼接驾驶实况，包含终态帧；
 - `episode_XXXX_inference.mp4`：每次模型推理的三行诊断画布，包含相机/HUD、三场、
   道路线、交通控制与全部候选轨迹；
 - `summary.json`：成功率与每条路线的终态、进度、里程、压线等摘要。

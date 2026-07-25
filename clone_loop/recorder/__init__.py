@@ -1,4 +1,4 @@
-"""闭环驾驶与逐帧推理录像器的公开 API 重导出入口。
+"""闭环三目驾驶与逐帧推理录像器的公开 API 重导出入口。
 
 模块: clone_loop/recorder/__init__.py
 依赖: clone_loop.recorder.recorder

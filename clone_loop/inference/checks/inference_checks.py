@@ -2,10 +2,11 @@ import numpy as np
 import torch
 
 
-def check_frame(frame, height, width):
-    """校验对象: ClosedLoopPolicy.infer 的 frame_bgr —— 必须匹配配置相机。"""
-    if frame.shape != (height, width, 3) or frame.dtype != np.uint8:
-        raise ValueError("闭环 RGB 期望 ({},{},3) uint8".format(height, width))
+def check_frame(frame, views, height, width):
+    """校验对象: ClosedLoopPolicy.infer 的 frame_bgr —— 必须匹配三目配置。"""
+    if frame.shape != (views, height, width, 3) or frame.dtype != np.uint8:
+        raise ValueError("闭环 RGB 期望 ({},{},{},3) uint8".format(
+            views, height, width))
 
 
 def check_observation(observation):
@@ -16,6 +17,9 @@ def check_observation(observation):
         raise ValueError("闭环观测缺少字段: {}".format(sorted(missing)))
     if not all(np.all(np.isfinite(observation[key])) for key in expected):
         raise ValueError("闭环观测包含非有限数")
+    if np.shape(observation["intrinsics"]) != (3, 4) \
+            or np.shape(observation["extrinsics"]) != (3, 6):
+        raise ValueError("闭环三目标定期望 intrinsics [3,4]、extrinsics [3,6]")
 
 
 def check_trajectory_candidates(trajectories, max_abs_waypoint_m):

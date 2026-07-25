@@ -1,4 +1,4 @@
-"""加载驾驶权重、维护双帧状态，并按置信度/安全场/路线一致性选择闭环轨迹。
+"""加载三目驾驶权重、维护双帧状态，并按置信度/安全场/路线一致性选择闭环轨迹。
 
 模块: clone_loop/inference/inference.py
 依赖: collections, pathlib, numpy, torch, torch.nn.functional, model.driving_model,
@@ -7,7 +7,8 @@
     clone_loop.inference.checkpoint / device / min_weight_coverage / confidence_weight /
         risk_weight / drivable_weight / route_alignment_weight / max_abs_waypoint_m
     clone_loop.recording.enabled
-    clone_loop.camera.width / height
+    carla_collector.cameras.width / height
+    data.driving.cameras
     clone_loop.control.waypoint_dt_s / clone_loop.simulation.fixed_delta_seconds
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
@@ -45,7 +46,8 @@ class ClosedLoopPolicy:
     def __init__(self, cfg):
         self._cfg = cfg
         self._inference_cfg = cfg.clone_loop.inference
-        self._camera_cfg = cfg.clone_loop.camera
+        self._camera_cfg = cfg.carla_collector.cameras
+        self._camera_names = tuple(cfg.data.driving.cameras)
         self._record_outputs = cfg.clone_loop.recording.enabled
         self._device = self._resolve_device(self._inference_cfg.device)
         self._mean = torch.tensor(
@@ -96,7 +98,9 @@ class ClosedLoopPolicy:
 
     def infer(self, frame_bgr, observation):
         """对当前共享帧推理，返回选中轨迹、行为概率和各模态评分。"""
-        check_frame(frame_bgr, self._camera_cfg.height, self._camera_cfg.width)
+        check_frame(
+            frame_bgr, len(self._camera_names),
+            self._camera_cfg.height, self._camera_cfg.width)
         check_observation(observation)
         current_rgb = self._normalize(frame_bgr)
         current_pose = np.asarray(observation["pose"], dtype=np.float64)
@@ -150,9 +154,9 @@ class ClosedLoopPolicy:
         return fields
 
     def _normalize(self, bgr):
-        """BGR uint8 → DINO 所需的归一化 RGB `[1,3,H,W]`。"""
-        rgb = torch.from_numpy(np.ascontiguousarray(bgr[:, :, ::-1])).float() / 255.0
-        return ((rgb.permute(2, 0, 1) - self._mean) / self._std).unsqueeze(0)
+        """三路 BGR uint8 → DINO 所需的归一化 RGB `[1,3,3,H,W]`。"""
+        rgb = torch.from_numpy(np.ascontiguousarray(bgr[..., ::-1])).float() / 255.0
+        return ((rgb.permute(0, 3, 1, 2) - self._mean) / self._std).unsqueeze(0)
 
     def _inputs(self, current, previous, transform, previous_valid, observation):
         """把纯数值观测装配为 DrivingModel 的命名张量输入。"""

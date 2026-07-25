@@ -12,12 +12,12 @@
     - speed_accelerations(world_velocities, sim_times) -> (F,) float32   # 逐帧标量速度加速度
     - trajectory_targets(future_poses6, current_pose6, num_waypoints) -> (waypoints(K,2), valid(K))
     - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
-    - risk_field(depth_m, intrinsics4, extrinsic6, bev, fov_deg, depth_max_m) -> (H,W) float32  # 包络外=风险
+    - risk_field(depth_maps, intrinsics, extrinsics, bev, fov_deg, depth_max_m) -> (H,W) float32
     - visible_moving_box_occupancy(...) -> (H,W) float32                  # 深度筛选后的运动 box BEV 占用
     - distribution_field(waypoints, valid, bev, sigma_m) -> (H,W) float32           # GT 航点高斯软占据
-说明: BEV 为 ego 前向单目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
+说明: BEV 为 ego 前向三目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
       vis.data_vis.geometry（CARLA 左手系，已测），故 data 侧不重复实现投影。风险场把全部深度像素反投影到 ego
-      BEV 得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
+      BEV 合并得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
       可行驶区域只考虑可运动类别 vehicle/pedestrian，二者不分类、统一视为占用；先筛出与 BEV 相交的 3D 框，
       再把 GT 深度像素反投影，框内深度点不少于配置阈值（默认 10 像素）才栅格化其 BEV 足迹。ego 与场景级
       traffic_sign/traffic_light/pole/static 均不参与。
@@ -39,7 +39,7 @@ import numpy as np
 from data.driving_targets.checks.driving_targets_checks import (
     check_behavior_inputs,
     check_bev_params,
-    check_depth_map,
+    check_multicamera_inputs,
     check_motion_sequence,
     check_visible_moving_box_inputs,
 )
@@ -159,7 +159,7 @@ def trajectory_targets(future_poses6, current_pose6, num_waypoints: int):
 def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,
                      acceleration_mps2: float, bboxes, traffic_lights, traffic_light_states,
                      static_bboxes, semantic: np.ndarray, current_pose6, intrinsics,
-                     camera_extrinsic6, bev: BevParams, fov_deg: float,
+                     camera_extrinsics, bev: BevParams, fov_deg: float,
                      params: BehaviorParams, red_light_relevant=None) -> np.ndarray:
     """生成固定顺序的八类行为多热标签 `(8,)`。
 
@@ -185,7 +185,7 @@ def behavior_targets(waypoints: np.ndarray, valid: np.ndarray, speed_mps: float,
         if red_light_relevant is None:
             labels[1] = float(_has_visible_red_light(
                 traffic_lights, traffic_light_states, static_bboxes, semantic, current_pose6,
-                intrinsics, camera_extrinsic6, bev, fov_deg, params))
+                intrinsics, camera_extrinsics, bev, fov_deg, params))
     return labels
 
 
@@ -221,8 +221,8 @@ def _has_front_agent(bboxes, current_pose6, bev, lane_half_width_m):
 
 
 def _has_visible_red_light(traffic_lights, states, static_bboxes, semantic, current_pose6,
-                           intrinsics, camera_extrinsic6, bev, fov_deg, params):
-    """红灯 actor 状态 + 静态框视场/BEV + 投影框 Seg 像素联合判定可见红灯。"""
+                           intrinsics, camera_extrinsics, bev, fov_deg, params):
+    """红灯 actor 状态 + 静态框联合视场/BEV + 任一路 Seg 像素判定可见红灯。"""
     red_ids = {state["id"] for state in states if state.get("state") == "red"}
     red_lights = [light for light in traffic_lights if light.get("id") in red_ids]
     light_boxes = [box for box in static_bboxes if box.get("semantic") == "traffic_light"]
@@ -247,11 +247,15 @@ def _has_visible_red_light(traffic_lights, states, static_bboxes, semantic, curr
     if not candidates:
         return False
 
-    w2c = world_to_camera(current_pose6, camera_extrinsic6)
-    k = intrinsic_matrix(intrinsics)
-    return any(_bbox_hits_semantic(
-        box, semantic, w2c, k, params.traffic_light_semantic_tag,
-        params.traffic_light_seg_margin_px, params.traffic_light_min_pixels) for box in candidates)
+    camera_geometry = (
+        (semantic_view, world_to_camera(current_pose6, extrinsic), intrinsic_matrix(intrinsic))
+        for semantic_view, intrinsic, extrinsic in zip(semantic, intrinsics, camera_extrinsics)
+    )
+    return any(
+        _bbox_hits_semantic(
+            box, semantic_view, w2c, k, params.traffic_light_semantic_tag,
+            params.traffic_light_seg_margin_px, params.traffic_light_min_pixels)
+        for semantic_view, w2c, k in camera_geometry for box in candidates)
 
 
 def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixels):
@@ -270,24 +274,25 @@ def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixe
     return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
 
 
-def visible_moving_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, current_pose6,
-                                 camera_extrinsic6, bev: BevParams, depth_max_m: float,
+def visible_moving_box_occupancy(bboxes, depth_maps: np.ndarray, intrinsics, current_pose6,
+                                 camera_extrinsics, bev: BevParams, depth_max_m: float,
                                  min_visible_pixels: int) -> np.ndarray:
-    """把深度图确认可见的运动类别 3D box 栅格化为 BEV 占用 `(H,W)`。
+    """把任一路深度确认可见的运动类别 3D box 栅格化为 BEV 占用 `(H,W)`。
 
     参数:
         bboxes: 世界系 3D 框；仅 vehicle/pedestrian 参与，二者统一作为占用。
-        depth_m: 当前相机 GT 深度图（米）。
-        intrinsics: 当前相机内参 dict。
+        depth_maps: 三路 GT 深度图 `[V,H,W]`（米）。
+        intrinsics: 三路相机内参 dict 序列。
         current_pose6: 当前主车世界位姿。
-        camera_extrinsic6: 相机相对主车外参。
+        camera_extrinsics: 三路相机相对主车外参 `[V,6]`。
         bev: 输出 BEV 几何。
         depth_max_m: 有效监督深度上限。
         min_visible_pixels: 判为可见所需的最少框内深度像素数；配置保证不少于 10。
     返回:
-        float32 二值占用图；1 表示当前相机可见 box 的地面足迹。
+        float32 二值占用图；1 表示至少一路相机可见 box 的地面足迹。
     """
-    check_visible_moving_box_inputs(depth_m, min_visible_pixels)
+    check_visible_moving_box_inputs(
+        depth_maps, intrinsics, np.asarray(camera_extrinsics), min_visible_pixels)
     occupancy = np.zeros((bev.height, bev.width), dtype=np.uint8)
     boxes = [box for box in bboxes if box.get("semantic") in _MOVING_BOX_SEMANTICS]
     if not boxes:
@@ -303,23 +308,33 @@ def visible_moving_box_occupancy(bboxes, depth_m: np.ndarray, intrinsics, curren
     boxes = [box for box, keep in zip(boxes, relevant) if keep]
     ego_corners = ego_corners[relevant]
     world_corners = world_corners[relevant]
-    camera_to_world = transform_matrix(current_pose6) @ transform_matrix(camera_extrinsic6)
-    uv, camera_depth = project_points(
-        world_corners.reshape(-1, 3), np.linalg.inv(camera_to_world),
-        intrinsic_matrix(intrinsics))
-    uv = uv.reshape(-1, 8, 2)
-    camera_depth = camera_depth.reshape(-1, 8)
-    visible = np.array([
-        _box_matches_depth(box, box_uv, box_depth, depth_m, intrinsics, camera_to_world,
-                           depth_max_m, min_visible_pixels)
-        for box, box_uv, box_depth in zip(boxes, uv, camera_depth)
-    ])
+    visible = np.zeros(len(boxes), dtype=bool)
+    for depth_m, intrinsic, extrinsic in zip(depth_maps, intrinsics, camera_extrinsics):
+        camera_to_world = transform_matrix(current_pose6) @ transform_matrix(extrinsic)
+        visible |= _visible_boxes_in_camera(
+            boxes, world_corners, depth_m, intrinsic, camera_to_world,
+            depth_max_m, min_visible_pixels)
 
     for corners in ego_corners[visible]:
         rows, cols = ego_xy_to_pixel(corners[:, :2], bev)
         polygon = cv2.convexHull(np.stack((cols, rows), axis=1).round().astype(np.int32))
         cv2.fillConvexPoly(occupancy, polygon, 1)
     return occupancy.astype(np.float32)
+
+
+def _visible_boxes_in_camera(boxes, world_corners, depth_m, intrinsics, camera_to_world,
+                             depth_max_m, min_visible_pixels):
+    """返回单路相机确认可见的 box 布尔向量，供三路结果按或融合。"""
+    uv, camera_depth = project_points(
+        world_corners.reshape(-1, 3), np.linalg.inv(camera_to_world),
+        intrinsic_matrix(intrinsics))
+    uv = uv.reshape(-1, 8, 2)
+    camera_depth = camera_depth.reshape(-1, 8)
+    return np.array([
+        _box_matches_depth(box, box_uv, box_depth, depth_m, intrinsics, camera_to_world,
+                           depth_max_m, min_visible_pixels)
+        for box, box_uv, box_depth in zip(boxes, uv, camera_depth)
+    ])
 
 
 def _boxes_intersect_bev(ego_corners: np.ndarray, bev: BevParams) -> np.ndarray:
@@ -398,30 +413,25 @@ def _image_pixel_grid(hc: int, wc: int):
     return vv, uu
 
 
-def risk_field(depth_m: np.ndarray, intrinsics4, extrinsic6, bev: BevParams,
+def risk_field(depth_maps: np.ndarray, intrinsics, extrinsics, bev: BevParams,
                fov_deg: float, depth_max_m: float) -> np.ndarray:
-    """遮挡风险场 `(H, W)`：深度投影外缘线包络之外即风险。
+    """三目遮挡风险场 `(H, W)`：联合深度投影外缘线包络之外即风险。
 
     把全部有效深度像素反投影到 ego BEV 得可视表面点云，按方位角分箱取每个方位的最大观测距离，构成「恰好
     包裹所有平面投影点的外缘线」。BEV cell 位于其所在方位包络之外（更远）即为遮挡/未观测→风险=1；包络之内
     （已观测的自由/表面）为 0。排除超范围/天空像素（depth>=depth_max_m），使其不把包络推到无穷。无观测点的
     方位（含视场内被完全遮挡）包络为 0，其所有 cell 记为风险。
     """
-    check_depth_map(depth_m)
-    fx, fy, cx, cy = (float(v) for v in intrinsics4)
+    extrinsics = np.asarray(extrinsics)
+    check_multicamera_inputs(depth_maps, intrinsics, extrinsics)
     half = math.radians(fov_deg) * 0.5
-    ego_from_cam = transform_matrix(extrinsic6)
-
-    # 反投影全部像素到 ego 平面（像平面系→传感器系→ego 系，与 vis.geometry.project_points 互逆）
-    hc, wc = depth_m.shape
-    vv, uu = _image_pixel_grid(hc, wc)          # 像素坐标网格随图像尺寸恒定，有界记忆化
-    d = depth_m.astype(np.float64)
-    sensor = np.stack([d, (uu - cx) / fx * d, -((vv - cy) / fy * d)], axis=-1).reshape(-1, 3)
-    ego = transform_points(sensor, ego_from_cam)
-    rng = np.hypot(ego[:, 0], ego[:, 1])
-    bearing = np.arctan2(ego[:, 1], ego[:, 0])
-    p_valid = (d.reshape(-1) > _RISK_MIN_DEPTH_M) & (d.reshape(-1) < depth_max_m) \
-        & (ego[:, 0] > 0) & (np.abs(bearing) <= half)
+    projected = [
+        _project_depth_to_ego(depth, intrinsic, extrinsic, depth_max_m, half)
+        for depth, intrinsic, extrinsic in zip(depth_maps, intrinsics, extrinsics)
+    ]
+    rng = np.concatenate([item[0] for item in projected])
+    bearing = np.concatenate([item[1] for item in projected])
+    p_valid = np.concatenate([item[2] for item in projected])
 
     # 每个方位箱的最大观测距离 = 外缘线包络
     r_max = np.zeros(_RISK_BEARING_BINS)
@@ -437,6 +447,24 @@ def risk_field(depth_m: np.ndarray, intrinsics4, extrinsic6, bev: BevParams,
     c_bin = _bearing_bin(c_bear, half)
     risk = c_in & (c_rng > r_max[c_bin])
     return risk.astype(np.float32)
+
+
+def _project_depth_to_ego(depth_m, intrinsics4, extrinsic6, depth_max_m, half_fov):
+    """把单路深度反投影到 ego 平面，返回距离、方位与联合视场有效位。"""
+    fx, fy, cx, cy = (float(v) for v in intrinsics4)
+    hc, wc = depth_m.shape
+    vv, uu = _image_pixel_grid(hc, wc)
+    depth = depth_m.astype(np.float64)
+    sensor = np.stack([
+        depth, (uu - cx) / fx * depth, -((vv - cy) / fy * depth),
+    ], axis=-1).reshape(-1, 3)
+    ego = transform_points(sensor, transform_matrix(extrinsic6))
+    rng = np.hypot(ego[:, 0], ego[:, 1])
+    bearing = np.arctan2(ego[:, 1], ego[:, 0])
+    valid = ((depth.reshape(-1) > _RISK_MIN_DEPTH_M)
+             & (depth.reshape(-1) < depth_max_m)
+             & (ego[:, 0] > 0) & (np.abs(bearing) <= half_fov))
+    return rng, bearing, valid
 
 
 def _bearing_bin(bearing: np.ndarray, half: float) -> np.ndarray:

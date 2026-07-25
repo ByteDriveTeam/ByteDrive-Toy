@@ -63,7 +63,7 @@ carla_collector:
       depth: true          # 深度相机（BGR 编码）→ 解码为米存 LMDB
       semantic: true       # 语义分割相机 → 单通道标签存 LMDB
       optical_flow: false   # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
-    rig:                       # 默认 6 视；fov/yaw 为度，x 前向、y 右向、z 上向（米）
+    rig:                       # 默认三目；其余视角可选，fov/yaw 为度，x 前向、y 右向、z 上向（米）
       - {name: front,       fov: 90.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
       # - {name: front_far,   fov: 60.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
       - {name: front_left,  fov: 90.0, x: 1.2,  y: -0.5, z: 1.6, roll: 0.0, pitch: 0.0, yaw: -45.0}
@@ -74,7 +74,7 @@ carla_collector:
 
   # 语义分割 Lidar（sensor.lidar.ray_cast_semantic）
   lidar:
-    enabled: true              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
+    enabled: false              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
     channels: 64
     range_m: 64.0
     points_per_second: 1300000
@@ -194,7 +194,7 @@ model:
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
     neck_num_residual_blocks: 2  # driving_neck 融合+frustum 后的 2D 残差块层数
 
-    # BEV（ego 前向单目）几何——坐标量程/分辨率/视场/z 采样的单一来源，供模型与数据侧共用
+    # BEV（ego 前向三目）几何——坐标量程/分辨率/联合视场/z 采样的单一来源，供模型与数据侧共用
     bev:
       x_min_m: 0.0               # 前向下界（自车所在，BEV 下沿）
       x_max_m: 64.0              # 前向上界（BEV 上沿）
@@ -202,7 +202,7 @@ model:
       y_max_m: 32.0              # 左右上界
       height: 32                 # Hb：BEV 工作网格前向格数（= 初始查询分辨率）
       width: 32                  # Wb：BEV 工作网格左右格数
-      fov_deg: 90.0              # 前向视场角（仅监督视场内）
+      fov_deg: 180.0             # front/front_left/front_right 联合前半平面视场（仅监督视场内）
       z_min_m: -3.0              # BEV 查询几何嵌入垂直采样下界
       z_max_m: 8.0               # 垂直采样上界
       z_step_m: 0.1              # 垂直采样步长（[-3,8]@0.1 → 111 层）
@@ -287,11 +287,11 @@ data:
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
 
-  # 驾驶双帧数据集：复用感知读取，另产帧间刚性变换、三场、道路线图、轨迹/行为 GT 与标定/目标点。
+  # 驾驶双帧三目数据集：复用感知读取，另产帧间刚性变换、三场、道路线图、轨迹/行为 GT 与标定/目标点。
   # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
   driving:
     scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
-    camera: front             # 前向单目相机名
+    cameras: [front, front_left, front_right]  # 三目相机轴的统一顺序（训练、模型与闭环共用）
     map_dir: data/map         # HD 地图目录
     map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town02_HD_map.npz）
     previous_frame_offset: 1   # 时序融合使用同场景前一帧；场景开头以 identity + 无效位安全跳过
@@ -452,16 +452,6 @@ clone_loop:
 
   ego:
     vehicle_filter: vehicle.lincoln.mkz_2020
-
-  camera:
-    width: 768
-    height: 384
-    x: 1.5
-    y: 0.0
-    z: 1.6
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
 
   inference:
     checkpoint: train/ckpt/driving/driving.pt

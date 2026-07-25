@@ -1,4 +1,4 @@
-"""驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。公开 API 重导出入口。
+"""三目驾驶监督编码：BEV/轨迹/三场、联合可见运动占用及行为标签的公开 API 入口。
 
 模块: data/driving_targets/__init__.py
 依赖: data.driving_targets.driving_targets

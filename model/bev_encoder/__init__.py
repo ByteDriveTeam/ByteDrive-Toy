@@ -1,4 +1,4 @@
-"""BEV 编码器：融合图像与历史并提供六层主干末端及第 3/6 层规划特征。公开 API 重导出入口。
+"""BEV 编码器：融合三目图像 Token 与历史并提供多层规划特征的公开 API 入口。
 
 模块: model/bev_encoder/__init__.py
 依赖: model.bev_encoder.bev_encoder

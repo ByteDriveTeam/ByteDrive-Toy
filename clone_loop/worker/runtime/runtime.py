@@ -7,8 +7,9 @@
     clone_loop.worker.carla_host / carla_port / startup_timeout_s / command_timeout_s
     clone_loop.simulation.map / fixed_delta_seconds / warmup_ticks / max_steps / random_weather
     clone_loop.route.* / traffic.num_vehicles / vehicle_filter / tm_port
-    clone_loop.ego.vehicle_filter / camera.* / safety.max_route_deviation_m
-    model.driving.bev.fov_deg
+    clone_loop.ego.vehicle_filter / safety.max_route_deviation_m
+    carla_collector.cameras.width / height / rig
+    data.driving.cameras
 对外接口:
     - CarlaRuntime(cfg, shared_frame)
         .server_info() -> dict
@@ -47,7 +48,8 @@ class CarlaRuntime:
 
     def __init__(self, cfg, shared_frame):
         self._cfg = cfg.clone_loop
-        self._camera_fov = cfg.model.driving.bev.fov_deg
+        self._cameras_cfg = cfg.carla_collector.cameras
+        self._camera_names = tuple(cfg.data.driving.cameras)
         self._frame = shared_frame
         self._client = carla.Client(
             self._cfg.worker.carla_host, self._cfg.worker.carla_port)
@@ -82,7 +84,7 @@ class CarlaRuntime:
         self._ego = self._spawn_ego(route["start"])
         self._vehicle_ids = self._spawn_traffic()
         self._sensors = ClosedLoopSensors(
-            self._world, self._ego, self._cfg.camera, self._camera_fov)
+            self._world, self._ego, self._cameras_cfg, self._camera_names)
         self._navigator = RouteNavigator(
             self._world.get_map(), route["start"], route["end"], self._cfg.route)
         self._steps = 0
