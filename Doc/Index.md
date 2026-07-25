@@ -51,7 +51,7 @@ Py37 采集端 `worker/`（仅 py37_venv 运行）
 Py312 编排处理端 `collector/`（根 .venv 运行）
 
 - [collector/worker_proc/worker_proc.py](../data/carla_data_collector/collector/worker_proc/worker_proc.py) — 派生并驱动 Py37 worker 子进程的控制管道客户端
-- [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — 由可达点构建路线队列：两两组合、按直线距离过滤、随机排序、确保不重复
+- [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — 由可达点构建路线队列：距离过滤、随机排序，并剔除起终点邻近的相似路线
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — 逐场景随机：种子与天气预设（决策与记录都在 collector 侧，便于复现）
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — 把单相机的 BGR 帧序列编码为 H.265 mp4
 - [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据写入 LMDB（深度/语义Lidar/包围框/主车状态/元数据/视频引用）

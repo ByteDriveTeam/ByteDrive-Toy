@@ -253,16 +253,17 @@ def run(cfg, max_scenes_override=None):
         spawn_points = worker.query_spawn_points()
 
         max_scenes = max_scenes_override if max_scenes_override is not None else cc.route.max_scenes
-        # 先建全量有序队列再剔除已采路线，最后才按 max_scenes 裁剪：使续采时 max_scenes 表示
-        # 「本次再采多少条新路线」，而非被已采路线占满名额
-        full_queue = build_route_queue(spawn_points, cc.route.min_distance_m,
-                                       cc.route.max_distance_m, cc.route.queue_seed, 0)
-        queue = [r for r in full_queue if (r["start_idx"], r["end_idx"]) not in done_routes]
-        skipped = len(full_queue) - len(queue)
+        # 已采路线作为优先代表参与相似过滤，避免旧数据中的相邻路线在续采时换一个端点组合再次入队。
+        # max_scenes 最后裁剪，使它表示「本次再采多少条新路线」，而非被已采路线占满名额。
+        queue = build_route_queue(
+            spawn_points, cc.route.min_distance_m, cc.route.max_distance_m,
+            cc.route.queue_seed, 0, similarity_threshold=cc.route.similarity_threshold_m,
+            excluded_pairs=done_routes,
+        )
         if max_scenes:
             queue = queue[:max_scenes]
-        if skipped:
-            print("[collector] 断点续采：剔除 {} 条已采路线".format(skipped))
+        if done_routes:
+            print("[collector] 断点续采：按 {} 条已采路线剔除重复或相似候选".format(len(done_routes)))
         if start_index:
             print("[collector] 断点续采：新场景从 scene_{:06d} 起编号".format(start_index))
         print("[collector] 路线队列长度:", len(queue))

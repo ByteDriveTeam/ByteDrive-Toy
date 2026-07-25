@@ -24,6 +24,7 @@ from common import protocol as P
 from common.shm import ArenaFull
 from worker import annotations, traffic_control
 from worker.collect.checks.collect_checks import check_destination
+from worker.geometry import transform_to_list
 
 _LIDAR_ITEMSIZE = np.dtype(P.SEMANTIC_LIDAR_DTYPE).itemsize
 

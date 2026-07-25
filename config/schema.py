@@ -45,6 +45,7 @@ class SimulationCfg:
 class RouteCfg:
     min_distance_m: float
     max_distance_m: float
+    similarity_threshold_m: float
     max_scenes: int
     queue_seed: int
 
@@ -711,9 +712,11 @@ def validate_config(cfg):
     # 校验对象: simulation.map —— 仅支持 Opt 地图（规避静态车辆图层 API 问题）
     assert cc.simulation.map.endswith("_Opt"), "simulation.map 必须是 Opt 地图（以 _Opt 结尾）"
 
-    # 校验对象: route 距离区间 —— max 必须严格大于 min 且均为正
+    # 校验对象: route.min_distance_m/max_distance_m/similarity_threshold_m/max_scenes
     assert 0 < cc.route.min_distance_m < cc.route.max_distance_m, \
         "route 需满足 0 < min_distance_m < max_distance_m"
+    assert cc.route.similarity_threshold_m >= 0, \
+        "route.similarity_threshold_m 必须 >= 0（0 表示关闭相似路线剔除）"
     assert cc.route.max_scenes >= 0, "route.max_scenes 必须 >= 0（0 表示全部）"
 
     # 校验对象: traffic 数量与奔跑比例
