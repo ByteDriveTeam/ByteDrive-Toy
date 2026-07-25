@@ -17,7 +17,8 @@
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
       读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，行含 RGB/Seg/Depth（透视）与 GT/预测
-      的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）。加载驾驶权重时只接收当前
+      的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）；GT 交通控制面板同时标明
+      CARLA 原生车道拓扑或旧版 HD Map 回退来源。加载驾驶权重时只接收当前
       模型存在且形状相符的键，旧检查点中的感知双头不会进入 Driving；检查点
       不存在则随机初始化并告警，便于仅验证渲染管线。推理沿用模型内部 BF16/FP32 混精边界，渲染委托
       vis.driving_vis.render，结果按场景存 PNG。
@@ -132,6 +133,11 @@ def _ground_truth_traffic_control(sample, state_names):
     return stop, state_map, state_valid, annotations
 
 
+def _traffic_control_source(frame_meta):
+    """逐帧字段存在即采用 CARLA 原生关联；缺失表示旧数据由 Dataset 走 HD Map 回退。"""
+    return "source native" if "relevant_traffic_control" in frame_meta else "source legacy"
+
+
 def main(argv=None) -> None:
     """驾驶可视化主流程。"""
     parser = argparse.ArgumentParser(description="ByteDrive 驾驶模型可视化")
@@ -198,7 +204,7 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, camera, bev, fov, me
     _append_perspective_panels(sample, frame, camera, dv, mean, std, panels)
     _append_field_panels(gt, pred, inview, dv.field_colormap, panels)
     _append_lane_panels(sample, outputs, inview, dv.lane_map, panels)
-    traffic_layers = _append_traffic_panels(sample, outputs, cfg, dv, inview, panels)
+    traffic_layers = _append_traffic_panels(sample, outputs, frame["meta"], cfg, dv, inview, panels)
     _append_trajectory_panels(sample, outputs, gt, pred, traffic_layers, dv, bev, fov, panels)
 
 
@@ -231,13 +237,14 @@ def _append_lane_panels(sample, outputs, inview, lane_vis, panels):
         pred_class, pred_direction, *lane_args))
 
 
-def _append_traffic_panels(sample, outputs, cfg, dv, inview, panels):
+def _append_traffic_panels(sample, outputs, frame_meta, cfg, dv, inview, panels):
     """追加停止线/灯态面板，并返回供轨迹 BEV 叠加的图层。"""
     state_names = cfg.model.driving.traffic_control.state_names
     traffic_vis = dv.traffic_control
     pred_stop, pred_state, pred_notes = _predict_traffic_control(
         outputs, state_names, traffic_vis.line_threshold)
     gt_stop, gt_state, gt_valid, gt_notes = _ground_truth_traffic_control(sample, state_names)
+    gt_notes.insert(0, _traffic_control_source(frame_meta))
     traffic_args = (traffic_vis.state_colors, traffic_vis.unknown_color, inview)
     gt_traffic = render.colorize_traffic_control(
         gt_stop, gt_state, gt_valid, *traffic_args, gt_notes)

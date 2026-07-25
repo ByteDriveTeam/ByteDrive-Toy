@@ -117,6 +117,9 @@ data_vis:
 
   traffic_lights:
     nearest_count: 3           # HUD 除全场状态统计外，显示距主车最近的 N 盏灯；0 表示只显示统计
+    selected_color: [255, 255, 255]  # BEV 当前相关信号灯停止线/中心点颜色（BGR）
+    selected_line_thickness: 2       # BEV 当前相关停止线宽度（像素）
+    selected_point_radius: 4         # BEV 当前相关停止点半径（像素）
 
   # 3D 包围框投影到 RGB 的样式
   bbox:

@@ -160,6 +160,9 @@ class DataVisDisplayCfg:
 @dataclass
 class DataVisTrafficLightsCfg:
     nearest_count: int
+    selected_color: List[int]
+    selected_line_thickness: int
+    selected_point_radius: int
 
 
 @dataclass
@@ -1056,8 +1059,15 @@ def _validate_data_vis(dv):
     assert dv.display.scale > 0, "data_vis.display.scale 必须 > 0"
     assert dv.display.play_fps > 0, "data_vis.display.play_fps 必须 > 0"
 
-    # 校验对象: data_vis.traffic_lights.nearest_count —— 0 表示仅显示状态统计
-    assert dv.traffic_lights.nearest_count >= 0, "data_vis.traffic_lights.nearest_count 必须 >= 0"
+    # 校验对象: data_vis.traffic_lights —— HUD 数量与相关停止线样式
+    traffic = dv.traffic_lights
+    assert traffic.nearest_count >= 0, "data_vis.traffic_lights.nearest_count 必须 >= 0"
+    assert _is_bgr(traffic.selected_color), \
+        "data_vis.traffic_lights.selected_color 须是 0..255 的 BGR 三元组"
+    assert traffic.selected_line_thickness >= 1, \
+        "data_vis.traffic_lights.selected_line_thickness 必须 >= 1"
+    assert traffic.selected_point_radius >= 1, \
+        "data_vis.traffic_lights.selected_point_radius 必须 >= 1"
 
     # 校验对象: data_vis.bbox —— 线宽/距离为正，颜色为合法 BGR 三元组
     assert dv.bbox.thickness >= 1, "data_vis.bbox.thickness 必须 >= 1"

@@ -4,7 +4,8 @@
 依赖: cv2, numpy, vis.data_vis.geometry, vis.data_vis.palette
 读取配置: cfg.data_vis.bbox(thickness/max_distance_m/draw_static/colors)、cfg.data_vis.depth(max_display_m/colormap)、
           cfg.data_vis.optical_flow(max_flow)、cfg.data_vis.bev(range_m/size_px/point_radius/color_by/bg)、
-          cfg.data_vis.lidar(max_points_draw)、cfg.data_vis.traffic_lights(nearest_count)
+          cfg.data_vis.lidar(max_points_draw)、cfg.data_vis.traffic_lights(nearest_count/selected_color/
+          selected_line_thickness/selected_point_radius)
 对外接口:
     - render_frame(frame, meta, vcfg, state) -> np.ndarray   # 合成单帧的完整 BGR 画布（未缩放）
 说明: 投影约定见 vis/data_vis/geometry。每行一种相机模态、每列一个相机：RGB 行叠投影框，其后按存在且开启的
@@ -67,12 +68,14 @@ def render_frame(frame, meta, vcfg, state):
 
     canvas = left
     if avail["lidar"] and state["show_bev"]:
-        bev = _render_bev(frame["lidar"], boxes, ego_pose, meta["lidar_extrinsic"], vcfg)
+        bev = _render_bev(
+            frame["lidar"], boxes, ego_pose, meta["lidar_extrinsic"],
+            frame["meta"].get("relevant_traffic_control"), vcfg)
         canvas = _join_lr(left, _fit_height(bev, left.shape[0]))
 
     traffic_light_lines = _traffic_light_hud_lines(
         frame.get("traffic_light_states", []), meta.get("traffic_lights", []), ego_pose,
-        vcfg.traffic_lights.nearest_count)
+        frame["meta"].get("relevant_traffic_control"), vcfg.traffic_lights.nearest_count)
     _put_hud(canvas, frame["meta"], state, traffic_light_lines, avail)
     return canvas
 
@@ -164,8 +167,8 @@ def _colorize_flow(flow, fcfg):
 
 # ---------- 鸟瞰图（主车系俯视）----------
 
-def _render_bev(lidar, boxes, ego_pose, lidar_extrinsic, vcfg):
-    """渲染以主车为中心的 BEV：lidar 散点 + 框俯视轮廓 + 主车朝向标记。"""
+def _render_bev(lidar, boxes, ego_pose, lidar_extrinsic, relevant_control, vcfg):
+    """渲染以主车为中心的 BEV：lidar、框、当前相关停止线与主车朝向。"""
     bev = vcfg.bev
     size, rng = bev.size_px, bev.range_m
     canvas = np.full((size, size, 3), bev.bg, dtype=np.uint8)
@@ -180,6 +183,8 @@ def _render_bev(lidar, boxes, ego_pose, lidar_extrinsic, vcfg):
     w2e = g.world_to_ego(ego_pose)
     for box in boxes:
         _draw_box_bev(canvas, box, w2e, center, scale, rng, vcfg.bbox)
+    _draw_relevant_control(
+        canvas, relevant_control, w2e, center, scale, rng, vcfg.traffic_lights)
     _draw_ego_marker(canvas, center)
     return canvas
 
@@ -226,6 +231,28 @@ def _draw_box_bev(canvas, box, w2e, center, scale, rng, bcfg):
     cv2.polylines(canvas, [poly], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
 
 
+def _draw_relevant_control(canvas, control, w2e, center, scale, rng, traffic_cfg):
+    """新数据存在有效关联时，在 BEV 画受控车道停止线及其中心点；旧数据保持原样。"""
+    if not control or not control.get("valid"):
+        return
+    location = np.asarray(control["stop_location"], dtype=np.float64)
+    yaw = np.radians(float(control["stop_yaw"]))
+    half_width = float(control["lane_width"]) * 0.5
+    lateral = np.array([-np.sin(yaw), np.cos(yaw), 0.0], dtype=np.float64)
+    world_points = np.stack((location - lateral * half_width, location,
+                             location + lateral * half_width))
+    ego_points = g.transform_points(world_points, w2e)
+    if not bool(np.any((np.abs(ego_points[:, 0]) < rng) & (np.abs(ego_points[:, 1]) < rng))):
+        return
+    pixels = np.stack((center + ego_points[:, 1] * scale,
+                       center - ego_points[:, 0] * scale), axis=1).astype(np.int32)
+    color = tuple(int(value) for value in traffic_cfg.selected_color)
+    cv2.line(canvas, tuple(pixels[0]), tuple(pixels[2]), color,
+             traffic_cfg.selected_line_thickness, cv2.LINE_AA)
+    cv2.circle(canvas, tuple(pixels[1]), traffic_cfg.selected_point_radius,
+               color, thickness=-1, lineType=cv2.LINE_AA)
+
+
 def _draw_ego_marker(canvas, center):
     """主车标记：朝上的小三角，提示 BEV 的前向（屏幕上方）。"""
     c = int(center)
@@ -246,14 +273,16 @@ def _subsample(pts, colors, max_points):
 _TRAFFIC_LIGHT_STATES = ("red", "yellow", "green", "off", "unknown")
 
 
-def _traffic_light_hud_lines(traffic_light_states, traffic_lights, ego_pose, nearest_count):
-    """生成交通灯 HUD 文本：全场状态统计，以及按触发区距离排序的最近 N 盏灯。"""
+def _traffic_light_hud_lines(traffic_light_states, traffic_lights, ego_pose,
+                             relevant_control, nearest_count):
+    """生成交通灯 HUD 文本：相关灯、全场统计，以及按触发区距离排序的最近 N 盏灯。"""
+    relevant_line = _relevant_control_hud_line(relevant_control)
     if not traffic_light_states:
-        return []
+        return [relevant_line]
     normalized = [item["state"] if item.get("state") in _TRAFFIC_LIGHT_STATES else "unknown"
                   for item in traffic_light_states]
     counts = {name: normalized.count(name) for name in _TRAFFIC_LIGHT_STATES}
-    lines = ["TL R:{} Y:{} G:{} O:{} U:{}".format(
+    lines = [relevant_line, "TL R:{} Y:{} G:{} O:{} U:{}".format(
         counts["red"], counts["yellow"], counts["green"], counts["off"], counts["unknown"])]
     if nearest_count == 0:
         return lines
@@ -269,6 +298,17 @@ def _traffic_light_hud_lines(traffic_light_states, traffic_lights, ego_pose, nea
     nearest = sorted(candidates, key=lambda item: (item[0], item[1]))[:nearest_count]
     return lines + ["TL #{} {} {:.1f}m".format(light_id, state_name.upper(), distance)
                     for distance, light_id, state_name in nearest]
+
+
+def _relevant_control_hud_line(control):
+    """把新旧数据来源与当前相关灯摘要成一行英文，兼容 OpenCV 内置字体。"""
+    if control is None:
+        return "Relevant TL [legacy]: field unavailable"
+    if not control.get("valid"):
+        return "Relevant TL [native]: none"
+    return "Relevant TL [native]: #{} {} {:.1f}m".format(
+        control["id"], str(control.get("state", "unknown")).upper(),
+        float(control["route_distance"]))
 
 
 # 模态开关在 HUD 中的展示顺序：(available 键, 提示标签, state 键)，仅列出本场景实际存在的模态
