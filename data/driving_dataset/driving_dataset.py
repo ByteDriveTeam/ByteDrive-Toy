@@ -27,7 +27,8 @@
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。三路相机严格按 data.driving.cameras 堆叠；
-      当前/历史语义 LiDAR 在 CPU 上编码为 0.5m 体素 XYZ 均值与总体标准差；旧场景缺失时按场景告警并旁路。
+      当前/历史语义 LiDAR 先按各帧真实自车有向 Box 剔除车体内点，再在 CPU 上编码为 0.5m 体素 XYZ
+      均值与总体标准差；旧场景缺失时按场景告警并旁路。
       每个样本同时返回同场景上一帧三目 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 优先从独立运动学时间轴按 10Hz 取未来 num_waypoints 个 ego 世界位姿，再经 world_to_ego
@@ -56,7 +57,11 @@ import torch
 
 from config.schema import Config
 from data import driving_targets as dt
-from data.driving_dataset.checks.driving_dataset_checks import check_behavior_annotations, check_camera_calib
+from data.driving_dataset.checks.driving_dataset_checks import (
+    check_behavior_annotations,
+    check_camera_calib,
+    check_ego_box_annotations,
+)
 from data.hd_map import HdMap, offroad_distance_field
 from data.lidar_voxelization import lidar_xyz_to_voxels
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
@@ -143,9 +148,9 @@ class DrivingDataset(SingleFrameSceneBase):
         previous_rgb = previous_rgb if previous_rgb is not None else rgb
         previous_lidar = reader.lidar(previous_idx) if previous_valid else frame["lidar"]
         lidar_stats, lidar_occupied, lidar_valid = self._lidar_voxels(
-            scene_dir, frame["lidar"], meta)
+            scene_dir, frame["lidar"], meta, frame["meta"])
         previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid = \
-            self._lidar_voxels(scene_dir, previous_lidar, meta)
+            self._lidar_voxels(scene_dir, previous_lidar, meta, previous_meta)
         previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
         previous_to_current = _planar_previous_to_current(previous_pose, pose)
 
@@ -215,8 +220,8 @@ class DrivingDataset(SingleFrameSceneBase):
                        for name, value in traffic.items()})
         return sample
 
-    def _lidar_voxels(self, scene_dir, lidar, meta):
-        """把结构化语义 LiDAR 转为 ego 系体素统计；缺失场景严格标为无效。"""
+    def _lidar_voxels(self, scene_dir, lidar, meta, frame_meta):
+        """把结构化语义 LiDAR 剔除自车 Box 后转为 ego 系体素统计；缺失场景严格标为无效。"""
         extrinsic = meta.get("lidar_extrinsic")
         if lidar is None or extrinsic is None:
             key = str(scene_dir)
@@ -226,12 +231,29 @@ class DrivingDataset(SingleFrameSceneBase):
                 self._missing_lidar_warned.add(key)
             stats, occupied = lidar_xyz_to_voxels(
                 np.empty((0, 3), dtype=np.float32), (0.0, 0.0, 0.0),
-                self._bev_geometry, self._lidar_voxel_size)
+                self._ego_box(frame_meta), self._bev_geometry,
+                self._lidar_voxel_size)
             return stats, occupied, 0.0
         xyz = np.stack((lidar["x"], lidar["y"], lidar["z"]), axis=1)
         stats, occupied = lidar_xyz_to_voxels(
-            xyz, extrinsic, self._bev_geometry, self._lidar_voxel_size)
+            xyz, extrinsic, self._ego_box(frame_meta),
+            self._bev_geometry, self._lidar_voxel_size)
         return stats, occupied, 1.0
+
+    @staticmethod
+    def _ego_box(frame_meta):
+        """把逐帧世界系 ego Box 转成主车局部系有向 Box。"""
+        ego_boxes = [
+            box for box in frame_meta["bboxes"] if box.get("semantic") == "ego"
+        ]
+        check_ego_box_annotations(ego_boxes)
+        box = ego_boxes[0]
+        box_pose = box["location"] + box["rotation"]
+        ego_pose = frame_meta["ego"]["transform"]
+        return {
+            "transform": world_to_ego(ego_pose) @ transform_matrix(box_pose),
+            "extent": box["extent"],
+        }
 
     def _scene_states(self, scene_dir, reader):
         """以有界 LRU 缓存异频运动学；旧场景由低频逐帧状态自动回退。"""

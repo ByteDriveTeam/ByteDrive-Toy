@@ -2,7 +2,7 @@
 
 模块: clone_loop/inference/inference.py
 依赖: collections, pathlib, numpy, torch, torch.nn.functional, data.lidar_voxelization,
-      model.driving_model,
+      model.driving_model, vis.data_vis.geometry,
       clone_loop.inference.checks.inference_checks
 读取配置:
     clone_loop.inference.checkpoint / device / min_weight_coverage / confidence_weight /
@@ -20,7 +20,8 @@
     - ClosedLoopPolicy(cfg)
         .reset() -> None
         .infer(frame_bgr, lidar_xyz, observation) -> dict
-说明: 历史 RGB、LiDAR 体素和位姿只在主环境保存；每个 episode 首帧以当前帧回填并把 previous_valid 置零。
+说明: 在线点云按 worker 回传的真实自车有向 Box 剔除车体内点。历史 RGB、LiDAR 体素和位姿只在主环境保存；
+      每个 episode 首帧以当前帧回填并把 previous_valid 置零。
 """
 
 from collections import deque
@@ -38,6 +39,7 @@ from clone_loop.inference.checks.inference_checks import (
 )
 from data.lidar_voxelization import lidar_xyz_to_voxels
 from model.driving_model import DrivingModel
+from vis.data_vis.geometry import transform_matrix
 
 
 __all__ = ["ClosedLoopPolicy"]
@@ -198,8 +200,13 @@ class ClosedLoopPolicy:
         points = lidar_xyz if valid else np.empty((0, 3), dtype=np.float32)
         lidar_cfg = self._cfg.carla_collector.lidar
         extrinsic = (lidar_cfg.x, lidar_cfg.y, lidar_cfg.z)
+        ego_box = observation["ego_box"]
         stats, occupied = lidar_xyz_to_voxels(
-            points, extrinsic, self._cfg.model.driving.bev,
+            points, extrinsic, {
+                "transform": transform_matrix(
+                    ego_box["location"] + ego_box["rotation"]),
+                "extent": ego_box["extent"],
+            }, self._cfg.model.driving.bev,
             self._cfg.model.driving.lidar_fusion.voxel_size_m)
         return stats, occupied, float(valid)
 

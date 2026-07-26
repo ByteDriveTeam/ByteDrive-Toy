@@ -4,8 +4,8 @@
 依赖: torch, data.lidar_voxelization.checks.lidar_voxelization_checks
 读取配置: —（BEV XYZ 量程与 voxel_size_m 由调用方传入，来源 config.model.driving）
 对外接口:
-    - lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, bev, voxel_size_m) -> tuple[Tensor, Tensor]
-说明: 原始点先平移到 ego 系，再在半开区间内体素化；输出 X 行反转，使首行为 BEV 远端。
+    - lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, ego_box, bev, voxel_size_m) -> tuple[Tensor, Tensor]
+说明: 原始点先平移到 ego 系并剔除自车有向 Box 内点，再在半开区间内体素化；输出 X 行反转，使首行为 BEV 远端。
       六通道依次为 XYZ 均值与 XYZ 总体标准差，单点体素标准差严格为零。
 """
 
@@ -21,10 +21,15 @@ from data.lidar_voxelization.checks.lidar_voxelization_checks import (
 __all__ = ["lidar_xyz_to_voxels"]
 
 
-def lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, bev, voxel_size_m):
+def lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, ego_box, bev, voxel_size_m):
     """把 `[N,3]` LiDAR 点编码为 `[6,Z,X,Y]` 统计与 `[1,Z,X,Y]` 占用掩码。"""
     points = torch.as_tensor(points_xyz, dtype=torch.float32, device="cpu")
-    check_lidar_voxel_inputs(points, lidar_extrinsic, voxel_size_m)
+    box_transform = torch.as_tensor(
+        ego_box["transform"], dtype=torch.float32, device="cpu")
+    box_extent = torch.as_tensor(
+        ego_box["extent"], dtype=torch.float32, device="cpu")
+    check_lidar_voxel_inputs(
+        points, lidar_extrinsic, box_transform, box_extent, voxel_size_m)
     lower = torch.tensor(
         [bev.x_min_m, bev.y_min_m, bev.z_min_m], dtype=torch.float32)
     upper = torch.tensor(
@@ -39,6 +44,10 @@ def lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, bev, voxel_size_m):
         )
 
     points = points + torch.as_tensor(lidar_extrinsic, dtype=torch.float32)
+    box_local = (
+        points - box_transform[:3, 3]
+    ) @ box_transform[:3, :3]
+    points = points[torch.any(box_local.abs() > box_extent, dim=1)]
     valid = torch.all((points >= lower) & (points < upper), dim=1)
     points = points[valid]
     if points.numel() == 0:

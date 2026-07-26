@@ -23,3 +23,12 @@ def check_behavior_annotations(meta, frame, cameras):
     missing_frame = [key for key in ("bboxes", "traffic_light_states") if key not in frame]
     if missing_meta or missing_frame:
         raise KeyError("行为监督缺标注：场景级 {}，帧级 {}。".format(missing_meta, missing_frame))
+
+
+def check_ego_box_annotations(ego_boxes):
+    """校验对象: DrivingDataset LiDAR 自车点剔除源 —— 每帧须有唯一且完整的 ego Box。"""
+    if len(ego_boxes) != 1:
+        raise ValueError("逐帧标注期望唯一 ego Box，实际 {} 个。".format(len(ego_boxes)))
+    box = ego_boxes[0]
+    if any(len(box.get(key, ())) != 3 for key in ("location", "extent", "rotation")):
+        raise ValueError("ego Box 期望 location/extent/rotation 均为三维。")

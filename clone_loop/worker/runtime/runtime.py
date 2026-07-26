@@ -145,6 +145,7 @@ class CarlaRuntime:
         return {
             "status": status,
             "pose": _transform_list(transform),
+            "ego_box": _bounding_box(self._ego.bounding_box),
             "intrinsics": self._sensors.intrinsics,
             "extrinsics": self._sensors.extrinsics,
             "lidar_count": self._lidar_count,
@@ -263,6 +264,15 @@ def _transform_list(transform):
         location.x, location.y, location.z,
         rotation.roll, rotation.pitch, rotation.yaw,
     ]
+
+
+def _bounding_box(box):
+    """把 actor 局部 Box 转为可跨 Python 版本传输的纯数值字段。"""
+    return {
+        "location": [box.location.x, box.location.y, box.location.z],
+        "extent": [box.extent.x, box.extent.y, box.extent.z],
+        "rotation": [box.rotation.roll, box.rotation.pitch, box.rotation.yaw],
+    }
 
 
 def _speed(vehicle):

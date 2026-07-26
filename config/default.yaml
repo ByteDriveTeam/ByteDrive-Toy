@@ -17,7 +17,7 @@ carla_collector:
   # 跨进程数据面：匿名共享内存 arena（既是传输通道也是场景内存缓冲）
   ipc:
     arena_name: bytedrive_carla_arena  # Windows mmap tagname 前缀
-    arena_size_mb: 1024                # 单段（一次 flush）的内存批大小；写满即落一段并清空续采，不再是场景帧上限
+    arena_size_mb: 2048                # 单段（一次 flush）的内存批大小；写满即落一段并清空续采，不再是场景帧上限
     slot_count: 1000                   # 预留字段，当前 BumpAllocator 不使用（vestigial）
 
   # 仿真世界
@@ -322,7 +322,7 @@ data:
       stop_margin_m: 1.50           # 红灯轨迹须停在停止区前的安全余量
       reaction_time_s: 0.50         # 判断红灯是否仍可安全停车的感知/控制反应时间
       comfortable_decel_mps2: 4.0   # 可停车性判定使用的舒适制动减速度
-    box_min_visible_pixels: 10  # 反投影深度点落入 3D box 不少于 10 像素才作为可见占用监督
+    box_min_visible_pixels: 20  # 反投影深度点落入 3D box 不少于 20 像素才作为可见占用监督
     target_min_m: 16.0        # 目标点：沿未来自车轨迹搜距当前 16~32m 的点随机取一，作近端导航引导（增强鲁棒性）
     target_max_m: 32.0
     behavior:

@@ -21,17 +21,26 @@ def check_observation(observation):
     """校验对象: ClosedLoopPolicy.infer 的 observation —— 模型条件字段必须齐全且有限。"""
     expected = {
         "pose", "intrinsics", "extrinsics", "target_point", "ego_velocity",
-        "lidar_count", "lidar_valid",
+        "lidar_count", "lidar_valid", "ego_box",
     }
     missing = expected.difference(observation)
     if missing:
         raise ValueError("闭环观测缺少字段: {}".format(sorted(missing)))
-    numeric = expected.difference({"lidar_valid"})
+    numeric = expected.difference({"lidar_valid", "ego_box"})
     if not all(np.all(np.isfinite(observation[key])) for key in numeric):
         raise ValueError("闭环观测包含非有限数")
     if np.shape(observation["intrinsics"]) != (3, 4) \
             or np.shape(observation["extrinsics"]) != (3, 6):
         raise ValueError("闭环三目标定期望 intrinsics [3,4]、extrinsics [3,6]")
+    ego_box = observation["ego_box"]
+    if not isinstance(ego_box, dict) \
+            or any(np.shape(ego_box.get(key)) != (3,)
+                   for key in ("location", "extent", "rotation")):
+        raise ValueError("闭环 ego_box 期望三维 location/extent/rotation")
+    if not all(np.all(np.isfinite(ego_box[key]))
+               for key in ("location", "extent", "rotation")) \
+            or not np.all(np.asarray(ego_box["extent"]) > 0):
+        raise ValueError("闭环 ego_box 必须有限且 extent 为正")
 
 
 def check_trajectory_candidates(trajectories, max_abs_waypoint_m):
