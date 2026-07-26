@@ -7,12 +7,14 @@
     - SceneReader(scene_dir)
         .meta -> dict                 # 场景级元数据（内外参/静态框/相机名/视频引用等）
         .num_frames -> int
+        .num_kinematics -> int
         .camera_names -> list[str]
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
         .lidar(i) -> np.ndarray | None # 只读取语义 LiDAR，不解码 RGB/其他大数组
         .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
+        .kinematics() -> list[dict]   # 独立高频运动学时间序列；旧数据回退逐帧 ego
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
 说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）；
@@ -81,6 +83,10 @@ class SceneReader:
         with self._env.begin() as txn:
             self.meta = msgpack.unpackb(txn.get(b"meta"), raw=False)
             self.num_frames = msgpack.unpackb(txn.get(b"num_frames"))
+            count_blob = txn.get(b"num_kinematics")
+            self.num_kinematics = (
+                msgpack.unpackb(count_blob) if count_blob is not None else self.num_frames)
+            self._has_kinematics = count_blob is not None
         self.camera_names = self.meta["camera_names"]
         # RGB 仅在采集开启时落 mp4；video_files 为空即该场景无 RGB，不建解码器
         video_files = self.meta.get("video_files", {})
@@ -113,6 +119,26 @@ class SceneReader:
         check_frame_index(i, self.num_frames)
         with self._env.begin() as txn:
             return msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
+
+    def kinematics(self):
+        """读取独立运动学时间序列；旧场景用低频逐帧 ego 元数据兼容回退。"""
+        with self._env.begin() as txn:
+            if self._has_kinematics:
+                return [
+                    msgpack.unpackb(txn.get(self._key("kinematics", i)), raw=False)
+                    for i in range(self.num_kinematics)
+                ]
+            return [
+                {
+                    "frame_id": meta["frame_id"],
+                    "sim_time": meta["sim_time"],
+                    "ego": meta["ego"],
+                }
+                for meta in (
+                    msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
+                    for i in range(self.num_frames)
+                )
+            ]
 
     def rgb(self, i, camera):
         """只读取指定帧/相机的 RGB，供时序模型避免为历史帧解码全部监督模态。"""

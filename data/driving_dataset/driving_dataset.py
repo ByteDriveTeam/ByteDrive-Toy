@@ -20,7 +20,7 @@
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.lidar_fusion.voxel_size_m
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
-    model.driving.trajectory.num_waypoints
+    model.driving.trajectory.num_waypoints / waypoint_dt_s
     model.driving.traffic_control.state_names
     model.physics.depth_max_m（风险场包络排除超范围/天空像素）
 对外接口:
@@ -30,7 +30,8 @@
       当前/历史语义 LiDAR 在 CPU 上编码为 0.5m 体素 XYZ 均值与总体标准差；旧场景缺失时按场景告警并旁路。
       每个样本同时返回同场景上一帧三目 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
-      轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
+      轨迹 GT 优先从独立运动学时间轴按 10Hz 取未来 num_waypoints 个 ego 世界位姿，再经 world_to_ego
+      变到当前 ego 系；旧场景自动回退低频逐帧状态。行为 GT 为固定八类
       多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
       新场景逐帧携带 CARLA 原生受控车道/Agent 规划关联结果，直接生成停止线；旧场景缺该字段时自动回退到
       HD Map 触发区与未来专家路线走廊相交算法，无需迁移历史 LMDB。
@@ -85,6 +86,7 @@ class DrivingDataset(SingleFrameSceneBase):
         self._bev = dt.BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
                                  bev.height * scale, bev.width * scale)
         self._num_waypoints = cfg.model.driving.trajectory.num_waypoints
+        self._waypoint_dt = cfg.model.driving.trajectory.waypoint_dt_s
         self._depth_max_m = cfg.model.physics.depth_max_m  # 风险场包络排除超范围/天空像素
         self._box_min_visible_pixels = drv_data.box_min_visible_pixels
         self._target_min = drv_data.target_min_m
@@ -147,16 +149,20 @@ class DrivingDataset(SingleFrameSceneBase):
         previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
         previous_to_current = _planar_previous_to_current(previous_pose, pose)
 
-        poses, accelerations = self._scene_states(scene_dir, reader)  # 全帧位姿/加速度（缓存）
-        waypoints, valid = self._trajectory(poses, frame_idx, pose)
-        target_point = self._target_point(poses, frame_idx, pose, meta)
+        states = self._scene_states(scene_dir, reader)
+        state_idx = states["frame_to_index"].get(int(frame["meta"]["frame_id"]))
+        if state_idx is None:
+            state_idx = int(np.argmin(np.abs(states["times"] - float(frame["meta"]["sim_time"]))))
+        poses, accelerations = states["poses"], states["accelerations"]
+        waypoints, valid = self._trajectory(states, state_idx, pose)
+        target_point = self._target_point(poses, state_idx, pose, meta)
         ego_velocity = (world_to_ego(pose)[:2, :2] @ world_vel[:2]).astype(np.float32)
         hd_map = self._hd_map(meta["map"])
         speed_mps = float(np.linalg.norm(world_vel[:2]))
         traffic = self._traffic_targets(
-            hd_map, poses, frame_idx, pose, target_point, meta, frame, speed_mps)
+            hd_map, poses, state_idx, pose, target_point, meta, frame, speed_mps)
         behavior = dt.behavior_targets(
-            waypoints, valid, speed_mps, float(accelerations[frame_idx]),
+            waypoints, valid, speed_mps, float(accelerations[state_idx]),
             frame["bboxes"], meta["traffic_lights"], frame["traffic_light_states"],
             meta["static_bboxes"], semantic, pose, intrinsics, extrinsics,
             self._bev, self._fov, self._behavior_params,
@@ -228,23 +234,37 @@ class DrivingDataset(SingleFrameSceneBase):
         return stats, occupied, 1.0
 
     def _scene_states(self, scene_dir, reader):
-        """以有界 LRU 缓存全帧 ego 位姿与速度加速度，供轨迹/行为/目标点复用。"""
+        """以有界 LRU 缓存异频运动学；旧场景由低频逐帧状态自动回退。"""
         key = str(scene_dir)
         state = self._state_cache.pop(key, None)
         if state is None:
-            metas = [reader.frame_meta(j) for j in range(reader.num_frames)]
-            poses = np.array([meta["ego"]["transform"] for meta in metas], dtype=np.float64)
-            velocities = np.array([meta["ego"]["velocity"] for meta in metas], dtype=np.float64)
-            sim_times = np.array([meta["sim_time"] for meta in metas], dtype=np.float64)
-            state = (poses, dt.speed_accelerations(velocities, sim_times))
+            samples = reader.kinematics()
+            poses = np.array([sample["ego"]["transform"] for sample in samples], dtype=np.float64)
+            velocities = np.array([sample["ego"]["velocity"] for sample in samples], dtype=np.float64)
+            sim_times = np.array([sample["sim_time"] for sample in samples], dtype=np.float64)
+            state = {
+                "poses": poses,
+                "times": sim_times,
+                "accelerations": dt.speed_accelerations(velocities, sim_times),
+                "frame_to_index": {
+                    int(sample["frame_id"]): index for index, sample in enumerate(samples)},
+            }
         self._state_cache[key] = state
         if len(self._state_cache) > self._scene_cache_size:
             self._state_cache.popitem(last=False)
         return state
 
-    def _trajectory(self, poses: np.ndarray, frame_idx: int, pose):
-        """取同场景未来 num_waypoints 帧 ego 世界位姿，变到当前 ego 系得航点与有效掩码。"""
-        future = list(poses[frame_idx + 1: frame_idx + 1 + self._num_waypoints])
+    def _trajectory(self, states, state_idx: int, pose):
+        """按配置点间隔插值运动学位姿，生成固定 10Hz 航点监督。"""
+        poses, times = states["poses"], states["times"]
+        target_times = times[state_idx] + self._waypoint_dt * np.arange(
+            1, self._num_waypoints + 1, dtype=np.float64)
+        valid = target_times <= times[-1] + np.finfo(np.float64).eps * max(abs(times[-1]), 1.0)
+        valid_times = target_times[valid]
+        future = list(np.column_stack([
+            np.interp(valid_times, times, poses[:, column])
+            for column in range(poses.shape[1])
+        ]))
         return dt.trajectory_targets(future, pose, self._num_waypoints)
 
     def _target_point(self, poses: np.ndarray, frame_idx: int, pose, meta):

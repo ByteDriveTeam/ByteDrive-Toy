@@ -1,4 +1,4 @@
-"""条件化多 Mode 规划解码器：以 8 个可学习 Token 查询主感知第 3/6 层特征并回归基线残差。
+"""条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
 
 模块: model/trajectory_decoder/trajectory_decoder.py
 依赖: torch, config.schema.DrivingCfg, data.target_encoding, model.attention,
@@ -13,15 +13,15 @@
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
         forward(perception_features, target_point, ego_velocity) -> dict
-            # trajectories/trajectory_residuals [B,M,T,2] / confidence [B,M] /
+            # trajectories/trajectory_residuals [B,M,40,2] / confidence [B,M] /
             # behavior_logits [B,C_behavior]
 说明: 目标点与 ego 平面速度先作 Symlog（仅用于把量纲差异大的条件输入压到有界范围喂 MLP），再经 MLP 产生
       第一路预查询，随后经 FFN 产生第二路预查询。主感知第 3、6 层特征分别 RMSNorm 后沿通道拼接，经单个
       1×1 CNN 降到 planning_dim；path1 直接、path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个
-      随机初始化的可学习 Mode Token 携各自预查询依次经两个 CTB，其后四层 TB 协调各 Mode。轨迹头直接回归 8 个
-      扇区中线米制基线的物理残差（米），零初始化保证初始预测严格等于基线；轨迹的预测与监督全程在物理空间，
-      不再经 Symlog 编解码。baseline 保留原 state-dict 键以兼容旧权重，但加载时始终按当前 FOV 配置重建，
-      避免旧 90° 派生缓存覆盖三目 180° 基线。
+      随机初始化的可学习 Mode Token 携各自预查询依次经两个 CTB，其后四层 TB 协调各 Mode。新的 MLP
+      trajectory_head 回归 40 个 10Hz 米制基线残差，末层零初始化保证初始预测严格等于基线。新头采用新
+      state-dict 键，兼容加载器会恢复其余旧权重并让该头保留构造期初始化；baseline 始终按当前配置重建，
+      避免旧检查点的 8 点缓存覆盖 40 点基线。
 """
 
 from __future__ import annotations
@@ -76,9 +76,14 @@ class TrajectoryDecoder(nn.Module):
             SelfAttentionBlock(tj.planning_dim, tj.num_heads, cfg_driving.attention.mlp_ratio)
             for _ in range(tj.self_layers))
 
-        self.residual_head = nn.Linear(tj.planning_dim, tj.num_waypoints * 2)
-        nn.init.zeros_(self.residual_head.weight)
-        nn.init.zeros_(self.residual_head.bias)
+        self.trajectory_head = nn.Sequential(
+            nn.LayerNorm(tj.planning_dim),
+            nn.Linear(tj.planning_dim, tj.planning_dim),
+            nn.SiLU(),
+            nn.Linear(tj.planning_dim, tj.num_waypoints * 2),
+        )
+        nn.init.zeros_(self.trajectory_head[-1].weight)
+        nn.init.zeros_(self.trajectory_head[-1].bias)
         self.confidence_head = nn.Linear(tj.planning_dim, 1)
         self.behavior_head = nn.Linear(tj.planning_dim, cfg_driving.behavior.num_classes)
 
@@ -115,7 +120,7 @@ class TrajectoryDecoder(nn.Module):
         for block in self.transformer:
             tokens = block(tokens)
 
-        residual = self.residual_head(tokens).reshape(
+        residual = self.trajectory_head(tokens).reshape(
             batch_size, self.num_modes, self.num_waypoints, 2)
         trajectories = self.baseline[None] + residual   # 物理空间：米制基线 + 米制残差
         return {

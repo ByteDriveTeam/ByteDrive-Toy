@@ -11,7 +11,8 @@
       才换种子重试（Design ④）。读帧时用生成器惰性消费 arena，使内存只驻留一帧（深度解码、lidar 还原
       均在此 Py312 侧做）。RGB→mp4、其余→LMDB（Design ⑧）；具体落哪些模态由 cameras.modalities 与
       lidar.enabled 开关决定（关闭即不读盘、不落盘，RGB 关则无 mp4），光流与深度同法逐相机入 LMDB。
-      worker 生成的 CARLA 原生路线相关交通控制点随帧元数据落盘；字段缺失不补默认值，使下游能识别旧数据。
+      worker 生成的 CARLA 原生路线相关交通控制点随低频帧元数据落盘；10Hz 运动学写入独立 LMDB 时间轴，
+      以 frame_id/sim_time 与传感器帧关联。字段缺失不补默认值，使下游能识别旧数据。
 """
 
 import os
@@ -97,9 +98,9 @@ def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on):
     return per_frame * len(frames) + lidar_total
 
 
-def _persist(scene_id, route, seed, weather, frames, status, static_meta,
+def _persist(scene_id, route, seed, weather, frames, kinematics, status, static_meta,
              drive_id, segment_idx, cc, arena, output_root, cam_names):
-    """把一段（一次 arena flush）落盘为自包含场景目录：每相机 RGB→mp4，深度/lidar/标注→独立 LMDB。
+    """把一段落盘：RGB→mp4，其他传感器/标注与独立运动学时间轴→LMDB。
 
     同一次行驶切出的多段共享 drive_id、segment_idx 递增，下游据此可拼回完整路线。
     """
@@ -119,7 +120,11 @@ def _persist(scene_id, route, seed, weather, frames, status, static_meta,
 
     scene_meta = {
         "scene_id": scene_id, "seed": seed, "weather": weather, "status": status,
-        "num_frames": len(frames), "map": cc.simulation.map, "fps": cc.output.video_fps,
+        "num_frames": len(frames), "num_kinematics": len(kinematics),
+        "map": cc.simulation.map, "fps": cc.output.video_fps,
+        "sensor_dt_s": cc.simulation.fixed_delta_seconds * cc.collection.capture_every_n_ticks,
+        "kinematics_dt_s": (
+            cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks),
         "drive_id": drive_id, "segment_idx": segment_idx,
         "route": {k: route[k] for k in ("start_idx", "end_idx", "start", "end")},
         "intrinsics": static_meta["intrinsics"], "extrinsics": static_meta["extrinsics"],
@@ -131,8 +136,9 @@ def _persist(scene_id, route, seed, weather, frames, status, static_meta,
     # 每段一个独立 LMDB，co-located 于场景目录；map_size 上限为单段量级
     writer = LmdbWriter(scene_dir / "lmdb", cc.output.lmdb_map_size_gb)
     try:
-        writer.write_scene(scene_meta, _frame_payloads(arena, frames, cam_names, mods, lidar_on),
-                           est_bytes=est)
+        writer.write_scene(
+            scene_meta, _frame_payloads(arena, frames, cam_names, mods, lidar_on),
+            kinematics=kinematics, est_bytes=est)
     finally:
         writer.close()
 
@@ -171,6 +177,7 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
         seg_idx = 0
         segs_drive = 0  # 本次行驶（本 attempt）已落段数
         frames = r["frames"]
+        kinematics = r["kinematics"]
 
         while True:
             if status == P.STATUS_COLLISION:
@@ -178,7 +185,7 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
                 break
             if frames:  # partial/ok/max_frames 段均落盘
                 scene_id = "scene_{:06d}".format(saved + segs_total)
-                _persist(scene_id, route, seed, weather, frames, status, static_meta,
+                _persist(scene_id, route, seed, weather, frames, kinematics, status, static_meta,
                          drive_id, seg_idx, cc, arena, output_root, cam_names)
                 print("[collector] {} 落盘段 #{}（{}帧, status={}）".format(
                     scene_id, seg_idx, len(frames), status))
@@ -196,6 +203,7 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
             r = worker.continue_scene()
             status = r["status"]
             frames = r["frames"]
+            kinematics = r["kinematics"]
 
         if status == P.STATUS_COLLISION and segs_drive == 0:
             if attempt < retries:                       # 还有重试余额，才是真的换种子重试

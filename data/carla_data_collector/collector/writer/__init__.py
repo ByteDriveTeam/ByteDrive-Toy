@@ -1,4 +1,4 @@
-"""把场景的非 RGB 数据写入 LMDB（深度/语义Lidar/包围框/主车状态/元数据/视频引用）。公开 API 重导出入口。
+"""把非 RGB 数据与独立运动学时间序列写入 LMDB。公开 API 重导出入口。
 
 模块: collector/writer/__init__.py
 依赖: collector.writer.writer

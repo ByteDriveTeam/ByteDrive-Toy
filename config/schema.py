@@ -118,6 +118,7 @@ class LidarCfg:
 class CollectionCfg:
     max_frames_per_scene: int
     capture_every_n_ticks: int
+    kinematics_every_n_ticks: int
 
 
 @dataclass
@@ -300,6 +301,7 @@ class TrafficControlCfg:
 class TrajectoryCfg:
     num_modes: int                 # 可学习 Mode Token 数 = 多模态轨迹条数
     num_waypoints: int             # 每条轨迹航点数 T_wp
+    waypoint_dt_s: float           # 相邻输出轨迹点的时间间隔
     planning_dim: int              # 规划分支工作维
     condition_mlp_hidden: int      # 目标点+ego 速度条件编码 MLP 隐藏维
     feature_ffn_hidden: int        # path2 感知特征适配 FFN 隐藏维
@@ -752,9 +754,17 @@ def validate_config(cfg):
     assert cc.lidar.range_m > 0, "lidar.range_m 必须 > 0"
     assert cc.lidar.upper_fov > cc.lidar.lower_fov, "lidar.upper_fov 必须 > lower_fov"
 
-    # 校验对象: collection —— 帧数上限与采样间隔为正
+    # 校验对象: collection —— 帧数上限与两条异频时间轴的采样间隔为正
     assert cc.collection.max_frames_per_scene > 0, "collection.max_frames_per_scene 必须 > 0"
     assert cc.collection.capture_every_n_ticks >= 1, "collection.capture_every_n_ticks 必须 >= 1"
+    assert cc.collection.kinematics_every_n_ticks >= 1, \
+        "collection.kinematics_every_n_ticks 必须 >= 1"
+    kinematics_dt = (
+        cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks)
+    trajectory_dt = cfg.model.driving.trajectory.waypoint_dt_s
+    ratio = trajectory_dt / kinematics_dt
+    assert ratio >= 1 and abs(ratio - round(ratio)) < 1e-6, \
+        "运动学采样间隔必须等于模型轨迹点间隔或是其整数分之一"
 
     # 校验对象: collision.max_retries_per_route
     assert cc.collision.max_retries_per_route >= 0, "collision.max_retries_per_route 必须 >= 0"
@@ -763,6 +773,10 @@ def validate_config(cfg):
     assert cc.output.lmdb_map_size_gb > 0, "output.lmdb_map_size_gb 必须 > 0"
     assert 0 <= cc.output.video_crf <= 51, "output.video_crf 必须在 [0,51]"
     assert cc.output.video_fps > 0, "output.video_fps 必须 > 0"
+    sensor_fps = 1.0 / (
+        cc.simulation.fixed_delta_seconds * cc.collection.capture_every_n_ticks)
+    assert math.isclose(cc.output.video_fps, sensor_fps, rel_tol=0.0, abs_tol=1e-6), \
+        "output.video_fps 必须与 capture_every_n_ticks 对应的传感器采样率一致"
 
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
@@ -771,10 +785,12 @@ def validate_config(cfg):
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
-    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar)
+    _validate_clone_loop(
+        cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar,
+        cc.simulation, cc.collection)
 
 
-def _validate_clone_loop(cl, model, data, cameras, lidar):
+def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collection):
     """校验对象: cfg.clone_loop —— CARLA 闭环运行、推理、控制与安全参数。"""
     assert cl.worker.carla_port > 0 and cl.worker.startup_timeout_s > 0 \
         and cl.worker.command_timeout_s > 0, \
@@ -810,9 +826,20 @@ def _validate_clone_loop(cl, model, data, cameras, lidar):
     assert control.waypoint_dt_s > 0 and control.speed_horizon > 0 \
         and 0 <= control.min_target_speed_mps < control.max_target_speed_mps, \
         "clone_loop.control 航点时间/速度参数取值非法"
+    assert math.isclose(
+        control.waypoint_dt_s, model.driving.trajectory.waypoint_dt_s,
+        rel_tol=0.0, abs_tol=1e-9), \
+        "clone_loop.control.waypoint_dt_s 必须与模型轨迹点间隔一致"
     history_steps = control.waypoint_dt_s / sim.fixed_delta_seconds
     assert history_steps >= 1 and abs(history_steps - round(history_steps)) < 1e-6, \
         "clone_loop.control.waypoint_dt_s 必须是仿真固定步长的正整数倍"
+    training_history_dt = (
+        collection_sim.fixed_delta_seconds * collection.capture_every_n_ticks
+        * data.driving.previous_frame_offset)
+    online_history_steps = training_history_dt / sim.fixed_delta_seconds
+    assert online_history_steps >= 1 \
+        and abs(online_history_steps - round(online_history_steps)) < 1e-6, \
+        "训练历史帧时间间隔必须是闭环仿真固定步长的正整数倍"
     assert control.lookahead_m > 0 and control.wheelbase_m > 0 \
         and 0 < control.max_steer_angle_deg < 90 \
         and 0 < control.turn_steer_gain <= 1, \
@@ -1037,13 +1064,15 @@ def _validate_driving(dv):
     assert tj.self_layers == 4, "model.driving.trajectory.self_layers 必须为 4"
     for name in ("num_waypoints", "planning_dim", "condition_mlp_hidden", "feature_ffn_hidden"):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
+    assert math.isclose(tj.waypoint_dt_s, 0.1, rel_tol=0.0, abs_tol=1e-9), \
+        "model.driving.trajectory.waypoint_dt_s 必须为 0.1（模型固定输出 10Hz 轨迹）"
     assert tj.planning_dim < tj.cross_layers * dv.work_dim, \
         "model.driving.trajectory.planning_dim 必须小于 cross_layers×work_dim（拼接后 1×1 CNN 降维）"
     assert tj.num_heads > 0 and tj.planning_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 planning_dim"
     assert all(math.isfinite(value) and value > 0 for value in (
-        tj.mode_token_init_std, tj.baseline_step_m, tj.symlog_scale)), \
-        "model.driving.trajectory.mode_token_init_std / baseline_step_m / symlog_scale 必须为有限正数"
+        tj.mode_token_init_std, tj.baseline_step_m, tj.symlog_scale, tj.waypoint_dt_s)), \
+        "model.driving.trajectory 的初始化尺度、基线步长、Symlog 尺度与点间隔必须为有限正数"
     # 校验对象: behavior.num_classes —— 固定对应八类行为语义，避免模型头与标签顺序漂移
     assert dv.behavior.num_classes == 8, \
         "model.driving.behavior.num_classes 必须为 8（固定行为语义顺序）"

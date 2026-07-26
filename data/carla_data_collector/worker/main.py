@@ -73,11 +73,11 @@ def _cleanup_drive(state):
 
 
 def _run_chunk(state):
-    """跑一段：partial 保活世界供续采，否则销毁收尾。返回 (status, frames)。"""
+    """跑一段：partial 保活世界供续采，否则销毁收尾。返回两条异频时间轴。"""
     cc = state["cc"]
     drive = state["drive"]
     try:
-        status, frames = collect.collect_chunk(
+        status, frames, kinematics = collect.collect_chunk(
             drive["world"], drive["ego"], drive["agent"], drive["rig"], drive["crowd"],
             drive["traffic_lights"], drive["traffic_light_metadata"],
             state["allocator"], cc.collection,
@@ -87,7 +87,7 @@ def _run_chunk(state):
         raise
     if status != P.STATUS_PARTIAL:
         _cleanup_drive(state)
-    return status, frames
+    return status, frames, kinematics
 
 
 def _handle_start_scene(state, args):
@@ -149,8 +149,9 @@ def _handle_start_scene(state, args):
         "extrinsics": drive["extrinsics"], "lidar_extrinsic": drive["lidar_extrinsic"],
         "traffic_lights": drive["traffic_light_metadata"],
     }
-    status, frames = _run_chunk(state)  # 可能就地清除 state["drive"]（非 partial）
+    status, frames, kinematics = _run_chunk(state)  # 可能就地清除 state["drive"]（非 partial）
     return dict(status=status, num_frames=len(frames), frames=frames,
+                num_kinematics=len(kinematics), kinematics=kinematics,
                 used_bytes=state["allocator"].used, **static_meta)
 
 
@@ -158,8 +159,9 @@ def _handle_continue_scene(state, _args):
     """复用存活世界续采下一段。此刻 collector 已读完上段 arena，reset 后重填。"""
     assert state.get("drive") is not None, "continue_scene 前必须有存活的 start_scene 行驶"
     state["allocator"].reset()
-    status, frames = _run_chunk(state)
+    status, frames, kinematics = _run_chunk(state)
     return {"status": status, "num_frames": len(frames), "frames": frames,
+            "num_kinematics": len(kinematics), "kinematics": kinematics,
             "used_bytes": state["allocator"].used}
 
 

@@ -3,14 +3,16 @@
 模块: worker/collect/collect.py
 依赖: numpy, common.protocol, common.shm, worker.annotations, worker.traffic_control,
       worker.collect.checks.collect_checks
-读取配置: 由调用方接收 simulation(warmup_ticks/fixed_delta) 与 collection(max_frames/capture_every_n)，自身不读 config
+读取配置: 由调用方接收 simulation(warmup_ticks/fixed_delta) 与
+      collection(max_frames/capture_every_n/kinematics_every_n)，自身不读 config
 对外接口:
     - prepare_drive(world, agent, sim_cfg, destination)
         -> (reachable, static_bboxes, traffic_lights, traffic_light_metadata)
     - collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
-                    allocator, collection_cfg, timeout_s, counters) -> (status, frames)
-说明: 大块张量（RGB/Depth/语义图/光流/语义Lidar）写入 arena（仅记 offset/size/shape/dtype）；小元数据（位姿/控制/
-      包围框/交通灯状态/当前路线相关控制点）内联进帧索引随控制管道回传。RGB 与 Depth 均存 BGR 三通道
+                    allocator, collection_cfg, timeout_s, counters) -> (status, frames, kinematics)
+说明: 大块张量（RGB/Depth/语义图/光流/语义Lidar）按 capture_every_n_ticks 写入 arena；小元数据（包围框/
+      交通灯状态/当前路线相关控制点）绑定同一低频帧。运动学按 kinematics_every_n_ticks 写入独立时间轴，
+      包含位姿、线速度、线加速度、角速度与控制量；两条时间轴用 frame_id/sim_time 对齐。RGB 与 Depth 均存 BGR 三通道
       （丢 alpha 省内存），depth 的
       编码值交由 collector 解码；语义图只取标签所在的 R 通道存单通道 uint8（标签已是最终值，无需解码）；
       光流存 (H,W,2) float32 运动矢量、无需解码。实际采集哪些模态由 config 开关决定，本文件按 sample 中的 key 自适应。
@@ -78,14 +80,21 @@ def _store_frame(allocator, sample):
 
 
 def _ego_state(ego):
-    """主车状态：位姿、速度、当次控制量。"""
+    """主车运动学状态：位姿、线速度/加速度、角速度与当次控制量。"""
     velocity = ego.get_velocity()
+    acceleration = ego.get_acceleration()
+    angular_velocity = ego.get_angular_velocity()
     control = ego.get_control()
     return {
         "transform": transform_to_list(ego.get_transform()),
         "velocity": [velocity.x, velocity.y, velocity.z],
+        "acceleration": [acceleration.x, acceleration.y, acceleration.z],
+        "angular_velocity": [
+            angular_velocity.x, angular_velocity.y, angular_velocity.z],
         "control": {"throttle": control.throttle, "steer": control.steer,
-                    "brake": control.brake, "reverse": control.reverse},
+                    "brake": control.brake, "hand_brake": control.hand_brake,
+                    "reverse": control.reverse, "manual_gear_shift": control.manual_gear_shift,
+                    "gear": control.gear},
     }
 
 
@@ -127,10 +136,13 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         timeout_s: 单次 gather 等待传感器的超时
         counters:  {"total": 已落帧数, "tick_idx": 已 tick 数}，由调用方跨段持有并就地更新
     返回:
-        (status, frames)：status 见 protocol.STATUS_*；frames 为本段帧索引列表
+        (status, frames, kinematics)：status 见 protocol.STATUS_*；frames 为低频传感器帧，
+        kinematics 为独立高频运动学时间序列
     """
     frames = []
-    stride = collection_cfg.capture_every_n_ticks
+    kinematics = []
+    capture_stride = collection_cfg.capture_every_n_ticks
+    kinematics_stride = collection_cfg.kinematics_every_n_ticks
 
     while counters["total"] < collection_cfg.max_frames_per_scene and not agent.done():
         crowd.retarget_arrived()  # 到达目标的行人重派新目标，避免后半程站住不动
@@ -138,25 +150,32 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         ego.apply_control(agent.run_step())
         frame_id = world.tick()
         counters["tick_idx"] += 1
-        sample = rig.gather(frame_id, timeout_s)  # 严格收齐本帧所有传感器
+        capture_due = (counters["tick_idx"] - 1) % capture_stride == 0
+        kinematics_due = (counters["tick_idx"] - 1) % kinematics_stride == 0
+        sample = rig.gather(frame_id, timeout_s) if capture_due else None
 
         if rig.collided:
-            return P.STATUS_COLLISION, frames  # 当前未落盘段丢弃、行驶结束（Design ④）
-        if (counters["tick_idx"] - 1) % stride != 0:
-            continue  # 未到采样间隔：已 gather 维持同步，但不落帧
+            return P.STATUS_COLLISION, frames, kinematics
+        snapshot_time = world.get_snapshot().timestamp.elapsed_seconds
+        ego_state = _ego_state(ego) if capture_due or kinematics_due else None
+        if kinematics_due:
+            kinematics.append({
+                "frame_id": frame_id, "sim_time": snapshot_time, "ego": ego_state})
+        if not capture_due:
+            continue
 
         try:
             blobs = _store_frame(allocator, sample)
         except ArenaFull:
             # arena 满：本段到此为止，由 collector 落盘后续采下一段。
             # 触发越界的这一帧已 tick/gather 但只部分写入，直接丢弃（下一段从新 tick 重采）。
-            return P.STATUS_PARTIAL, frames
+            return P.STATUS_PARTIAL, frames, kinematics
 
         traffic_states = traffic_control.traffic_light_states(traffic_lights)
         frames.append({
             "frame_id": frame_id,
-            "sim_time": world.get_snapshot().timestamp.elapsed_seconds,
-            "ego": _ego_state(ego),
+            "sim_time": snapshot_time,
+            "ego": ego_state,
             "blobs": blobs,
             "bboxes": annotations.dynamic_bboxes(world, ego.id),
             "traffic_light_states": traffic_states,
@@ -166,4 +185,4 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         counters["total"] += 1
 
     # 循环正常退出：到达终点（done）或达整次行驶总帧上限
-    return (P.STATUS_OK if agent.done() else P.STATUS_MAX_FRAMES), frames
+    return (P.STATUS_OK if agent.done() else P.STATUS_MAX_FRAMES), frames, kinematics

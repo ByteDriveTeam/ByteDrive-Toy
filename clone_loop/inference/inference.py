@@ -9,8 +9,9 @@
         risk_weight / drivable_weight / route_alignment_weight / max_abs_waypoint_m
     clone_loop.recording.enabled
     carla_collector.cameras.width / height
-    data.driving.cameras
-    clone_loop.control.waypoint_dt_s / clone_loop.simulation.fixed_delta_seconds
+    carla_collector.simulation.fixed_delta_seconds / collection.capture_every_n_ticks
+    data.driving.cameras / previous_frame_offset
+    clone_loop.simulation.fixed_delta_seconds
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
     model.driving.lidar_fusion.voxel_size_m
@@ -58,9 +59,12 @@ class ClosedLoopPolicy:
             cfg.data.dataset.dino_mean, dtype=torch.float32).view(3, 1, 1)
         self._std = torch.tensor(
             cfg.data.dataset.dino_std, dtype=torch.float32).view(3, 1, 1)
+        training_history_dt = (
+            cfg.carla_collector.simulation.fixed_delta_seconds
+            * cfg.carla_collector.collection.capture_every_n_ticks
+            * cfg.data.driving.previous_frame_offset)
         self._history_steps = max(int(round(
-            cfg.clone_loop.control.waypoint_dt_s
-            / cfg.clone_loop.simulation.fixed_delta_seconds)), 1)
+            training_history_dt / cfg.clone_loop.simulation.fixed_delta_seconds)), 1)
         self._model = DrivingModel(cfg).to(self._device).eval()
         self._load_weights(self._inference_cfg.checkpoint)
         self.reset()

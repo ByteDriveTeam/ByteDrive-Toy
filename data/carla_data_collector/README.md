@@ -23,6 +23,7 @@
 | ⑪ | 仅 Opt 地图；关闭静态车辆图层（规避已知 API 问题） | `session.py`：仅接受 `*_Opt`；`world.unload_map_layer(carla.MapLayer.ParkedVehicles)` |
 | ⑫ | 采集带语义的包围框 | `worker/annotations.py`：动态 actor（逐帧）+ 静态环境物体 level bbs（每场景一次），均带语义标签 |
 | ⑬ | 采集交通灯状态与路线相关控制点 | `worker/traffic_control.py`：缓存原生受控车道/停止 waypoint；逐帧按 BehaviorAgent 当前规划选择下一控制点并记录灯色 |
+| ⑭ | 运动学与高带宽传感器异频存储 | `collection.kinematics_every_n_ticks` 独立于 `capture_every_n_ticks`；默认运动学 10Hz、图像/Lidar/标注 2Hz，以 `frame_id/sim_time` 对齐 |
 
 ---
 
@@ -58,7 +59,8 @@ Carla 同步模式（`synchronous_mode=True` + 固定 `fixed_delta_seconds`）�
 worker 为每个传感器开独立队列，回调仅入队；每帧 `gather` 按 `frame_id` **收齐当前帧全部传感器后才推进下一帧**，
 陈旧帧丢弃、超前帧报错——杜绝多传感器跨帧错乱。编码/写盘在场景结束后由 Py312 统一做（不拖慢仿真）。
 
-单帧采集顺序：`apply_control(agent.run_step())` → `world.tick()` → `gather(frame_id)` → 碰撞判定 → 按采样间隔写 arena。
+单步采集顺序：`apply_control(agent.run_step())` → `world.tick()` → 碰撞判定 → 分别按运动学与传感器采样间隔写入。
+传感器采样点执行 `gather(frame_id)` 严格收齐；运动学无需等待传感器，可按更高频率独立记录。
 
 ---
 
@@ -78,7 +80,7 @@ data/carla_data_collector/
     actors.py                 # 主车+BehaviorAgent、TM 车流、导航网格行人
     sensors.py                # RGB/Depth/语义/光流 按开关共享多相机、语义 Lidar、碰撞；按帧收齐
     annotations.py            # 带语义包围框（动态逐帧 + 静态每场景）
-    collect.py                # 单场景严格同步采集循环 → 写 arena + 帧索引
+    collect.py                # 单场景异频采集 → 低频传感器 arena + 高频运动学时间轴
     traffic_control.py        # CARLA 原生受控车道/停止点与 Agent 当前规划关联
     geometry.py               # carla 几何转换 + 相机内参推导
   collector/                  # Py312：编排与处理
@@ -86,7 +88,7 @@ data/carla_data_collector/
     routes/                   # 可达点→组合→距离过滤→相似路线剔除→随机队列
     scenarios.py              # 逐场景随机 seed 与天气预设名（记录）
     encode.py                 # RGB→H.265 mp4
-    writer.py                 # 每场景独立 LMDB 写入
+    writer.py                 # 每场景独立 LMDB：非 RGB 帧 + 运动学时间轴
     orchestrator.py           # 主循环：建队列→驱动→碰撞重试→读 arena→编码+写库
     run.py                    # CLI 入口
   agents/                     # Carla 官方 agents（BehaviorAgent 等），未改动
@@ -113,14 +115,18 @@ data/carla_data_collector/
 | --- | --- |
 | `meta` | 场景级元数据：scene_id、seed、天气、路线、地图、fps、相机内外参、lidar 外参、静态包围框、交通灯及其受控车道/停止点、视频文件名 |
 | `num_frames` | 帧数 |
-| `{i}/meta` | 第 i 帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态、当前路线下一交通控制点 |
+| `{i}/meta` | 第 i 个低频传感器帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态、当前路线下一交通控制点 |
 | `{i}/depth/{cam}` | 第 i 帧该相机深度图（解码为米、float32 H×W）；`depth` 开关关闭则无 |
 | `{i}/semantic/{cam}` | 第 i 帧该相机语义图（CityScapes 标签、uint8 H×W；与同名 RGB/Depth 像素对齐）；`semantic` 关则无 |
 | `{i}/optical_flow/{cam}` | 第 i 帧该相机光流（float32 H×W×2 运动矢量）；`optical_flow` 关则无（默认关） |
 | `{i}/lidar` | 第 i 帧语义 Lidar（结构化点：x,y,z,cos_angle,obj_idx,obj_tag，无损）；`lidar.enabled` 关则无 |
+| `num_kinematics` | 独立运动学时间轴的记录数 |
+| `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量 |
 
 > 各模态由 `config` 的 `cameras.modalities`（rgb/depth/semantic/optical_flow）与 `lidar.enabled` 单独开关；
 > 关闭即不创建该传感器、不落盘。RGB 关闭则该场景无 mp4（`video_files` 为空）。
+> `meta.sensor_dt_s` 与 `meta.kinematics_dt_s` 明确记录两条时间轴的采样间隔；下游通过
+> `frame_id` 或 `sim_time` 做精确关联，不应假定二者索引相同。
 
 数组以 `(dtype, shape, bytes)` msgpack 打包，结构化 dtype 用 descr 保存以无损还原。
 `output.lmdb_map_size_gb` 是**单场景 DB 的增长上限**（初始仅 64MB、按需增长，规避 Windows 预占满）。

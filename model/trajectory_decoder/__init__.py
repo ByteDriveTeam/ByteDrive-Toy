@@ -1,4 +1,4 @@
-"""条件化多 Mode 规划解码器：8 个可学习 Token 查询双层感知特征。公开 API 重导出入口。
+"""条件化多 Mode 规划解码器：8 个 Token 输出 10Hz、4 秒轨迹。公开 API 重导出入口。
 
 模块: model/trajectory_decoder/__init__.py
 依赖: model.trajectory_decoder.trajectory_decoder
