@@ -9,9 +9,10 @@
     clone_loop.route.* / traffic.num_vehicles / vehicle_filter / tm_port
     clone_loop.ego.vehicle_filter / safety.max_route_deviation_m
     carla_collector.cameras.width / height / rig
+    carla_collector.lidar.*
     data.driving.cameras
 对外接口:
-    - CarlaRuntime(cfg, shared_frame)
+    - CarlaRuntime(cfg, shared_frame, shared_lidar)
         .server_info() -> dict
         .query_spawn_points() -> list[list[6]]
         .reset(seed, route) -> dict
@@ -46,11 +47,15 @@ _DestroyActor = carla.command.DestroyActor
 class CarlaRuntime:
     """单个 Py37 进程内串行复用的 CARLA 闭环运行时。"""
 
-    def __init__(self, cfg, shared_frame):
+    def __init__(self, cfg, shared_frame, shared_lidar):
         self._cfg = cfg.clone_loop
         self._cameras_cfg = cfg.carla_collector.cameras
+        self._lidar_cfg = cfg.carla_collector.lidar
         self._camera_names = tuple(cfg.data.driving.cameras)
         self._frame = shared_frame
+        self._lidar = shared_lidar
+        self._lidar_count = 0
+        self._lidar_valid = False
         self._client = carla.Client(
             self._cfg.worker.carla_host, self._cfg.worker.carla_port)
         self._client.set_timeout(self._cfg.worker.startup_timeout_s)
@@ -84,7 +89,8 @@ class CarlaRuntime:
         self._ego = self._spawn_ego(route["start"])
         self._vehicle_ids = self._spawn_traffic()
         self._sensors = ClosedLoopSensors(
-            self._world, self._ego, self._cameras_cfg, self._camera_names)
+            self._world, self._ego, self._cameras_cfg, self._lidar_cfg,
+            self._camera_names)
         self._navigator = RouteNavigator(
             self._world.get_map(), route["start"], route["end"], self._cfg.route)
         self._steps = 0
@@ -99,8 +105,7 @@ class CarlaRuntime:
         if frame_id is None:
             self._ego.apply_control(brake)
             frame_id = self._world.tick()
-        self._frame.write(self._sensors.gather(
-            frame_id, self._cfg.worker.command_timeout_s))
+        self._write_sensors(frame_id)
         navigation = self._navigator.observe(self._ego.get_transform())
         return self._observation(self._status(navigation), navigation)
 
@@ -112,8 +117,7 @@ class CarlaRuntime:
             steer=float(control["steer"]),
             brake=float(control["brake"])))
         frame_id = self._world.tick()
-        self._frame.write(self._sensors.gather(
-            frame_id, self._cfg.worker.command_timeout_s))
+        self._write_sensors(frame_id)
         self._steps += 1
         current = self._ego.get_location()
         self._distance += current.distance(self._last_location)
@@ -143,6 +147,8 @@ class CarlaRuntime:
             "pose": _transform_list(transform),
             "intrinsics": self._sensors.intrinsics,
             "extrinsics": self._sensors.extrinsics,
+            "lidar_count": self._lidar_count,
+            "lidar_valid": self._lidar_valid,
             "target_point": navigation["target_point"],
             "ego_velocity": ego_velocity,
             "speed_mps": _speed(self._ego),
@@ -154,6 +160,19 @@ class CarlaRuntime:
             "sim_time_s": self._world.get_snapshot().timestamp.elapsed_seconds,
             "step": self._steps,
         }
+
+    def _write_sensors(self, frame_id):
+        """把同步 RGB 与变长 XYZ LiDAR 分别写入共享区并记录有效长度。"""
+        rgb, lidar, count, valid = self._sensors.gather(
+            frame_id, self._cfg.worker.command_timeout_s)
+        capacity = self._lidar.size_bytes // (3 * np.dtype(np.float32).itemsize)
+        if int(count) > capacity:
+            raise RuntimeError(
+                "LiDAR 点数 {} 超过共享区容量 {}，拒绝截断。".format(count, capacity))
+        self._frame.write(rgb)
+        self._lidar.write_prefix(lidar)
+        self._lidar_count = int(count)
+        self._lidar_valid = bool(valid)
 
     def _load_world(self):
         world = self._client.load_world(self._cfg.simulation.map)

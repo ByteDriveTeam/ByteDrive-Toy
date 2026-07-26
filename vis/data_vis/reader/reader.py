@@ -10,6 +10,7 @@
         .camera_names -> list[str]
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
+        .lidar(i) -> np.ndarray | None # 只读取语义 LiDAR，不解码 RGB/其他大数组
         .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .close()
@@ -117,6 +118,15 @@ class SceneReader:
         """只读取指定帧/相机的 RGB，供时序模型避免为历史帧解码全部监督模态。"""
         check_frame_index(i, self.num_frames)
         return self._videos[camera].at(i)
+
+    def lidar(self, i):
+        """只读取指定帧语义 LiDAR；场景未落盘该模态时返回 None。"""
+        check_frame_index(i, self.num_frames)
+        if not self.available["lidar"]:
+            return None
+        with self._env.begin() as txn:
+            blob = txn.get(self._key(i, "lidar"))
+        return unpack_array(blob) if blob is not None else None
 
     def frame(self, i, modalities=None):
         """读取第 i 帧的标注与所选大数组模态，组装为一个 dict（缺失/未选模态为空/None）。

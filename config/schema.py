@@ -239,6 +239,16 @@ class QueryEmbeddingCfg:
 
 
 @dataclass
+class LidarFusionCfg:
+    """LiDAR 体素统计编码及逐位置逐通道门控参数。"""
+    voxel_size_m: float
+    voxel_embed_dim: int
+    height_hidden_dim: int
+    reduced_dim: int
+    gate_hidden_dim: int
+
+
+@dataclass
 class FrustumCfg:
     """深度 frustum 位置编码参数（每 patch 中心+四角×深度采样的候选 3D 坐标）。"""
     depth_min_m: float
@@ -314,6 +324,7 @@ class DrivingCfg:
     neck_num_residual_blocks: int  # driving_neck 融合后 2D 残差块层数
     bev: BevGeometryCfg
     query: QueryEmbeddingCfg
+    lidar_fusion: LidarFusionCfg
     frustum: FrustumCfg
     attention: DrivingAttentionCfg
     bev_encoder: BevEncoderCfg
@@ -760,10 +771,10 @@ def validate_config(cfg):
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
-    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data, cc.cameras)
+    _validate_clone_loop(cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar)
 
 
-def _validate_clone_loop(cl, model, data, cameras):
+def _validate_clone_loop(cl, model, data, cameras, lidar):
     """校验对象: cfg.clone_loop —— CARLA 闭环运行、推理、控制与安全参数。"""
     assert cl.worker.carla_port > 0 and cl.worker.startup_timeout_s > 0 \
         and cl.worker.command_timeout_s > 0, \
@@ -785,6 +796,10 @@ def _validate_clone_loop(cl, model, data, cameras):
     assert cameras.width % model.dinov3_backbone.patch_size == 0 \
         and cameras.height % model.dinov3_backbone.patch_size == 0, \
         "carla_collector.cameras 宽高必须被模型 patch_size 整除"
+    assert math.isclose(
+        lidar.rotation_frequency, 1.0 / sim.fixed_delta_seconds,
+        rel_tol=0.0, abs_tol=1e-6), \
+        "carla_collector.lidar.rotation_frequency 必须与闭环固定步长对齐为每帧一整圈"
     inf = cl.inference
     assert 0 < inf.min_weight_coverage <= 1 and inf.max_abs_waypoint_m > 0, \
         "clone_loop.inference 权重覆盖率/航点范围取值非法"
@@ -967,6 +982,7 @@ def _validate_driving(dv):
     # 校验对象: query —— 纯几何编码的尺度与 MLP 隐藏维为正
     assert dv.query.coord_symlog_scale > 0 and dv.query.mlp_hidden > 0, \
         "model.driving.query.coord_symlog_scale / mlp_hidden 必须 > 0"
+    _validate_lidar_fusion(dv)
     # 校验对象: frustum —— 深度量程与步长为正、近步长 <= 远步长
     fr = dv.frustum
     assert 0 < fr.depth_min_m < fr.depth_max_m, "model.driving.frustum 需 0 < depth_min_m < depth_max_m"
@@ -1041,6 +1057,30 @@ def _validate_bev_geometry(bev):
     assert 0 < bev.fov_deg <= 180, "model.driving.bev.fov_deg 必须在 (0,180]"
     assert bev.z_min_m < bev.z_max_m and bev.z_step_m > 0, \
         "model.driving.bev 需满足 z_min_m < z_max_m 且 z_step_m > 0"
+
+
+def _validate_lidar_fusion(dv):
+    """校验对象: cfg.model.driving.lidar_fusion —— 体素尺寸、通道与 BEV 对齐关系。"""
+    lf, bev = dv.lidar_fusion, dv.bev
+    assert math.isfinite(lf.voxel_size_m) and lf.voxel_size_m > 0, \
+        "model.driving.lidar_fusion.voxel_size_m 必须为有限正数"
+    channels = (lf.voxel_embed_dim, lf.height_hidden_dim, lf.reduced_dim, lf.gate_hidden_dim)
+    assert all(isinstance(value, int) and not isinstance(value, bool) and value > 0
+               for value in channels), \
+        "model.driving.lidar_fusion 各通道维必须为正整数"
+    counts = tuple((upper - lower) / lf.voxel_size_m for lower, upper in (
+        (bev.x_min_m, bev.x_max_m), (bev.y_min_m, bev.y_max_m),
+        (bev.z_min_m, bev.z_max_m)))
+    assert all(math.isclose(value, round(value), rel_tol=0.0, abs_tol=1e-6)
+               for value in counts), \
+        "model.driving.bev XYZ 量程必须能被 lidar_fusion.voxel_size_m 整除"
+    x_count, y_count, z_count = (int(round(value)) for value in counts)
+    assert (x_count, y_count, z_count) == (128, 128, 22), \
+        "默认 LiDAR 体素网格必须为 128×128×22，实际 {}×{}×{}".format(
+            x_count, y_count, z_count)
+    assert x_count % bev.height == 0 and y_count % bev.width == 0 \
+            and x_count // bev.height == y_count // bev.width == 4, \
+        "LiDAR XY 网格与 BEV 查询两轴均须为 4 倍关系"
 
 
 # data_vis 着色支持的 OpenCV colormap 名（须与 vis/data_vis/draw.py 的映射表一致）

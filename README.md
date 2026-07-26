@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的三目、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
+  <strong>面向 CARLA 合成数据的三目+LiDAR、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
   冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环驾驶
 </p>
 
@@ -159,7 +159,7 @@ flowchart TB
 
     subgraph LEARN["训练数据与模型"]
         DS1["PerceptionDataset"]
-        DS2["DrivingDataset<br/>双帧三目/轨迹/行为/三场/道路线图/HDMap"]
+        DS2["DrivingDataset<br/>双帧三目+LiDAR/轨迹/行为/三场/道路线图/HDMap"]
         P["PerceptionModel"]
         D["DrivingModel"]
         DS1 --> P
@@ -174,7 +174,7 @@ flowchart TB
     end
 
     subgraph CLOSED["CARLA 行为克隆闭环"]
-        OBS["同步前向三目 RGB<br/>位姿/速度/路线目标"]
+        OBS["同步前向三目 RGB + LiDAR<br/>位姿/速度/路线目标"]
         INF["DrivingModel<br/>双帧在线推理"]
         SELECT["置信度 + 风险场 + 可行驶场<br/>+ 路线方向联合重排"]
         CTRL["纯追踪横向控制<br/>速度 PID"]
@@ -317,6 +317,11 @@ flowchart TB
 
     GRID["BEV xyz 几何<br/>32×32×111 垂直采样"] --> QUERY["Geometry Query Embedding"]
     QUERY --> BEVQ["BEV Query<br/>384×32×32"]
+    LIDAR["当前/历史语义 LiDAR XYZ"] --> VOXEL["0.5m 体素<br/>XYZ 均值+总体标准差"]
+    VOXEL --> LENC["lg-Symlog + 3D/2D CNN<br/>384×32×32"]
+    IMG --> GATE["视觉 GAP + 局部 LiDAR<br/>逐位置逐通道 Sigmoid"]
+    LENC --> GATE
+    GATE --> BEVQ
     IMG --> CROSS["2× BEV→Image<br/>交叉注意力"]
     BEVQ --> CROSS
     PRGB["上一帧三目 RGB"] --> PBEV["上一帧 BEV 骨干末端"]
@@ -388,7 +393,18 @@ BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 
 
 3 维几何向量经过 MLP 后沿 z 求均值，形成该 BEV cell 的初始查询；查询初始化不再编码目标点。
 
-#### 4. BEV Encoder：先查询三目 Token，再查询上一帧 BEV
+#### 4. LiDAR Query Fusion：体素统计在交叉注意力前注入
+
+当前和历史语义 LiDAR 分别平移到 ego 系，并在 `0.5m` 网格中计算 XYZ 均值与总体标准差。默认量程产生
+`22×128×128` 个体素；统计量使用 `sign(x)·log10(1+|x|)`，经 `1×1×1 Conv3d` 升到 8 维，
+无点体素由可学习 8 维空向量代替。Z 层拼入通道后使用 `176→64→32` 的 1×1 2D 链路，再以
+`4×4,stride=4` 卷积对齐到 `384×32×32`。
+
+三目图像特征全局池化后，与每个位置的 LiDAR 特征拼接，经 `768→128→384` MLP 和 Sigmoid 生成逐位置、
+逐通道门控，最终按 `query + gate·lidar` 注入。门控 logits 与最终对齐卷积采用零初始化策略，使旧权重加载后
+LiDAR 初始残差严格为零。整帧缺失 LiDAR 时由有效位严格旁路，不会把“传感器缺失”误作“全部空体素”。
+
+#### 5. BEV Encoder：先查询三目 Token，再查询上一帧 BEV
 
 当前帧的 `32×32=1024` 个 BEV 查询 Token 先通过两层 Pre-Norm 交叉注意力查询拼接后的
 `3×24×48=3456` 个三目图像 Token。三路共享视觉参数，仅由各自 frustum 几何编码区分空间来源。上一帧以
@@ -398,7 +414,7 @@ BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 
 进入 6 层 Pre-Norm Transformer。二维 RoPE 只施加于 1024 个 BEV Patch，坐标从 `(1,1)` 起；寄存器无位置，
 用于吸纳噪声并在还原网格前丢弃。场景首帧用 identity 和 `previous_valid=0` 跳过时序残差，不构造全零历史特征。
 
-#### 5. 三场解码
+#### 6. 三场解码
 
 BEV 特征经残差块、通道压缩和三级 PixelShuffle，从 `32×32` 放大到 `256×256`。三个 `1×1` 头共享
 上采样特征，分别输出未经过 sigmoid 的 logits：
@@ -409,7 +425,7 @@ BEV 特征经残差块、通道压缩和三级 PixelShuffle，从 `32×32` 放�
 | `drivable` | HDMap 车道栅格减去可见运动 box 足迹 | 只考虑 vehicle/pedestrian，二者统一为占用；框内至少 10 个深度像素 |
 | `distribution` | 未来 GT 航点高斯软化 | 期望未来轨迹经过位置的空间分数场 |
 
-#### 6. 独立道路线图
+#### 7. 独立道路线图
 
 道路线图不与三场共享上采样参数，单独解码 5 类 logits：`background / centerline / lane_separator /
 road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Broken / NONE → 1 / 2 / 3`，未知
@@ -423,7 +439,7 @@ road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Bro
 最先到达者；该走廊默认沿未来专家路线搜索 64 m，无需迁移旧 LMDB。红灯状态始终监督；停车行为与越线损失仅在车辆静止，或剩余距离不小于
 “反应距离 + 舒适制动距离 + 安全余量”时激活，避免刚变红但已进入不可停车区间的样本与专家轨迹冲突。
 
-#### 7. 条件化多 Mode 规划 Token
+#### 8. 条件化多 Mode 规划 Token
 
 规划使用 8 个随机初始化、在训练中持续更新的 Mode Token。目标点与 ego 平面速度 `(vₓ,vᵧ)` 先经 Symlog
 和 `Linear → SiLU → Linear` 得到第一路预查询，再经 FFN 得到第二路预查询。两个规划 CTB 依次查询 BEV
@@ -461,14 +477,15 @@ flowchart TB
 | 模型 | 总参数 | 默认可训练参数 | 冻结参数 |
 | --- | ---: | ---: | ---: |
 | `PerceptionModel` | 35,195,167 | 6,502,303 | 28,692,864 |
-| `DrivingModel` | 63,596,423 | 34,903,559 | 28,692,864 |
+| `DrivingModel` | 63,954,855 | 35,261,991 | 28,692,864 |
 
-默认 `model.driving.freeze_perception=false`，因此驾驶模型的 34.90M 非冻结参数包含视觉 fusion/trunk、
+默认 `model.driving.freeze_perception=false`，因此驾驶模型的 35.26M 非冻结参数包含视觉 fusion/trunk、
 时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
-三目化没有新增任何参数，所以上表参数量与旧驾驶权重的 state-dict 键及形状保持不变。运行时当前帧和历史帧
-各编码三路图像，视觉计算量与激活量相对旧单目路径约为三倍；BEV 与各解码器计算量保持不变。下表仅保留
+LiDAR 融合新增 358,432 个参数，但不改任何既有 state-dict 键；旧驾驶检查点的 415 个非骨干状态项仍可加载，
+新增 13 项保留构造初始化，默认闭环覆盖率为 `415/428=96.96%`。运行时当前帧和历史帧各编码三路图像与
+一帧 LiDAR；BEV 与各解码器计算量保持不变。下表仅保留
 不受三目化影响的感知模型实测口径，驾驶显存应在目标硬件上按实际 batch 重新测量。
 
 | 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
@@ -498,6 +515,14 @@ flowchart LR
 
 BF16 具有与 FP32 相同的指数范围，训练循环不使用 `GradScaler`。几何反投影、Symlog 坐标构造等数值路径
 固定使用 FP32，MLP/主干部分再进入 BF16 autocast。
+
+LiDAR 双帧稠密统计与当前分支反向激活理论上增加约 `35.56 MiB/样本`，另有约 `5.47 MiB` 的
+参数/梯度/AdamW 状态。默认 batch 32 约增加 1.12 GiB，需为 CUDA 分配器与工作区预留 1.2–1.4 GiB；
+batch 4/8 分别约增加 148/290 MiB，batch 1 在线推理建议预留 40–50 MiB。关闭
+`bev_encoder.detach_previous` 后 batch 32 还会多保留约 588 MiB 历史分支激活，总增量建议预留
+1.9–2.1 GiB。batch 32 的双帧 FP32 稠密统计在 CPU/锁页内存约占 550 MiB，DataLoader 多 worker
+预取会进一步放大主机内存。当前环境无 CUDA，这些是主要张量生命周期估算，正式训练应在目标 GPU 上以
+`torch.cuda.max_memory_allocated()` 实测。
 
 ---
 
@@ -581,6 +606,9 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | --- | --- | --- |
 | 模型输入 | `rgb` | `[3,3,H,W]` 三目归一化图像，相机轴顺序由 `data.driving.cameras` 固定 |
 | 模型输入 | `previous_rgb` | 同场景上一帧 `[3,3,H,W]`；场景首帧回退当前三目 |
+| 模型输入 | `lidar_stats/previous_lidar_stats` | 当前/历史 `[6,22,128,128]` FP32 体素 XYZ 均值与总体标准差 |
+| 模型输入 | `lidar_occupied/previous_lidar_occupied` | 当前/历史 `[1,22,128,128]` bool 体素占用掩码 |
+| 模型输入 | `lidar_valid/previous_lidar_valid` | 整帧 LiDAR 有效位；为 0 时严格旁路，空体素向量只用于有效帧 |
 | 模型输入 | `previous_to_current/previous_valid` | 上一帧 ego xy 到当前 ego xy 的 `3×3` 刚性矩阵及有效位 |
 | 模型输入 | `intrinsics` | 三路 `[3,4]`，每路为 `[fx,fy,cx,cy]` |
 | 模型输入 | `extrinsics` | 三路 `[3,6]`，每路为相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
@@ -904,7 +932,7 @@ python data/carla_data_collector/collector/run.py --config config/default.yaml -
 - `--max-scenes 1` 或 2；
 - 减少交通参与者；
 - 仅启用 `front` 相机；
-- 暂时关闭 Optical Flow 和 LiDAR；
+- 暂时关闭 Optical Flow，LiDAR 保持开启以验证驾驶多模态数据链路；
 - 确认 H.265/LMDB 都能写入后再扩大规模。
 
 ### 3. 浏览原始场景
@@ -1046,6 +1074,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `model.dinov3_backbone` | 本地骨干路径、patch size、抽取层 |
 | `model.feature_trunk/heads/physics` | 感知主干、双头和物理量编码 |
 | `model.driving.bev/query/frustum` | BEV 几何、目标查询和视锥采样 |
+| `model.driving.lidar_fusion` | LiDAR 体素尺寸、编码通道与视觉条件门控 |
 | `model.driving.attention/bev_encoder` | 三目图像 Token/上一帧 BEV 注意力和 BEV 空间提炼 |
 | `model.driving.fields/lane_map/traffic_control/trajectory/behavior` | 三场、道路线、停止线灯色、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
@@ -1200,6 +1229,7 @@ ByteDrive-Toy/
 │   ├── single_frame_base/            # 场景索引、惰性 reader、RGB 归一化
 │   ├── perception_dataset/           # 感知单帧数据集
 │   ├── driving_dataset/              # 驾驶输入与多任务 GT
+│   ├── lidar_voxelization/            # LiDAR 体素 XYZ 均值/总体标准差
 │   ├── driving_targets/              # 轨迹、行为、风险/分布场纯 NumPy 编码
 │   ├── hd_map/                       # HDMap 栅格化与道路外距离场
 │   ├── target_encoding/              # Symlog 物理量监督
@@ -1214,6 +1244,7 @@ ByteDrive-Toy/
 │   ├── frustum_encoding/             # patch 视锥 3D 候选编码
 │   ├── driving_neck/                 # 感知+DINO+几何融合
 │   ├── bev_query_embedding/          # 纯 xyz 几何 BEV 查询
+│   ├── lidar_fusion/                  # lg-Symlog 体素编码与视觉条件门控
 │   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
 │   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
 │   ├── field_decoder/                # 风险/可行驶/轨迹分布三场
@@ -1269,8 +1300,8 @@ ByteDrive-Toy/
 
 ### 研究边界
 
-- 当前模型是双帧时序、三目架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距维护
-  历史观测，并在 CARLA 中接入轨迹选择和车辆控制；
+- 当前模型是双帧时序、三目+LiDAR 架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距
+  维护历史 RGB、LiDAR 体素与位姿，并在 CARLA 中接入轨迹选择和车辆控制；
 - 当前闭环仅面向 CARLA 0.9.15 同步仿真，使用纯追踪横向控制和纵向 PID，不等同于真实车辆部署能力；
 - 训练数据默认把所有帧展开、同场景连续帧成批并在 batch 粒度 shuffle，没有官方 train/val/test 划分；
 - 默认没有数据增强、学习率调度器、指标评测、早停或 best checkpoint；

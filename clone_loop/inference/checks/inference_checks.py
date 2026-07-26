@@ -9,13 +9,25 @@ def check_frame(frame, views, height, width):
             views, height, width))
 
 
+def check_lidar(points):
+    """校验对象: ClosedLoopPolicy.infer 的 lidar_xyz —— 必须为有限 FP32 `[N,3]`。"""
+    if points.ndim != 2 or points.shape[1:] != (3,) or points.dtype != np.float32:
+        raise ValueError("闭环 LiDAR 期望 [N,3] float32")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("闭环 LiDAR 包含非有限数")
+
+
 def check_observation(observation):
     """校验对象: ClosedLoopPolicy.infer 的 observation —— 模型条件字段必须齐全且有限。"""
-    expected = {"pose", "intrinsics", "extrinsics", "target_point", "ego_velocity"}
+    expected = {
+        "pose", "intrinsics", "extrinsics", "target_point", "ego_velocity",
+        "lidar_count", "lidar_valid",
+    }
     missing = expected.difference(observation)
     if missing:
         raise ValueError("闭环观测缺少字段: {}".format(sorted(missing)))
-    if not all(np.all(np.isfinite(observation[key])) for key in expected):
+    numeric = expected.difference({"lidar_valid"})
+    if not all(np.all(np.isfinite(observation[key])) for key in numeric):
         raise ValueError("闭环观测包含非有限数")
     if np.shape(observation["intrinsics"]) != (3, 4) \
             or np.shape(observation["extrinsics"]) != (3, 6):

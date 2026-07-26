@@ -1,7 +1,8 @@
-"""驾驶模型双帧三目数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
+"""驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
 
 模块: data/driving_dataset/driving_dataset.py
-依赖: torch, numpy, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
+依赖: torch, numpy, warnings, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
+      data.lidar_voxelization,
       data.driving_targets, data.hd_map.HdMap, vis.data_vis.geometry, data.driving_dataset.checks.*
 读取配置:
     data.driving.scene_root / cameras / map_dir / map_name_template / previous_frame_offset /
@@ -17,6 +18,7 @@
         traffic_light_min_pixels
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
+    model.driving.lidar_fusion.voxel_size_m
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
     model.driving.trajectory.num_waypoints
     model.driving.traffic_control.state_names
@@ -25,6 +27,7 @@
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。三路相机严格按 data.driving.cameras 堆叠；
+      当前/历史语义 LiDAR 在 CPU 上编码为 0.5m 体素 XYZ 均值与总体标准差；旧场景缺失时按场景告警并旁路。
       每个样本同时返回同场景上一帧三目 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 由同场景未来 num_waypoints 帧 ego 世界位姿经 world_to_ego 变到当前 ego 系；行为 GT 为固定八类
@@ -43,6 +46,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import OrderedDict
 from typing import Dict
 
@@ -53,6 +57,7 @@ from config.schema import Config
 from data import driving_targets as dt
 from data.driving_dataset.checks.driving_dataset_checks import check_behavior_annotations, check_camera_calib
 from data.hd_map import HdMap, offroad_distance_field
+from data.lidar_voxelization import lidar_xyz_to_voxels
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
 from vis.data_vis.geometry import transform_matrix, transform_points, world_to_ego
 
@@ -71,6 +76,8 @@ class DrivingDataset(SingleFrameSceneBase):
         self._cfg_data = drv_data
         self._cameras = tuple(drv_data.cameras)
         bev = cfg.model.driving.bev
+        self._bev_geometry = bev
+        self._lidar_voxel_size = cfg.model.driving.lidar_fusion.voxel_size_m
         self._fov = bev.fov_deg
         self._previous_offset = drv_data.previous_frame_offset
         # 场分辨率 = BEV 工作分辨率 · 上采样倍率（与 field_decoder 输出一致）
@@ -95,6 +102,7 @@ class DrivingDataset(SingleFrameSceneBase):
         self._inview = torch.from_numpy(self._inview_np)  # 常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
         self._state_cache = OrderedDict()  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
+        self._missing_lidar_warned = set()
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         scene_dir, frame_idx = self.frame_index[i]
@@ -110,7 +118,7 @@ class DrivingDataset(SingleFrameSceneBase):
             np.stack([reader.rgb(previous_idx, camera) for camera in cameras])
             if previous_valid else None)
 
-        frame = reader.frame(frame_idx, modalities=("depth", "semantic"))  # 驾驶只用深度/语义，跳过光流/lidar 解码
+        frame = reader.frame(frame_idx, modalities=("depth", "semantic", "lidar"))
         check_behavior_annotations(meta, frame, cameras)
         intrinsics = [meta["intrinsics"][camera] for camera in cameras]
         extrinsics = np.asarray(
@@ -131,6 +139,11 @@ class DrivingDataset(SingleFrameSceneBase):
         world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
         previous_meta = previous_meta or frame["meta"]
         previous_rgb = previous_rgb if previous_rgb is not None else rgb
+        previous_lidar = reader.lidar(previous_idx) if previous_valid else frame["lidar"]
+        lidar_stats, lidar_occupied, lidar_valid = self._lidar_voxels(
+            scene_dir, frame["lidar"], meta)
+        previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid = \
+            self._lidar_voxels(scene_dir, previous_lidar, meta)
         previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
         previous_to_current = _planar_previous_to_current(previous_pose, pose)
 
@@ -169,6 +182,13 @@ class DrivingDataset(SingleFrameSceneBase):
             "previous_rgb": torch.stack([self.normalize_rgb(image) for image in previous_rgb]),
             "previous_to_current": torch.from_numpy(previous_to_current),
             "previous_valid": torch.tensor(previous_valid, dtype=torch.float32),
+            "lidar_stats": lidar_stats,
+            "lidar_occupied": lidar_occupied,
+            "lidar_valid": torch.tensor(lidar_valid, dtype=torch.float32),
+            "previous_lidar_stats": previous_lidar_stats,
+            "previous_lidar_occupied": previous_lidar_occupied,
+            "previous_lidar_valid": torch.tensor(
+                previous_lidar_valid, dtype=torch.float32),
             "intrinsics": torch.from_numpy(intrinsics4),
             "extrinsics": torch.from_numpy(extrinsics),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
@@ -188,6 +208,24 @@ class DrivingDataset(SingleFrameSceneBase):
                        else torch.tensor(value, dtype=torch.float32)
                        for name, value in traffic.items()})
         return sample
+
+    def _lidar_voxels(self, scene_dir, lidar, meta):
+        """把结构化语义 LiDAR 转为 ego 系体素统计；缺失场景严格标为无效。"""
+        extrinsic = meta.get("lidar_extrinsic")
+        if lidar is None or extrinsic is None:
+            key = str(scene_dir)
+            if key not in self._missing_lidar_warned:
+                warnings.warn("场景 {} 缺失 LiDAR，驾驶模型将严格旁路该模态。".format(
+                    scene_dir.name), RuntimeWarning)
+                self._missing_lidar_warned.add(key)
+            stats, occupied = lidar_xyz_to_voxels(
+                np.empty((0, 3), dtype=np.float32), (0.0, 0.0, 0.0),
+                self._bev_geometry, self._lidar_voxel_size)
+            return stats, occupied, 0.0
+        xyz = np.stack((lidar["x"], lidar["y"], lidar["z"]), axis=1)
+        stats, occupied = lidar_xyz_to_voxels(
+            xyz, extrinsic, self._bev_geometry, self._lidar_voxel_size)
+        return stats, occupied, 1.0
 
     def _scene_states(self, scene_dir, reader):
         """以有界 LRU 缓存全帧 ego 位姿与速度加速度，供轨迹/行为/目标点复用。"""

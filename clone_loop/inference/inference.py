@@ -1,7 +1,8 @@
-"""加载三目驾驶权重、维护双帧状态，并按置信度/安全场/路线一致性选择闭环轨迹。
+"""加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹。
 
 模块: clone_loop/inference/inference.py
-依赖: collections, pathlib, numpy, torch, torch.nn.functional, model.driving_model,
+依赖: collections, pathlib, numpy, torch, torch.nn.functional, data.lidar_voxelization,
+      model.driving_model,
       clone_loop.inference.checks.inference_checks
 读取配置:
     clone_loop.inference.checkpoint / device / min_weight_coverage / confidence_weight /
@@ -12,12 +13,13 @@
     clone_loop.control.waypoint_dt_s / clone_loop.simulation.fixed_delta_seconds
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
+    model.driving.lidar_fusion.voxel_size_m
     （驾驶模型构造继续读取 config.model）
 对外接口:
     - ClosedLoopPolicy(cfg)
         .reset() -> None
-        .infer(frame_bgr, observation) -> dict
-说明: 历史帧和位姿只在主环境保存；每个 episode 首帧以当前帧回填并把 previous_valid 置零。
+        .infer(frame_bgr, lidar_xyz, observation) -> dict
+说明: 历史 RGB、LiDAR 体素和位姿只在主环境保存；每个 episode 首帧以当前帧回填并把 previous_valid 置零。
 """
 
 from collections import deque
@@ -29,9 +31,11 @@ import torch.nn.functional as F
 
 from clone_loop.inference.checks.inference_checks import (
     check_frame,
+    check_lidar,
     check_observation,
     check_trajectory_candidates,
 )
+from data.lidar_voxelization import lidar_xyz_to_voxels
 from model.driving_model import DrivingModel
 
 
@@ -93,35 +97,38 @@ class ClosedLoopPolicy:
             path, payload.get("epoch", "?"), coverage))
 
     def reset(self):
-        """清空上一帧图像与位姿，隔离不同 episode 的时序状态。"""
+        """清空历史 RGB、LiDAR 体素与位姿，隔离不同 episode 的时序状态。"""
         self._history = deque(maxlen=self._history_steps)
 
-    def infer(self, frame_bgr, observation):
-        """对当前共享帧推理，返回选中轨迹、行为概率和各模态评分。"""
+    def infer(self, frame_bgr, lidar_xyz, observation):
+        """对当前 RGB/LiDAR 共享帧推理，返回选中轨迹、行为概率和各模态评分。"""
         check_frame(
             frame_bgr, len(self._camera_names),
             self._camera_cfg.height, self._camera_cfg.width)
+        check_lidar(lidar_xyz)
         check_observation(observation)
         current_rgb = self._normalize(frame_bgr)
+        current_lidar = self._voxelize_lidar(lidar_xyz, observation)
         current_pose = np.asarray(observation["pose"], dtype=np.float64)
         history_ready = len(self._history) >= self._history_steps
-        previous_rgb, previous_pose = (
+        previous_rgb, previous_lidar, previous_pose = (
             self._history[-self._history_steps]
-            if history_ready else (current_rgb, current_pose))
+            if history_ready else (current_rgb, current_lidar, current_pose))
         previous_to_current = (
             _planar_previous_to_current(previous_pose, current_pose)
             if history_ready else np.eye(3, dtype=np.float32))
         previous_valid = float(history_ready)
 
         inputs = self._inputs(
-            current_rgb, previous_rgb, previous_to_current, previous_valid, observation)
+            current_rgb, previous_rgb, current_lidar, previous_lidar,
+            previous_to_current, previous_valid, observation)
         with torch.inference_mode():
             outputs = self._model(**inputs)
             selected, scores = self._select(outputs, inputs["target_point"])
             behavior = torch.sigmoid(outputs["behavior_logits"][0])
             visualization = self._visualization(outputs) if self._record_outputs else None
 
-        self._history.append((current_rgb.detach(), current_pose.copy()))
+        self._history.append((current_rgb.detach(), current_lidar, current_pose.copy()))
         return {
             "trajectory": outputs["trajectories"][0, selected].float().cpu().numpy(),
             "behavior_probabilities": behavior.float().cpu().numpy(),
@@ -158,9 +165,12 @@ class ClosedLoopPolicy:
         rgb = torch.from_numpy(np.ascontiguousarray(bgr[..., ::-1])).float() / 255.0
         return ((rgb.permute(0, 3, 1, 2) - self._mean) / self._std).unsqueeze(0)
 
-    def _inputs(self, current, previous, transform, previous_valid, observation):
+    def _inputs(self, current, previous, current_lidar, previous_lidar,
+                transform, previous_valid, observation):
         """把纯数值观测装配为 DrivingModel 的命名张量输入。"""
         tensor = lambda value: torch.as_tensor(value, dtype=torch.float32, device=self._device)
+        current_stats, current_occupied, current_valid = current_lidar
+        previous_stats, previous_occupied, previous_lidar_valid = previous_lidar
         return {
             "rgb": current.to(self._device),
             "intrinsics": tensor(observation["intrinsics"]).unsqueeze(0),
@@ -170,7 +180,24 @@ class ClosedLoopPolicy:
             "previous_rgb": previous.to(self._device),
             "previous_to_current": tensor(transform).unsqueeze(0),
             "previous_valid": tensor([previous_valid]),
+            "lidar_stats": current_stats.unsqueeze(0).to(self._device),
+            "lidar_occupied": current_occupied.unsqueeze(0).to(self._device),
+            "lidar_valid": tensor([current_valid]),
+            "previous_lidar_stats": previous_stats.unsqueeze(0).to(self._device),
+            "previous_lidar_occupied": previous_occupied.unsqueeze(0).to(self._device),
+            "previous_lidar_valid": tensor([previous_lidar_valid]),
         }
+
+    def _voxelize_lidar(self, lidar_xyz, observation):
+        """把在线传感器点云编码为与训练一致的均值/总体标准差体素。"""
+        valid = bool(observation["lidar_valid"])
+        points = lidar_xyz if valid else np.empty((0, 3), dtype=np.float32)
+        lidar_cfg = self._cfg.carla_collector.lidar
+        extrinsic = (lidar_cfg.x, lidar_cfg.y, lidar_cfg.z)
+        stats, occupied = lidar_xyz_to_voxels(
+            points, extrinsic, self._cfg.model.driving.bev,
+            self._cfg.model.driving.lidar_fusion.voxel_size_m)
+        return stats, occupied, float(valid)
 
     def _select(self, outputs, target_point):
         """沿每条候选轨迹采样预测场，并与导航目标方向共同重排模型置信度。"""

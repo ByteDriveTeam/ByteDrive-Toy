@@ -1,4 +1,4 @@
-"""三目驾驶可视化入口 CLI：逐帧渲染三路透视模态与 GT/预测 BEV 多任务结果。
+"""三目+LiDAR 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测 BEV 多任务结果。
 
 模块: vis/driving_vis/run.py
 依赖: argparse, pathlib, cv2, numpy, torch, config.load_config, model.driving_model.DrivingModel,
@@ -198,7 +198,13 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, m
                         sample["ego_velocity"].unsqueeze(0).to(device),
                         sample["previous_rgb"].unsqueeze(0).to(device),
                         sample["previous_to_current"].unsqueeze(0).to(device),
-                        sample["previous_valid"].unsqueeze(0).to(device))
+                        sample["previous_valid"].unsqueeze(0).to(device),
+                        lidar_stats=sample["lidar_stats"].unsqueeze(0).to(device),
+                        lidar_occupied=sample["lidar_occupied"].unsqueeze(0).to(device),
+                        lidar_valid=sample["lidar_valid"].unsqueeze(0).to(device),
+                        previous_lidar_stats=sample["previous_lidar_stats"].unsqueeze(0).to(device),
+                        previous_lidar_occupied=sample["previous_lidar_occupied"].unsqueeze(0).to(device),
+                        previous_lidar_valid=sample["previous_lidar_valid"].unsqueeze(0).to(device))
     pred = _predict_fields(outputs)
     inview = sample["inview"].numpy()
     gt = {k: sample[k].numpy() for k in ("risk", "drivable", "distribution")}

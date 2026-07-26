@@ -1,4 +1,4 @@
-"""闭环三目模型推理与轨迹选择的公开 API 重导出入口。
+"""闭环三目+LiDAR 模型推理与轨迹选择的公开 API 重导出入口。
 
 模块: clone_loop/inference/__init__.py
 依赖: clone_loop.inference.inference

@@ -5,7 +5,8 @@
 读取配置: 由构造与 init 参数接收 clone_loop.worker.python_exe 及共享帧信息
 对外接口:
     - WorkerClient(python_exe)
-        .init(config_dict, frame_name, frame_size, backing_path) -> dict
+        .init(config_dict, frame_name, frame_size, backing_path,
+              lidar_name, lidar_size, lidar_backing_path) -> dict
         .query_spawn_points() -> list
         .reset(seed, route) -> dict
         .step(control) -> dict
@@ -49,12 +50,15 @@ class WorkerClient:
         check_response(response, command)
         return response["result"]
 
-    def init(self, config_dict, frame_name, frame_size, backing_path):
-        """下发配置并让 worker 打开父进程已创建的共享帧。"""
+    def init(self, config_dict, frame_name, frame_size, backing_path,
+             lidar_name, lidar_size, lidar_backing_path):
+        """下发配置并让 worker 打开父进程已创建的 RGB 与 LiDAR 共享区。"""
         return self._request(
             P.CMD_INIT, config=config_dict,
             frame={"name": frame_name, "size_bytes": frame_size,
-                   "backing_path": str(backing_path)})
+                   "backing_path": str(backing_path)},
+            lidar={"name": lidar_name, "size_bytes": lidar_size,
+                   "backing_path": str(lidar_backing_path)})
 
     def query_spawn_points(self):
         """查询当前地图推荐生成点。"""

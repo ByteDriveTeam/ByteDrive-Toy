@@ -8,7 +8,7 @@
     - make_response(ok, result=None, error=None) -> dict
     - read_message(stream) -> dict | None
     - write_message(stream, obj) -> None
-说明: RGB 大块数据固定写入共享帧区，协议只传状态、导航条件和控制量。
+说明: RGB 固定帧与变长 LiDAR XYZ 分别写入共享区；协议只传 LiDAR 有效点数、状态、导航条件和控制量。
 """
 
 import json

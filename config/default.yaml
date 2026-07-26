@@ -74,7 +74,7 @@ carla_collector:
 
   # 语义分割 Lidar（sensor.lidar.ray_cast_semantic）
   lidar:
-    enabled: false              # 语义 Lidar 总开关，关闭则不创建、LMDB 无 lidar 键
+    enabled: true               # 语义 Lidar 总开关；驾驶训练与闭环多模态融合默认启用
     channels: 64
     range_m: 64.0
     points_per_second: 1300000
@@ -212,6 +212,14 @@ model:
       coord_symlog_scale: 0.24   # symlog(坐标)·scale 归一到[-1,1]（max~64m: 1/ln(65)≈0.24）
       mlp_hidden: 256            # 逐 cell 垂直列 MLP 隐藏维
 
+    # LiDAR 体素查询融合：0.5m 三维统计网格 → 2D BEV 特征 → 逐位置逐通道视觉门控
+    lidar_fusion:
+      voxel_size_m: 0.5          # XYZ 统一体素边长；量程复用 driving.bev
+      voxel_embed_dim: 8         # 每体素均值+标准差经 1×1×1 CNN 后的通道
+      height_hidden_dim: 64      # Z 拼通道后的 1×1 2D 中间通道
+      reduced_dim: 32            # 4×4 对齐卷积之前的 2D LiDAR 通道
+      gate_hidden_dim: 128       # 视觉全局信息+逐位置 LiDAR 的门控 MLP 隐藏维
+
     # 深度 frustum 位置编码：每 patch 中心+四角 × 深度采样的候选 3D 坐标
     frustum:
       depth_min_m: 0.1           # 起始/近处深度
@@ -287,7 +295,7 @@ data:
     dino_mean: [0.485, 0.456, 0.406]
     dino_std: [0.229, 0.224, 0.225]
 
-  # 驾驶双帧三目数据集：复用感知读取，另产帧间刚性变换、三场、道路线图、轨迹/行为 GT 与标定/目标点。
+  # 驾驶双帧三目+LiDAR 数据集：复用感知读取，另产体素统计、帧间变换、三场、道路线图与规划监督。
   # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
   driving:
     scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根

@@ -1,4 +1,4 @@
-"""驾驶模型双帧三目数据集：生成帧间变换、道路线图与驾驶多任务监督的公开 API 入口。
+"""驾驶模型双帧三目+LiDAR 数据集：生成体素统计、帧间变换与驾驶多任务监督的公开 API 入口。
 
 模块: data/driving_dataset/__init__.py
 依赖: data.driving_dataset.driving_dataset

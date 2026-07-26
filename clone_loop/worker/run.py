@@ -1,4 +1,4 @@
-"""Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB 写入共享帧区。
+"""Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB/LiDAR 写入共享区。
 
 模块: clone_loop/worker/run.py
 依赖: os, sys, traceback, pathlib, config.schema, clone_loop.protocol,
@@ -28,13 +28,16 @@ from clone_loop.worker.runtime import CarlaRuntime
 
 
 def _handle_init(state, args):
-    """打开共享帧并连接 CARLA。"""
+    """打开 RGB/LiDAR 共享区并连接 CARLA。"""
     cfg = build_config(args["config"])
     frame = SharedFrame(
         args["frame"]["name"], args["frame"]["size_bytes"],
         args["frame"]["backing_path"], create=False)
-    runtime = CarlaRuntime(cfg, frame)
-    state.update({"frame": frame, "runtime": runtime})
+    lidar = SharedFrame(
+        args["lidar"]["name"], args["lidar"]["size_bytes"],
+        args["lidar"]["backing_path"], create=False)
+    runtime = CarlaRuntime(cfg, frame, lidar)
+    state.update({"frame": frame, "lidar": lidar, "runtime": runtime})
     info = runtime.server_info()
     info["python_version"] = [sys.version_info.major, sys.version_info.minor]
     return info
@@ -59,6 +62,9 @@ def _close(state):
     frame = state.pop("frame", None)
     if frame is not None:
         frame.close()
+    lidar = state.pop("lidar", None)
+    if lidar is not None:
+        lidar.close()
 
 
 _HANDLERS = {

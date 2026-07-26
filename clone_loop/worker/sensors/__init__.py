@@ -1,4 +1,4 @@
-"""闭环三目 RGB、碰撞与压线传感器的公开 API 重导出入口。
+"""闭环三目 RGB、语义 LiDAR、碰撞与压线传感器的公开 API 重导出入口。
 
 模块: clone_loop/worker/sensors/__init__.py
 依赖: clone_loop.worker.sensors.sensors

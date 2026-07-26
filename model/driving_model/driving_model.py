@@ -1,26 +1,29 @@
-"""双帧三目开环驾驶模型：融合三路几何图像与刚性对齐的历史 BEV，解码驾驶多任务输出。
+"""双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
 
 模块: model/driving_model/driving_model.py
 依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionFeatureEncoder,
       model.driving_neck.DrivingNeck, model.bev_query_embedding.BevQueryEmbedding,
-      model.bev_encoder.BevEncoder, model.field_decoder.FieldDecoder,
+      model.lidar_fusion.LidarQueryFusion, model.bev_encoder.BevEncoder, model.field_decoder.FieldDecoder,
       model.lane_map_decoder.LaneMapDecoder, model.trajectory_decoder.TrajectoryDecoder,
       model.driving_model.checks.driving_model_checks
 读取配置:
     model.driving.work_dim / freeze_perception / neck_num_residual_blocks
-    model.driving.bev / query / frustum / attention / bev_encoder / fields / lane_map /
+    model.driving.bev / query / lidar_fusion / frustum / attention / bev_encoder / fields / lane_map /
         traffic_control / trajectory / behavior 各键
     model.dinov3_backbone.patch_size / hidden_dim（frustum 像素反投影、DINO 原始特征通道）
     model.feature_trunk.channels（trunk 通道）
 对外接口:
     - DrivingModel(cfg) -> nn.Module
         forward(rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
-                previous_to_current, previous_valid) -> dict
+                previous_to_current, previous_valid, lidar_stats=None, lidar_occupied=None,
+                lidar_valid=None, previous_lidar_stats=None, previous_lidar_occupied=None,
+                previous_lidar_valid=None) -> dict
             # 三场 + 道路线/停止线/灯色 + trajectories/confidence/behavior_logits
         trainable_parameters() -> Iterator[nn.Parameter]   # 驾驶各件 + 可选感知 fusion/trunk
 说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，三路共享全部视觉参数；相机轴展平到 batch 后，
       driving_neck 按各自标定注入 frustum 几何位置编码，再把三路 patch Token 拼为 BEV 的图像上下文；
-      bev_query_embedding 仅以 BEV xyz 几何初始化查询，
+      bev_query_embedding 仅以 BEV xyz 几何初始化查询，lidar_fusion 在图像交叉注意力前以逐通道门控
+      注入当前/历史帧体素均值与标准差，
       bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
       field_decoder 上采样解码三场。上一帧由同一套纯几何查询得到 BEV 骨干末端特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
@@ -46,6 +49,7 @@ from model.driving_model.checks.driving_model_checks import check_driving_inputs
 from model.driving_neck import DrivingNeck
 from model.field_decoder import FieldDecoder
 from model.lane_map_decoder import LaneMapDecoder
+from model.lidar_fusion import LidarQueryFusion
 from model.perception_model import PerceptionFeatureEncoder
 from model.trajectory_decoder import TrajectoryDecoder
 
@@ -89,6 +93,7 @@ class DrivingModel(nn.Module):
             height=drv.bev.height, width=drv.bev.width,
             z_min_m=drv.bev.z_min_m, z_max_m=drv.bev.z_max_m, z_step_m=drv.bev.z_step_m,
             coord_symlog_scale=drv.query.coord_symlog_scale, mlp_hidden=drv.query.mlp_hidden)
+        self.lidar_fusion = LidarQueryFusion(drv)
         self.bev_encoder = BevEncoder(drv)
         self.field_decoder = FieldDecoder(drv)
         self.lane_map_decoder = LaneMapDecoder(drv)
@@ -96,7 +101,7 @@ class DrivingModel(nn.Module):
 
     def _driving_modules(self):
         """驾驶新增模块（不含复用的感知子模块）。"""
-        return (self.neck, self.query, self.bev_encoder, self.field_decoder,
+        return (self.neck, self.query, self.lidar_fusion, self.bev_encoder, self.field_decoder,
                 self.lane_map_decoder, self.trajectory_decoder)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
@@ -122,11 +127,16 @@ class DrivingModel(nn.Module):
     def forward(self, rgb: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
                 target_point: torch.Tensor, ego_velocity: torch.Tensor, previous_rgb: torch.Tensor,
                 previous_to_current: torch.Tensor,
-                previous_valid: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """双帧三目前向：当前图像 → 上一帧 BEV → 当前 BEV → 三场/道路线图/轨迹行为。"""
+                previous_valid: torch.Tensor, lidar_stats: torch.Tensor = None,
+                lidar_occupied: torch.Tensor = None, lidar_valid: torch.Tensor = None,
+                previous_lidar_stats: torch.Tensor = None,
+                previous_lidar_occupied: torch.Tensor = None,
+                previous_lidar_valid: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+        """双帧三目+LiDAR 前向：各帧先融合体素查询，再生成历史/当前 BEV 与驾驶输出。"""
         check_driving_inputs(
             rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
-            previous_to_current, previous_valid)
+            previous_to_current, previous_valid, lidar_stats, lidar_occupied, lidar_valid,
+            previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid)
         device = rgb.device
         batch_size = int(rgb.shape[0])
 
@@ -137,13 +147,18 @@ class DrivingModel(nn.Module):
             history_context = torch.no_grad() if self.detach_previous else nullcontext()
             with history_context:
                 previous_image = self._image_features(previous_rgb, intrinsics, extrinsics)
+                previous_query = self.lidar_fusion(
+                    bev_query, previous_image, previous_lidar_stats,
+                    previous_lidar_occupied, previous_lidar_valid)
                 previous_bev = self.bev_encoder(
-                    bev_query, previous_image)
+                    previous_query, previous_image)
 
             transformed_grid = self._transformed_previous_grid(previous_to_current)
             previous_geometry = self.query(batch_size, device, transformed_grid)
+            current_query = self.lidar_fusion(
+                bev_query, image_feat, lidar_stats, lidar_occupied, lidar_valid)
             bev_feat, planning_features = self.bev_encoder(
-                bev_query, image_feat, previous_bev, previous_geometry, previous_valid,
+                current_query, image_feat, previous_bev, previous_geometry, previous_valid,
                 return_intermediate=True)
 
         # FP32 段：三场、独立道路线图与轨迹/行为末端解码。

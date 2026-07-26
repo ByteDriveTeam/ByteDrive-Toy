@@ -7,7 +7,7 @@
 主环境（PyTorch）                         Py37 worker（CARLA 0.9.15）
 ────────────────────                     ─────────────────────────
 路线队列 / episode 编排 ─── JSON ───────► 重载地图、布置交通流
-DrivingModel ◄──────── 三目共享 RGB 帧 ── 三路相机严格同步
+DrivingModel ◄──── 三目 RGB + XYZ LiDAR 共享区 ─ 三路相机与语义 LiDAR 严格同步
 轨迹安全重排
 纯追踪 + 速度 PID ─────── JSON control ─► apply_control → world.tick
 逐步 JSONL / summary ◄──── 状态元数据 ─── 路线进度、碰撞、压线、终态
@@ -16,10 +16,11 @@ DrivingModel ◄──────── 三目共享 RGB 帧 ── 三路相�
 
 ## 关键口径
 
-- 输入与训练一致：三路 BGR 转 RGB、ImageNet/DINO 归一化；相机轴、内外参均按
-  `data.driving.cameras` 的 `front/front_left/front_right` 顺序。
-- 时序与训练一致：主环境按 `waypoint_dt_s / fixed_delta_seconds` 缓存对应时距的历史 RGB/位姿；
+- 输入与训练一致：三路 BGR 转 RGB、ImageNet/DINO 归一化；语义 LiDAR 在主环境编码为 0.5m 体素
+  XYZ 均值/总体标准差；相机轴、内外参均按 `data.driving.cameras` 顺序。
+- 时序与训练一致：主环境按 `waypoint_dt_s / fixed_delta_seconds` 缓存对应时距的历史 RGB/LiDAR/位姿；
   历史未满时以当前帧回填且 `previous_valid=0`。
+- RGB 保持固定共享帧；LiDAR 使用独立变长 XYZ FP32 共享区，有效点数经协议传递，容量不足时硬失败而不截断。
 - 导航目标来自 CARLA 全局路线前方固定弧长点，并转换为 ego 左手系 `(x 前, y 右)`。
 - 轨迹先按模型置信度排序，再联合风险场、可行驶场和目标方向评分；非有限或明显发散轨迹拒绝执行。
 - 低层控制使用纯追踪横向控制和带积分限幅的纵向 PID；模型停车行为可把目标速度门控为零。

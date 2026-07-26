@@ -2,8 +2,10 @@
 
 
 def check_driving_inputs(rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
-                         previous_to_current, previous_valid):
-    """校验对象: DrivingModel.forward 入参 —— 三目图像、标定、规划条件与帧间变换须一致。"""
+                         previous_to_current, previous_valid, lidar_stats=None,
+                         lidar_occupied=None, lidar_valid=None, previous_lidar_stats=None,
+                         previous_lidar_occupied=None, previous_lidar_valid=None):
+    """校验对象: DrivingModel.forward 入参 —— 图像、规划条件、时序变换及可选 LiDAR 须一致。"""
     if rgb.ndim != 5 or int(rgb.shape[1]) != 3 or int(rgb.shape[2]) != 3:
         raise ValueError("rgb 期望 (B,3,3,H,W)，实际 {}。".format(tuple(rgb.shape)))
     b = int(rgb.shape[0])
@@ -25,3 +27,10 @@ def check_driving_inputs(rgb, intrinsics, extrinsics, target_point, ego_velocity
             b, tuple(previous_to_current.shape)))
     if previous_valid.ndim != 1 or int(previous_valid.shape[0]) != b:
         raise ValueError("previous_valid 期望 ({},)，实际 {}。".format(b, tuple(previous_valid.shape)))
+    current_lidar = (lidar_stats, lidar_occupied, lidar_valid)
+    previous_lidar = (
+        previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid)
+    for name, values in (("当前", current_lidar), ("历史", previous_lidar)):
+        present = tuple(value is not None for value in values)
+        if any(present) and not all(present):
+            raise ValueError("{} LiDAR 的 stats/occupied/valid 必须同时提供。".format(name))

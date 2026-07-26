@@ -25,7 +25,8 @@
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目数据集：产当前/上一帧输入、帧间刚性变换、道路线图与驾驶多任务监督。
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
+- [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格 XYZ 均值与总体标准差。
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -73,12 +74,13 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型。
 - [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
 - [model/bev_query_embedding/bev_query_embedding.py](../model/bev_query_embedding/bev_query_embedding.py) — BEV 查询几何嵌入：仅把 BEV 栅格中心 xyz（含垂直 z 采样）编码为初始查询网格
+- [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — LiDAR 体素融合：lg-Symlog 编码三维统计，并以视觉条件门控注入初始 BEV 查询。
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
 - [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼。
 - [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
 - [model/lane_map_decoder/lane_map_decoder.py](../model/lane_map_decoder/lane_map_decoder.py) — 道路细线解码器：共享高分辨率特征输出道路线、相关停止线与交通灯状态。
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 查询主感知第 3/6 层特征并回归基线残差。
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目开环驾驶模型：融合三路几何图像与刚性对齐的历史 BEV，解码驾驶多任务输出。
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
 
 ## train/ — 训练 / 评估循环
 
@@ -95,12 +97,12 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/run.py](../clone_loop/run.py) — CARLA 0.9.15 行为克隆闭环 CLI：加载配置并启动异构 episode 编排
 - [clone_loop/protocol/__init__.py](../clone_loop/protocol/__init__.py) — 闭环控制管道协议的公开 API 重导出入口
 - [clone_loop/protocol/protocol.py](../clone_loop/protocol/protocol.py) — 定义 Py37 仿真 worker 与主环境闭环编排器之间的 JSON 行协议
-- [clone_loop/shared_frame/__init__.py](../clone_loop/shared_frame/__init__.py) — 单帧共享内存区的公开 API 重导出入口
-- [clone_loop/shared_frame/shared_frame.py](../clone_loop/shared_frame/shared_frame.py) — 跨解释器复用固定大小 RGB 缓冲，避免每个闭环步经 JSON 复制图像
+- [clone_loop/shared_frame/__init__.py](../clone_loop/shared_frame/__init__.py) — 固定容量传感器共享区的公开 API 重导出入口
+- [clone_loop/shared_frame/shared_frame.py](../clone_loop/shared_frame/shared_frame.py) — 跨解释器复用固定容量传感器缓冲，避免每个闭环步经 JSON 复制 RGB/LiDAR
 - [clone_loop/routes/__init__.py](../clone_loop/routes/__init__.py) — 闭环路线队列构造的公开 API 重导出入口
 - [clone_loop/routes/routes.py](../clone_loop/routes/routes.py) — 由 CARLA 推荐生成点构造可复现、无重复的闭环评测路线队列
-- [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环模型推理与轨迹选择的公开 API 重导出入口
-- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目驾驶权重、维护双帧状态，并按置信度/安全场/路线一致性选择闭环轨迹。
+- [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环三目+LiDAR 模型推理与轨迹选择的公开 API 重导出入口
+- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹。
 - [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — 轨迹跟踪控制器的公开 API 重导出入口
 - [clone_loop/control/control.py](../clone_loop/control/control.py) — 把模型选中的 ego 系轨迹转换为 CARLA 归一化转向、油门与制动
 - [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Py37 worker 子进程客户端的公开 API 重导出入口
@@ -110,16 +112,16 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — 闭环驾驶与逐帧推理录像器的公开 API 重导出入口
 - [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
 - [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
-- [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志
+- [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB/LiDAR、驾驶模型、轨迹控制与逐 episode 评测日志
 
 Py37 仿真端 `worker/`
 
 - [clone_loop/worker/__init__.py](../clone_loop/worker/__init__.py) — Py37 CARLA 闭环 worker 包标识
-- [clone_loop/worker/run.py](../clone_loop/worker/run.py) — Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB 写入共享帧区
+- [clone_loop/worker/run.py](../clone_loop/worker/run.py) — Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB/LiDAR 写入共享区
 - [clone_loop/worker/navigation/__init__.py](../clone_loop/worker/navigation/__init__.py) — CARLA 路线进度与局部目标模块的公开 API 重导出入口
 - [clone_loop/worker/navigation/navigation.py](../clone_loop/worker/navigation/navigation.py) — 在 CARLA 全局路线中跟踪主车进度，并生成模型所需的 ego 系近端目标
-- [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — 闭环 RGB、碰撞与压线传感器的公开 API 重导出入口
-- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向三目 RGB 与安全事件传感器，并按仿真帧严格同步取图。
+- [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — 闭环三目 RGB、语义 LiDAR、碰撞与压线传感器的公开 API 重导出入口
+- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向三目 RGB、语义 LiDAR 与安全事件传感器，并严格同步取样。
 - [clone_loop/worker/runtime/__init__.py](../clone_loop/worker/runtime/__init__.py) — CARLA 闭环世界生命周期的公开 API 重导出入口
 - [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
 
@@ -144,4 +146,4 @@ Py37 仿真端 `worker/`
 - [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块：对照渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹。
 - [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — 驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
 - [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布。
-- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 三目驾驶可视化入口 CLI：逐帧渲染三路透视模态与 GT/预测 BEV 多任务结果。
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 三目+LiDAR 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测 BEV 多任务结果。

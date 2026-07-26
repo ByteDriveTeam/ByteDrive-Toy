@@ -15,3 +15,9 @@ def check_frame_data(data, size_bytes):
     """校验对象: SharedFrame.write 的 data —— 必须恰好填满单帧缓冲。"""
     if len(data) != size_bytes:
         raise ValueError("共享帧字节数应为 {}，实际 {}".format(size_bytes, len(data)))
+
+
+def check_prefix_size(size, capacity):
+    """校验对象: SharedFrame 前缀读写长度 —— 必须位于共享区容量内。"""
+    if int(size) < 0 or int(size) > int(capacity):
+        raise ValueError("共享区前缀长度须在 [0,{}]，实际 {}".format(capacity, size))

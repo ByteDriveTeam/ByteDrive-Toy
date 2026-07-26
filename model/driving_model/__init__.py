@@ -1,4 +1,4 @@
-"""双帧三目驾驶模型：融合三路几何图像与刚性对齐历史 BEV 的公开 API 入口。
+"""双帧三目+LiDAR 驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV 的公开 API 入口。
 
 模块: model/driving_model/__init__.py
 依赖: model.driving_model.driving_model

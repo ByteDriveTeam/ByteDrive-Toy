@@ -1,7 +1,7 @@
-"""串联 Py37 CARLA、共享 RGB、驾驶模型、轨迹控制与逐 episode 评测日志。
+"""串联 Py37 CARLA、共享 RGB/LiDAR、驾驶模型、轨迹控制与逐 episode 评测日志。
 
 模块: clone_loop/orchestrator/orchestrator.py
-依赖: dataclasses, os, pathlib, select, sys, numpy,
+依赖: dataclasses, math, os, pathlib, select, sys, numpy,
       clone_loop.client/control/inference/logger/protocol/recorder/routes/shared_frame,
       clone_loop.orchestrator.checks.orchestrator_checks
 读取配置:
@@ -10,6 +10,7 @@
     clone_loop.simulation.base_seed
     clone_loop.route.min_distance_m / max_distance_m / max_episodes / queue_seed
     carla_collector.cameras.width / height
+    carla_collector.lidar.points_per_second
     data.driving.cameras
     clone_loop.control.* / clone_loop.simulation.fixed_delta_seconds
     clone_loop.output.root / log_every
@@ -19,6 +20,7 @@
 """
 
 from dataclasses import asdict
+import math
 import os
 from pathlib import Path
 import select
@@ -62,6 +64,13 @@ def _frame_array(shared, views, height, width):
         views, height, width, 3).copy()
 
 
+def _lidar_array(shared, count):
+    """按协议点数复制当前 XYZ LiDAR，使下一次 worker 写入不影响模型消费。"""
+    byte_count = int(count) * 3 * np.dtype(np.float32).itemsize
+    return np.frombuffer(shared.read_prefix(byte_count), dtype=np.float32).reshape(
+        int(count), 3).copy()
+
+
 def _manual_stop_requested():
     """非阻塞读取控制台；Windows 单按 q，其他终端输入 q 后回车。"""
     if sys.stdin is None or not sys.stdin.isatty():
@@ -76,7 +85,8 @@ def _manual_stop_requested():
     return bool(readable and sys.stdin.readline().strip().lower() == "q")
 
 
-def _episode(worker, shared, policy, controller, recorder, logger, route, seed, cfg):
+def _episode(worker, shared, shared_lidar, policy, controller, recorder, logger,
+             route, seed, cfg):
     """运行一条路线直至 worker 返回终态，并返回 episode 汇总。"""
     cl = cfg.clone_loop
     camera_cfg = cfg.carla_collector.cameras
@@ -90,7 +100,8 @@ def _episode(worker, shared, policy, controller, recorder, logger, route, seed, 
             print("[clone_loop] 已手动结束当前 episode")
             break
         frame = _frame_array(shared, views, camera_cfg.height, camera_cfg.width)
-        decision = policy.infer(frame, observation)
+        lidar = _lidar_array(shared_lidar, observation["lidar_count"])
+        decision = policy.infer(frame, lidar, observation)
         command = controller.command(
             decision["trajectory"], observation["speed_mps"],
             decision["behavior_probabilities"])
@@ -115,16 +126,26 @@ def run_closed_loop(cfg, max_episodes_override=None):
     views = len(cfg.data.driving.cameras)
     output_root = _resolve_output(cl.output.root)
     frame_size = views * camera_cfg.width * camera_cfg.height * 3
+    lidar_capacity = max(int(math.ceil(
+        cfg.carla_collector.lidar.points_per_second
+        * cl.simulation.fixed_delta_seconds)), 1)
+    lidar_size = lidar_capacity * 3 * np.dtype(np.float32).itemsize
     frame_name = "{}_{}".format(cl.ipc.frame_name, os.getpid())
+    lidar_name = frame_name + "_lidar"
     backing_path = output_root / (frame_name + ".bin")
+    lidar_backing_path = output_root / (lidar_name + ".bin")
     shared = SharedFrame(frame_name, frame_size, backing_path, create=True)
+    shared_lidar = SharedFrame(
+        lidar_name, lidar_size, lidar_backing_path, create=True)
     worker = None
     logger = None
     try:
         worker = WorkerClient(cl.worker.python_exe)
         logger = RunLogger(output_root)
         controller = TrajectoryController(cl.control, cl.simulation.fixed_delta_seconds)
-        info = worker.init(asdict(cfg), frame_name, frame_size, backing_path)
+        info = worker.init(
+            asdict(cfg), frame_name, frame_size, backing_path,
+            lidar_name, lidar_size, lidar_backing_path)
         check_runtime_versions(info)
         print("[clone_loop] worker 就绪: {}".format(info))
         spawn_points = worker.query_spawn_points()
@@ -146,7 +167,8 @@ def run_closed_loop(cfg, max_episodes_override=None):
             recorder = EpisodeRecorder(logger.run_dir, index, cfg)
             try:
                 summary = _episode(
-                    worker, shared, policy, controller, recorder, logger, route, seed, cfg)
+                    worker, shared, shared_lidar, policy, controller, recorder,
+                    logger, route, seed, cfg)
             finally:
                 recorder.close()
             print("[clone_loop] episode={} status={} progress={:.1%} steps={}".format(
@@ -162,3 +184,4 @@ def run_closed_loop(cfg, max_episodes_override=None):
         if worker is not None:
             worker.shutdown()
         shared.close()
+        shared_lidar.close()
