@@ -195,7 +195,7 @@ class ClosedLoopPolicy:
         }
 
     def _voxelize_lidar(self, lidar_xyz, observation):
-        """把在线传感器点云编码为与训练一致的均值/总体标准差体素。"""
+        """把在线点云编码为与训练一致的体素中心相对坐标均值/总体标准差。"""
         valid = bool(observation["lidar_valid"])
         points = lidar_xyz if valid else np.empty((0, 3), dtype=np.float32)
         lidar_cfg = self._cfg.carla_collector.lidar

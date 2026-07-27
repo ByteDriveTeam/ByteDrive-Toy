@@ -317,8 +317,8 @@ flowchart TB
 
     GRID["BEV xyz 几何<br/>32×32×111 垂直采样"] --> QUERY["Geometry Query Embedding"]
     QUERY --> BEVQ["BEV Query<br/>384×32×32"]
-    LIDAR["当前/历史语义 LiDAR XYZ"] --> VOXEL["0.5m 体素<br/>XYZ 均值+总体标准差"]
-    VOXEL --> LENC["lg-Symlog + 3D/2D CNN<br/>384×32×32"]
+    LIDAR["当前/历史语义 LiDAR XYZ"] --> VOXEL["0.5m 体素<br/>中心相对 XYZ 均值+总体标准差"]
+    VOXEL --> LENC["米制统计 ×4 + 3D/2D CNN<br/>384×32×32"]
     IMG --> GATE["视觉 GAP + 局部 LiDAR<br/>逐位置逐通道 Sigmoid"]
     LENC --> GATE
     GATE --> BEVQ
@@ -396,9 +396,9 @@ BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 
 #### 4. LiDAR Query Fusion：体素统计在交叉注意力前注入
 
 当前和历史语义 LiDAR 分别平移到 ego 系，按各帧真实自车有向 Box 剔除车体内点，再在 `0.5m` 网格中计算
-XYZ 均值与总体标准差。传感器原始量程为以 LiDAR 为中心的 `64m` 半径；融合实际加载 ego 系
-`x∈[0,64)`、`y∈[-32,32)`、`z∈[-3,8)`，产生 `22×128×128` 个体素。统计量使用
-`sign(x)·log10(1+|x|)`，经 `1×1×1 Conv3d` 升到 8 维，
+点相对所属体素中心的 XYZ 米制均值与总体标准差。传感器原始量程为以 LiDAR 为中心的 `64m` 半径；融合实际加载 ego 系
+`x∈[0,64)`、`y∈[-32,32)`、`z∈[-3,8)`，产生 `22×128×128` 个体素。局部统计量统一乘以 `4.0`
+（不裁剪，默认体素下均值约落在 `[-1,1)`、标准差落在 `[0,1]`），再经 `1×1×1 Conv3d` 升到 8 维，
 无点体素由可学习 8 维空向量代替。Z 层拼入通道后使用 `176→64→32` 的 1×1 2D 链路，再以
 `4×4,stride=4` 卷积对齐到 `384×32×32`。
 
@@ -609,7 +609,7 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | --- | --- | --- |
 | 模型输入 | `rgb` | `[3,3,H,W]` 三目归一化图像，相机轴顺序由 `data.driving.cameras` 固定 |
 | 模型输入 | `previous_rgb` | 同场景上一帧 `[3,3,H,W]`；场景首帧回退当前三目 |
-| 模型输入 | `lidar_stats/previous_lidar_stats` | 当前/历史 `[6,22,128,128]` FP32 体素 XYZ 均值与总体标准差 |
+| 模型输入 | `lidar_stats/previous_lidar_stats` | 当前/历史 `[6,22,128,128]` FP32 体素中心相对 XYZ 米制均值与总体标准差 |
 | 模型输入 | `lidar_occupied/previous_lidar_occupied` | 当前/历史 `[1,22,128,128]` bool 体素占用掩码 |
 | 模型输入 | `lidar_valid/previous_lidar_valid` | 整帧 LiDAR 有效位；为 0 时严格旁路，空体素向量只用于有效帧 |
 | 模型输入 | `previous_to_current/previous_valid` | 上一帧 ego xy 到当前 ego xy 的 `3×3` 刚性矩阵及有效位 |
@@ -1233,7 +1233,7 @@ ByteDrive-Toy/
 │   ├── single_frame_base/            # 场景索引、惰性 reader、RGB 归一化
 │   ├── perception_dataset/           # 感知单帧数据集
 │   ├── driving_dataset/              # 驾驶输入与多任务 GT
-│   ├── lidar_voxelization/            # LiDAR 体素 XYZ 均值/总体标准差
+│   ├── lidar_voxelization/            # LiDAR 体素中心相对 XYZ 均值/总体标准差
 │   ├── driving_targets/              # 轨迹、行为、风险/分布场纯 NumPy 编码
 │   ├── hd_map/                       # HDMap 栅格化与道路外距离场
 │   ├── target_encoding/              # Symlog 物理量监督
@@ -1248,7 +1248,7 @@ ByteDrive-Toy/
 │   ├── frustum_encoding/             # patch 视锥 3D 候选编码
 │   ├── driving_neck/                 # 感知+DINO+几何融合
 │   ├── bev_query_embedding/          # 纯 xyz 几何 BEV 查询
-│   ├── lidar_fusion/                  # lg-Symlog 体素编码与视觉条件门控
+│   ├── lidar_fusion/                  # 局部米制统计 ×4 编码与视觉条件门控
 │   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
 │   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
 │   ├── field_decoder/                # 风险/可行驶/轨迹分布三场

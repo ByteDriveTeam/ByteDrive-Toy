@@ -1,4 +1,4 @@
-"""LiDAR 点云体素化：在 CPU 上向量化计算每格 XYZ 均值与总体标准差。
+"""LiDAR 点云体素化：在 CPU 上向量化计算每格局部 XYZ 均值与总体标准差。
 
 模块: data/lidar_voxelization/lidar_voxelization.py
 依赖: torch, data.lidar_voxelization.checks.lidar_voxelization_checks
@@ -6,7 +6,7 @@
 对外接口:
     - lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, ego_box, bev, voxel_size_m) -> tuple[Tensor, Tensor]
 说明: 原始点先平移到 ego 系并剔除自车有向 Box 内点，再在半开区间内体素化；输出 X 行反转，使首行为 BEV 远端。
-      六通道依次为 XYZ 均值与 XYZ 总体标准差，单点体素标准差严格为零。
+      六通道依次为点相对所属体素中心的 XYZ 米制均值与总体标准差，单点体素标准差严格为零。
 """
 
 from __future__ import annotations
@@ -60,11 +60,13 @@ def lidar_xyz_to_voxels(points_xyz, lidar_extrinsic, ego_box, bev, voxel_size_m)
     flat = (indices[:, 0] * ny + indices[:, 1]) * nz + indices[:, 2]
     occupied_count = torch.bincount(flat, minlength=voxel_count)
     scatter_index = flat[None].expand(3, -1)
+    voxel_centers = lower + (indices.to(torch.float32) + 0.5) * voxel_size_m
+    local_points = points - voxel_centers
     sums = torch.zeros((3, voxel_count), dtype=torch.float32).scatter_add_(
-        1, scatter_index, points.transpose(0, 1))
+        1, scatter_index, local_points.transpose(0, 1))
     denominator = occupied_count.clamp_min(1).to(torch.float32)
     means = sums / denominator
-    centered = points.transpose(0, 1) - means.gather(1, scatter_index)
+    centered = local_points.transpose(0, 1) - means.gather(1, scatter_index)
     centered_square_sums = torch.zeros_like(sums).scatter_add_(
         1, scatter_index, centered.square())
     variances = (centered_square_sums / denominator).clamp_min(0.0)

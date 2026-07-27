@@ -216,7 +216,7 @@ model:
     # LiDAR 体素查询融合：0.5m 三维统计网格 → 2D BEV 特征 → 逐位置逐通道视觉门控
     lidar_fusion:
       voxel_size_m: 0.5          # XYZ 统一体素边长；量程复用 driving.bev
-      voxel_embed_dim: 8         # 每体素均值+标准差经 1×1×1 CNN 后的通道
+      voxel_embed_dim: 8         # 每体素中心相对坐标均值+标准差乘 4 后经 1×1×1 CNN 的通道
       height_hidden_dim: 64      # Z 拼通道后的 1×1 2D 中间通道
       reduced_dim: 32            # 4×4 对齐卷积之前的 2D LiDAR 通道
       gate_hidden_dim: 128       # 视觉全局信息+逐位置 LiDAR 的门控 MLP 隐藏维

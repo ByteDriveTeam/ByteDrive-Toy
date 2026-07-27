@@ -1,7 +1,7 @@
-"""LiDAR 体素融合：lg-Symlog 编码三维统计，并以视觉条件门控注入初始 BEV 查询。
+"""LiDAR 体素融合：线性缩放局部三维统计，并以视觉条件门控注入初始 BEV 查询。
 
 模块: model/lidar_fusion/lidar_fusion.py
-依赖: contextlib, torch, config.schema.DrivingCfg,
+依赖: torch, config.schema.DrivingCfg,
       model.lidar_fusion.checks.lidar_fusion_checks
 读取配置:
     model.driving.work_dim
@@ -11,13 +11,12 @@
 对外接口:
     - LidarQueryFusion(cfg_driving) -> nn.Module
         forward(query, visual, stats=None, occupied=None, valid=None) -> Tensor
-说明: 空体素由可学习向量表示；整帧缺失由 valid 严格旁路。门控为逐位置逐通道 Sigmoid，
+说明: 米制局部统计固定乘 4 后送入体素投影，不作裁剪。空体素由可学习向量表示；
+      整帧缺失由 valid 严格旁路。门控为逐位置逐通道 Sigmoid，
       最终空间对齐卷积零初始化，使旧权重初始化时 LiDAR 残差严格为零。
 """
 
 from __future__ import annotations
-
-from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -73,10 +72,8 @@ class LidarQueryFusion(nn.Module):
         if not bool(valid.any()):
             return query
 
-        with _fp32_context(stats.device):
-            stats_fp32 = stats.float()
-            symlog = torch.sign(stats_fp32) * torch.log10(1.0 + stats_fp32.abs())
-        encoded = self.voxel_projection(symlog)
+        scaled_stats = stats.float() * 4.0
+        encoded = self.voxel_projection(scaled_stats)
         empty = self.empty_embedding.to(encoded.dtype)[None, :, None, None, None]
         encoded = torch.where(occupied, encoded, empty)
         batch, channels, depth, height, width = encoded.shape
@@ -91,13 +88,3 @@ class LidarQueryFusion(nn.Module):
         weighted = (gate * local).permute(0, 3, 1, 2)
         frame_valid = valid.to(weighted.dtype)[:, None, None, None]
         return query + frame_valid * weighted
-
-
-def _fp32_context(device):
-    """仅在数值变换段关闭外层 autocast，其他设备回退为空上下文。"""
-    if device.type == "meta":
-        return nullcontext()
-    try:
-        return torch.autocast(device_type=device.type, enabled=False)
-    except (RuntimeError, ValueError):
-        return nullcontext()

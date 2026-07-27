@@ -23,7 +23,7 @@
 说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，三路共享全部视觉参数；相机轴展平到 batch 后，
       driving_neck 按各自标定注入 frustum 几何位置编码，再把三路 patch Token 拼为 BEV 的图像上下文；
       bev_query_embedding 仅以 BEV xyz 几何初始化查询，lidar_fusion 在图像交叉注意力前以逐通道门控
-      注入当前/历史帧体素均值与标准差，
+      注入当前/历史帧体素中心相对坐标的米制均值与标准差，
       bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
       field_decoder 上采样解码三场。上一帧由同一套纯几何查询得到 BEV 骨干末端特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前

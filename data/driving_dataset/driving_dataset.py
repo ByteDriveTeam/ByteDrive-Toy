@@ -27,8 +27,8 @@
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
 说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。三路相机严格按 data.driving.cameras 堆叠；
-      当前/历史语义 LiDAR 先按各帧真实自车有向 Box 剔除车体内点，再在 CPU 上编码为 0.5m 体素 XYZ
-      均值与总体标准差；旧场景缺失时按场景告警并旁路。
+      当前/历史语义 LiDAR 先按各帧真实自车有向 Box 剔除车体内点，再在 CPU 上编码为 0.5m 体素中心
+      相对 XYZ 米制均值与总体标准差；旧场景缺失时按场景告警并旁路。
       每个样本同时返回同场景上一帧三目 RGB 及把
       上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
       轨迹 GT 优先从独立运动学时间轴按 10Hz 取未来 num_waypoints 个 ego 世界位姿，再经 world_to_ego

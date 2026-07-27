@@ -17,7 +17,7 @@ DrivingModel ◄──── 三目 RGB + XYZ LiDAR 共享区 ─ 三路相机�
 ## 关键口径
 
 - 输入与训练一致：三路 BGR 转 RGB、ImageNet/DINO 归一化；语义 LiDAR 在主环境编码为 0.5m 体素
-  XYZ 均值/总体标准差；相机轴、内外参均按 `data.driving.cameras` 顺序。
+  中心相对 XYZ 米制均值/总体标准差；相机轴、内外参均按 `data.driving.cameras` 顺序。
 - 时序与训练一致：主环境按 `waypoint_dt_s / fixed_delta_seconds` 缓存对应时距的历史 RGB/LiDAR/位姿；
   历史未满时以当前帧回填且 `previous_valid=0`。
 - RGB 保持固定共享帧；LiDAR 使用独立变长 XYZ FP32 共享区，有效点数经协议传递，容量不足时硬失败而不截断。

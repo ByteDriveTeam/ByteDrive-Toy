@@ -1,4 +1,4 @@
-"""LiDAR 点云体素均值与标准差编码的公开 API 重导出入口。
+"""LiDAR 点云体素中心相对坐标均值与标准差编码的公开 API 重导出入口。
 
 模块: data/lidar_voxelization/__init__.py
 依赖: data.lidar_voxelization.lidar_voxelization
