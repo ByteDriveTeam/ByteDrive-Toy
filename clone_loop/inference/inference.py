@@ -238,7 +238,7 @@ class ClosedLoopPolicy:
         grid_y = 1.0 - 2.0 * (x - bev.x_min_m) / (bev.x_max_m - bev.x_min_m)
         grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0)
         sampled = F.grid_sample(
-            field, grid, mode="bilinear", padding_mode="zeros", align_corners=True)[0, 0]
+            field, grid, mode="bilinear", padding_mode="border", align_corners=False)[0, 0]
         valid = (grid_x.abs() <= 1.0) & (grid_y.abs() <= 1.0)
         safe = torch.where(valid, sampled, torch.full_like(sampled, outside_value))
         return safe.mean(dim=-1)
