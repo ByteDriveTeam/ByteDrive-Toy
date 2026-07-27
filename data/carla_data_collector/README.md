@@ -130,6 +130,7 @@ data/carla_data_collector/
 
 数组以 `(dtype, shape, bytes)` msgpack 打包，结构化 dtype 用 descr 保存以无损还原。
 `output.lmdb_map_size_gb` 是**单场景 DB 的增长上限**（初始仅 64MB、按需增长，规避 Windows 预占满）。
+每个场景写入并关闭后会建立 compact 临时副本，逐键逐值校验完全一致，再原子替换 `data.mdb`；Windows 下替换前复制原文件 DACL，键、值、读取结果和访问权限不变，只移除 LMDB 尾部空洞。
 
 ---
 

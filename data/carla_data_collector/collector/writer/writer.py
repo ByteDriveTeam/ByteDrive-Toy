@@ -7,6 +7,7 @@
     - LmdbWriter(path, map_size_gb)
         .write_scene(scene_meta, frames, kinematics=(), est_bytes=0) -> int
         .close() -> None
+    - compact_lmdb(path, verify=True) -> (before_bytes, after_bytes)
     - pack_array(arr) -> bytes / unpack_array(blob) -> np.ndarray   # 数组打包/还原（含结构化 dtype）
 说明: Design ⑧——RGB 之外的信息进 LMDB。每个场景一个独立 DB（co-located 于该场景目录），故键不带 scene_id
       前缀：直接 meta / num_frames / "{帧序号}/meta" / "{帧序号}/{模态}"；
@@ -16,6 +17,11 @@
       map_size（lmdb_map_size_gb）是「单场景 DB 的增长上限」而非初始大小：Windows 下 LMDB 会把数据文件
       实占到 map_size，故初始只开一小块、写入前按 est_bytes 估算按需扩容（封顶 map_size），避免预占满几十 GB。
 """
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import lmdb
 import msgpack
@@ -62,6 +68,119 @@ def read_scene_route(lmdb_path):
         return (int(route["start_idx"]), int(route["end_idx"]))
     finally:
         env.close()
+
+
+def _verify_lmdb_equal(source_path, compact_path):
+    """逐键、逐值校验两个 LMDB 完全一致；不解包数组，避免额外峰值内存。"""
+    source = lmdb.open(
+        str(source_path), readonly=True, subdir=True, lock=False, readahead=False)
+    compact = lmdb.open(
+        str(compact_path), readonly=True, subdir=True, lock=False, readahead=False)
+    try:
+        if source.stat()["entries"] != compact.stat()["entries"]:
+            raise RuntimeError("LMDB compact 校验失败：条目数不一致")
+        with source.begin(buffers=True) as source_txn, compact.begin(buffers=True) as compact_txn:
+            source_cursor = source_txn.cursor()
+            compact_cursor = compact_txn.cursor()
+            source_item = source_cursor.first()
+            compact_item = compact_cursor.first()
+            while source_item and compact_item:
+                source_key = source_cursor.key()
+                compact_key = compact_cursor.key()
+                if source_key != compact_key:
+                    raise RuntimeError(
+                        "LMDB compact 校验失败：键不一致 {!r} != {!r}".format(
+                            bytes(source_key), bytes(compact_key)))
+                if source_cursor.value() != compact_cursor.value():
+                    raise RuntimeError(
+                        "LMDB compact 校验失败：键 {!r} 的值不一致".format(
+                            bytes(source_key)))
+                source_item = source_cursor.next()
+                compact_item = compact_cursor.next()
+            if source_item != compact_item:
+                raise RuntimeError("LMDB compact 校验失败：游标长度不一致")
+    finally:
+        compact.close()
+        source.close()
+
+
+def _copy_windows_dacl(source, destination):
+    """把 source 的 Windows DACL 复制到 destination，避免临时文件带入错误权限。"""
+    if os.name != "nt":
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    dacl_security_information = 0x00000004
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_file_security = advapi32.GetFileSecurityW
+    get_file_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPDWORD,
+    ]
+    get_file_security.restype = wintypes.BOOL
+    set_file_security = advapi32.SetFileSecurityW
+    set_file_security.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+    ]
+    set_file_security.restype = wintypes.BOOL
+
+    needed = wintypes.DWORD()
+    get_file_security(
+        str(source), dacl_security_information, None, 0, ctypes.byref(needed))
+    if needed.value == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not get_file_security(
+            str(source), dacl_security_information, descriptor, needed.value,
+            ctypes.byref(needed)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not set_file_security(
+            str(destination), dacl_security_information, descriptor):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def compact_lmdb(path, verify=True):
+    """安全压实一个已关闭的 LMDB，并返回压实前后的 data.mdb 字节数。
+
+    compact 副本始终建立在原库同级目录；可选的逐键值校验通过后，才原子替换
+    data.mdb。键、值及其序列化格式均保持不变，只重排数据库页并移除尾部空洞。
+    """
+    path = Path(path).resolve()
+    data_path = path / "data.mdb"
+    if not path.is_dir() or not data_path.is_file():
+        raise ValueError("LMDB 目录无效：{}".format(path))
+
+    before = data_path.stat().st_size
+    temp_path = Path(tempfile.mkdtemp(
+        prefix=path.name + ".compact-", dir=str(path.parent))).resolve()
+    if temp_path.parent != path.parent or not temp_path.name.startswith(path.name + ".compact-"):
+        raise RuntimeError("拒绝在 LMDB 同级目录之外创建 compact 临时目录")
+
+    try:
+        source = lmdb.open(
+            str(path), readonly=True, subdir=True, lock=False, readahead=False)
+        try:
+            source.copy(str(temp_path), compact=True)
+        finally:
+            source.close()
+
+        if verify:
+            _verify_lmdb_equal(path, temp_path)
+        compact_data = temp_path / "data.mdb"
+        after = compact_data.stat().st_size
+        _copy_windows_dacl(data_path, compact_data)
+        os.replace(str(compact_data), str(data_path))
+        return before, after
+    finally:
+        if temp_path.exists():
+            shutil.rmtree(str(temp_path))
 
 
 # 初始映射大小：开小块、按需增长，规避 Windows 下一次性预占满 map_size

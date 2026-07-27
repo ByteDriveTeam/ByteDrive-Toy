@@ -27,7 +27,7 @@ from collector import scenarios
 from collector.encode import encode_camera
 from collector.routes import build_route_queue
 from collector.worker_proc import WorkerProcess
-from collector.writer import LmdbWriter, read_scene_route
+from collector.writer import LmdbWriter, compact_lmdb, read_scene_route
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _LIDAR_DTYPE = np.dtype(P.SEMANTIC_LIDAR_DTYPE)
@@ -141,6 +141,7 @@ def _persist(scene_id, route, seed, weather, frames, kinematics, status, static_
             kinematics=kinematics, est_bytes=est)
     finally:
         writer.close()
+    compact_lmdb(scene_dir / "lmdb", verify=True)
 
 
 def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng, weather_presets):
