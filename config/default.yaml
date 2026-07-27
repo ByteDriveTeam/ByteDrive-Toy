@@ -309,6 +309,7 @@ data:
     lane_half_width_m: 1.75   # 车道中心线缓冲半宽（栅格可行驶区域，米）
     lane_map:
       line_width_m: 0.25      # 道路线监督栅格宽度（米）
+      centerline_match_radius_m: 0.25  # GT 到中心线超过该距离时跳过贴线监督（规控偏离视为有意行为）
       type_to_class:          # TownXX_HD_map.npz 的 Type → model.driving.lane_map.class_names 索引
         Center: 1             # 车道中心线
         Broken: 2             # 虚线分隔线
@@ -373,6 +374,7 @@ train:
     lane_class: 1.0           # 道路线类别交叉熵
     lane_class_weights: [0.1, 1.0, 1.0, 1.0, 1.0]  # 抑制稠密背景对细线类别的数量淹没
     lane_direction: 1.0       # 道路线有向单位切向量余弦损失
+    centerline: 0.5           # 轨迹到 GT 可靠贴近的 HD Map 中心线链之米制距离
     boundary: 1.0             # 全部候选航点的不可行驶距离（道路外/可见占用内）；超出 BEV 继续按坐标距离惩罚
     stop_line: 1.0            # 与当前路线相关的交通灯停止线几何（前景/背景均衡 BCE）
     traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green

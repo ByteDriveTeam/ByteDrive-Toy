@@ -1,14 +1,17 @@
-"""HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
+"""HD 地图：加载车道折线与交通灯触发区，生成道路、中心线贴合、停止线及越界监督。
 
 模块: data/hd_map/hd_map.py
 依赖: numpy, cv2, math, vis.data_vis.geometry(world_to_ego/transform_points),
       data.driving_targets(ego_xy_to_pixel/BevParams), data.hd_map.checks.hd_map_checks
-读取配置: —（地图路径、BEV 几何、车道半宽由调用方传入，来源 config.data.driving 与 config.model.driving.bev）
+读取配置: —（地图路径、BEV 几何、车道半宽与中心线匹配参数均由调用方传入）
 对外接口:
     - HdMap(npz_path) -> HdMap
         .drivable_bev(ego_pose6, bev, lane_half_width_m) -> (H,W) float32   # 1=地图可行驶
         .lane_map_bev(ego_pose6, bev, line_width_m, type_to_class, unknown_class)
             -> (class_map[H,W], direction[2,H,W])
+        .gt_centerline_distance_bev(ego_pose6, gt_xy, gt_valid, bev, centerline_types,
+                                    match_radius_m)
+            -> (distance[H,W], valid[T])
         .traffic_control_bev(ego_pose6, route_xy, traffic_lights, states, bev, ...)
             -> dict[str, ndarray]                                           # 相关停止线/灯色/越线几何
     - offroad_distance_field(drivable, bev) -> (H,W) float32                # 可行驶处=0，越界距离（米）
@@ -24,7 +27,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -32,6 +34,7 @@ import numpy as np
 from data.driving_targets import BevParams, ego_xy_to_pixel
 from data.hd_map.checks.hd_map_checks import (
     check_drivable_mask,
+    check_gt_centerline_inputs,
     check_map_path,
     check_polylines,
     check_traffic_control_inputs,
@@ -66,9 +69,7 @@ class HdMap:
     def drivable_bev(self, ego_pose6, bev: BevParams, lane_half_width_m: float) -> np.ndarray:
         """按 ego 世界位姿栅格化 BEV 可行驶掩码 `(H, W)`（1=可行驶）。"""
         mask = np.zeros((bev.height, bev.width), dtype=np.uint8)
-        ego_xy = np.array(ego_pose6[:2], dtype=np.float64)
-        reach = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)  # BEV 对角覆盖半径
-        near = np.nonzero(np.linalg.norm(self._centers - ego_xy, axis=1) - self._radii < reach)[0]
+        near = self._nearby_indices(ego_pose6, bev)
         if near.size == 0:
             return mask.astype(np.float32)
 
@@ -87,9 +88,7 @@ class HdMap:
         """按 ego 位姿生成道路线类别 `(H,W)` 与有向单位切向量 `(2,H,W)`。"""
         class_map = np.zeros((bev.height, bev.width), dtype=np.int64)
         direction = np.zeros((2, bev.height, bev.width), dtype=np.float32)
-        ego_xy = np.asarray(ego_pose6[:2], dtype=np.float64)
-        reach = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)
-        near = np.nonzero(np.linalg.norm(self._centers - ego_xy, axis=1) - self._radii < reach)[0]
+        near = self._nearby_indices(ego_pose6, bev)
         if near.size == 0:
             return class_map, direction
 
@@ -106,6 +105,51 @@ class HdMap:
                 class_map, direction, rows, cols, ego_direction,
                 type_to_class.get(self._line_types[index], unknown_class), thickness)
         return class_map, direction
+
+    def gt_centerline_distance_bev(self, ego_pose6, gt_xy, gt_valid, bev: BevParams,
+                                   centerline_types, match_radius_m: float):
+        """生成 GT 可靠贴近的中心线链米制距离场与逐航点有效位。
+
+        只用与 GT 最近距离不超过阈值的折线身份构造路线中心线链；规控主动偏离中心线时不施加额外拉回。
+        """
+        gt_xy = np.asarray(gt_xy, dtype=np.float64)
+        gt_valid = np.asarray(gt_valid, dtype=bool)
+        check_gt_centerline_inputs(gt_xy, gt_valid, centerline_types)
+        shape = (bev.height, bev.width)
+        waypoint_valid = np.zeros(len(gt_xy), dtype=np.float32)
+        if not bool(gt_valid.any()):
+            return np.zeros(shape, dtype=np.float32), waypoint_valid
+
+        indices = self._nearby_indices(ego_pose6, bev, centerline_types)
+        if indices.size == 0:
+            return np.zeros(shape, dtype=np.float32), waypoint_valid
+
+        w2e = world_to_ego(ego_pose6)
+        polylines = [transform_points(self._polylines[index], w2e)[:, :2] for index in indices]
+        distances = np.stack([
+            _point_to_polyline_distances(gt_xy, polyline) for polyline in polylines
+        ])
+        nearest = distances.argmin(axis=0)
+        minimum = distances[nearest, np.arange(len(gt_xy))]
+        accepted = gt_valid & (minimum <= match_radius_m)
+        waypoint_valid[accepted] = 1.0
+        if not bool(accepted.any()):
+            return np.zeros(shape, dtype=np.float32), waypoint_valid
+
+        selected = np.unique(nearest[accepted])
+        curves = [_polyline_pixels(polylines[index], bev) for index in selected]
+        mask = np.zeros(shape, dtype=np.uint8)
+        cv2.polylines(mask, curves, isClosed=False, color=1, thickness=1)
+        return _distance_to_mask(mask, bev), waypoint_valid
+
+    def _nearby_indices(self, ego_pose6, bev, line_types=None):
+        """用折线外接圆筛出与当前 BEV 相交的地图折线索引。"""
+        ego_xy = np.asarray(ego_pose6[:2], dtype=np.float64)
+        reach = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)
+        nearby = np.linalg.norm(self._centers - ego_xy, axis=1) - self._radii < reach
+        if line_types is not None:
+            nearby &= np.isin(self._line_types, tuple(line_types))
+        return np.nonzero(nearby)[0]
 
     def traffic_control_bev(self, ego_pose6, route_xy, traffic_lights, states,
                             bev: BevParams, route_corridor_m: float, line_expand_m: float,
@@ -154,7 +198,12 @@ def offroad_distance_field(drivable: np.ndarray, bev: BevParams) -> np.ndarray:
     输入可先扣除可见 box 占用；距离场让落在道路外或占用内的航点都获得连续回拉信号。
     """
     check_drivable_mask(drivable, bev)
-    outside = np.ascontiguousarray(drivable < 0.5, dtype=np.uint8)
+    return _distance_to_mask(drivable >= 0.5, bev)
+
+
+def _distance_to_mask(mask, bev):
+    """计算每个 BEV cell 到二值前景的米制距离。"""
+    outside = np.ascontiguousarray(~np.asarray(mask, dtype=bool), dtype=np.uint8)
     if not bool((outside == 0).any()):
         diagonal_m = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)
         return np.full((bev.height, bev.width), diagonal_m, dtype=np.float32)
@@ -164,6 +213,23 @@ def offroad_distance_field(drivable: np.ndarray, bev: BevParams) -> np.ndarray:
     y_cell_m = (bev.y_max - bev.y_min) / bev.width
     meters_per_pixel = 0.5 * (x_cell_m + y_cell_m)
     return (distance_px * meters_per_pixel).astype(np.float32)
+
+
+def _point_to_polyline_distances(points, polyline):
+    """向量化计算每个点到一条有限折线的最短距离。"""
+    starts = polyline[:-1]
+    vectors = np.diff(polyline, axis=0)
+    squared = np.square(vectors).sum(1).clip(np.finfo(np.float64).eps)
+    relative = points[:, None] - starts[None]
+    ratios = np.clip((relative * vectors[None]).sum(2) / squared[None], 0.0, 1.0)
+    closest = starts[None] + ratios[..., None] * vectors[None]
+    return np.sqrt(np.square(points[:, None] - closest).sum(2).min(1))
+
+
+def _polyline_pixels(polyline, bev):
+    """把 ego 米制折线转换为 OpenCV `(列, 行)` 整数点。"""
+    rows, cols = ego_xy_to_pixel(polyline, bev)
+    return np.stack((cols, rows), axis=1).round().astype(np.int32).reshape(-1, 1, 2)
 
 
 def _rasterize_lane(class_map, direction, rows, cols, vectors, class_id, thickness):

@@ -10,6 +10,7 @@ _DRIVING_OUTPUTS = (
 )
 _DRIVING_TARGETS = (
     "risk", "drivable", "offroad_distance", "distribution", "lane_class", "lane_direction", "inview",
+    "gt_centerline_distance", "gt_centerline_valid",
     "stop_line", "traffic_light_state", "traffic_light_state_valid",
     "stop_point", "stop_direction", "red_stop_valid",
     "trajectory", "traj_valid", "behavior",
@@ -40,3 +41,10 @@ def check_driving_losses_io(outputs, targets):
     if outputs["behavior_logits"].shape != targets["behavior"].shape:
         raise ValueError("behavior_logits 与 behavior 标签形状须一致，实际 {} / {}。".format(
             tuple(outputs["behavior_logits"].shape), tuple(targets["behavior"].shape)))
+    if targets["gt_centerline_distance"].shape != targets["offroad_distance"].shape:
+        raise ValueError("gt_centerline_distance 与 offroad_distance 形状须一致，实际 {} / {}。".format(
+            tuple(targets["gt_centerline_distance"].shape),
+            tuple(targets["offroad_distance"].shape)))
+    if targets["gt_centerline_valid"].shape != targets["traj_valid"].shape:
+        raise ValueError("gt_centerline_valid 与 traj_valid 形状须一致，实际 {} / {}。".format(
+            tuple(targets["gt_centerline_valid"].shape), tuple(targets["traj_valid"].shape)))

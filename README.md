@@ -618,6 +618,7 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，用作规划条件 |
 | 模型输入 | `ego_velocity` | 世界速度旋转到当前 ego 系后的 `[vₓ,vᵧ]` |
 | 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算 |
+| 中心线贴合监督 | `gt_centerline_distance/gt_centerline_valid` | GT 距中心线不超过 0.25 m 时生成的路线中心线米制距离场与逐航点有效位 |
 | 行为监督 | `behavior` | 8 类多热向量 |
 | 场监督 | `risk/drivable/distribution/inview` | 三场与视场掩码；drivable 已扣除可见 box 占用 |
 | 道路线监督 | `lane_class/lane_direction` | 5 类道路线索引与 ego 系有向单位切向量 `[2,H,W]` |
@@ -635,6 +636,7 @@ flowchart LR
     DEP["当前帧三路 GT 深度"] --> PC["按各自标定反投影并合并 ego 点云"] --> ENV["按方位取最远观测包络"] --> R["包络外 = Risk"]
     MAP["TownXX_HD_map.npz"] --> POLY["车道折线变换到 ego"] --> RASTER["按车道宽度栅格化"]
     POLY --> LTYPE["Type → 5 类道路线"]
+    POLY --> MATCH["GT 航点匹配<br/>距离 ≤ 0.25 m"] --> CEDT["所选中心线链距离场"]
     MAP --> YAW["逐点 yaw → ego 有向切向量"]
     BOX["vehicle + pedestrian 3D box"] --> PROJ["投影到相机"]
     DEP --> VIS["反投影深度点落入 3D box"]
@@ -705,10 +707,11 @@ K_5\mathcal{L}_{risk}+
 K_6\mathcal{L}_{drivable}+
 K_7\mathcal{L}_{lane\_class}+
 K_8\mathcal{L}_{lane\_direction}+
-K_9\mathcal{L}_{boundary}+
-K_{10}\mathcal{L}_{stop\_line}+
-K_{11}\mathcal{L}_{light\_state}+
-K_{12}\mathcal{L}_{stop\_crossing}
+K_9\mathcal{L}_{centerline}+
+K_{10}\mathcal{L}_{boundary}+
+K_{11}\mathcal{L}_{stop\_line}+
+K_{12}\mathcal{L}_{light\_state}+
+K_{13}\mathcal{L}_{stop\_crossing}
 \end{aligned}
 ```
 
@@ -719,7 +722,8 @@ K_{12}\mathcal{L}_{stop\_crossing}
 | `distribution` | 视场内空间 softmax，与归一化 GT 高斯软占据做交叉熵 |
 | `lane_class` | 视场内 5 类加权交叉熵，背景权重 0.1，细线类别权重 1.0 |
 | `lane_direction` | 仅道路线像素上的有向余弦距离，保留正反行驶方向 |
-| `trajectory` | 米制 ADE 做 8×1 匈牙利匹配、Symlog 空间回归；最相似 Mode 全权重，其余 7 个 Mode 以 0.05 小权重更新 |
+| `trajectory` | 米制 ADE 做 8×1 匈牙利匹配并在米制空间回归；最相似 Mode 全权重，其余 7 个 Mode 以 0.05 小权重更新 |
+| `centerline` | 可微采样 GT 所贴近中心线链的米制距离场；仅 GT 距线不超过 0.25 m 的航点有效，模态权重与 trajectory 共用 |
 | `confidence` | 以匈牙利匹配结果为标签的 8 Mode 交叉熵 |
 | `behavior` | 8 类独立 BCE-with-logits，允许同一帧多个行为同时激活 |
 | `boundary` | 对全部模态/航点可微采样道路外/可见占用距离；超出 BEV 另加坐标越界距离 |
@@ -727,6 +731,7 @@ K_{12}\mathcal{L}_{stop\_crossing}
 | `traffic_light_state` | 仅在相关停止线且状态已知区域做 red/yellow/green 交叉熵 |
 | `stop_crossing` | 红灯时按路线切向惩罚全部候选航点越过带安全余量的停止位置 |
 
+`centerline` 默认权重为 0.5；GT 偏离最近中心线超过 0.25 m 时视为规控有意行为，不额外拉回。
 `boundary` 对所有候选轨迹等权约束，因此低置信度模态也不能无代价地逃逸到道路外。
 
 ### 默认优化配置

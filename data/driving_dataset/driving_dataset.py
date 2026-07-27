@@ -8,7 +8,7 @@
     data.driving.scene_root / cameras / map_dir / map_name_template / previous_frame_offset /
         dist_sigma_m / lane_half_width_m
     data.scene_cache_size
-    data.driving.lane_map.line_width_m / type_to_class / unknown_class
+    data.driving.lane_map.line_width_m / centerline_match_radius_m / type_to_class / unknown_class
     data.driving.traffic_control.route_lookahead_m / route_corridor_m / line_expand_m /
         actor_match_radius_m / stop_margin_m / reaction_time_s / comfortable_decel_mps2
     data.driving.box_min_visible_pixels
@@ -20,6 +20,7 @@
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.lidar_fusion.voxel_size_m
     model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
+    model.driving.lane_map.class_names（定位中心线类别索引）
     model.driving.trajectory.num_waypoints / waypoint_dt_s
     model.driving.traffic_control.state_names
     model.physics.depth_max_m（风险场包络排除超范围/天空像素）
@@ -40,7 +41,8 @@
       当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
-      独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；分布场由 GT 航点高斯软化，视场掩码为常量
+      独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；GT 可靠贴近的中心线折线
+      另生成米制距离场，规控主动偏离超过配置阈值的航点不参与贴线监督；分布场由 GT 航点高斯软化，视场掩码为常量
       （构造期预算）。全帧 ego 位姿与速度加速度采用同一有界 LRU 场景缓存，供轨迹/行为/目标点复用且不随场景数涨内存。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
       vis.data_vis.geometry / data.driving_targets。
@@ -98,6 +100,10 @@ class DrivingDataset(SingleFrameSceneBase):
         self._target_max = drv_data.target_max_m
         self._traffic_cfg = drv_data.traffic_control
         self._traffic_state_names = cfg.model.driving.traffic_control.state_names
+        centerline_class = cfg.model.driving.lane_map.class_names.index("centerline")
+        self._centerline_types = tuple(
+            name for name, class_id in drv_data.lane_map.type_to_class.items()
+            if class_id == centerline_class)
         behavior = drv_data.behavior
         self._behavior_params = dt.BehaviorParams(
             behavior.stationary_speed_mps, behavior.acceleration_threshold_mps2,
@@ -181,6 +187,9 @@ class DrivingDataset(SingleFrameSceneBase):
         lane_class, lane_direction = hd_map.lane_map_bev(
             pose, self._bev, lane_cfg.line_width_m,
             lane_cfg.type_to_class, lane_cfg.unknown_class)
+        gt_centerline_distance, gt_centerline_valid = hd_map.gt_centerline_distance_bev(
+            pose, waypoints, valid, self._bev, self._centerline_types,
+            lane_cfg.centerline_match_radius_m)
         box_occupancy = dt.visible_moving_box_occupancy(
             frame["bboxes"], depth, intrinsics, pose, extrinsics,
             self._bev, self._depth_max_m, self._box_min_visible_pixels)
@@ -211,6 +220,8 @@ class DrivingDataset(SingleFrameSceneBase):
             "drivable": torch.from_numpy(drivable),
             "lane_class": torch.from_numpy(lane_class),
             "lane_direction": torch.from_numpy(lane_direction),
+            "gt_centerline_distance": torch.from_numpy(gt_centerline_distance),
+            "gt_centerline_valid": torch.from_numpy(gt_centerline_valid),
             "offroad_distance": torch.from_numpy(offroad_distance),
             "distribution": torch.from_numpy(distribution),
             "inview": self._inview,

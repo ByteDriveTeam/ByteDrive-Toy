@@ -24,6 +24,16 @@ def check_drivable_mask(drivable, bev):
         raise ValueError("drivable 期望形状 {}，实际 {}。".format(expected, tuple(drivable.shape)))
 
 
+def check_gt_centerline_inputs(gt_xy, gt_valid, centerline_types):
+    """校验对象: HdMap.gt_centerline_distance_bev —— GT 航点、有效位与中心线类型须满足契约。"""
+    if gt_xy.ndim != 2 or gt_xy.shape[1] != 2:
+        raise ValueError("gt_xy 期望 [T,2]，实际 {}。".format(tuple(gt_xy.shape)))
+    if gt_valid.ndim != 1 or len(gt_valid) != len(gt_xy):
+        raise ValueError("gt_valid 期望 [T] 且与 gt_xy 等长，实际 {}。".format(tuple(gt_valid.shape)))
+    if not centerline_types:
+        raise ValueError("centerline_types 不得为空。")
+
+
 def check_traffic_control_inputs(route_xy, state_names, relevant_control=None):
     """校验对象: HdMap.traffic_control_bev —— 路线、灯色类别及可选原生控制标注须满足契约。"""
     route = np.asarray(route_xy)

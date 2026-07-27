@@ -84,6 +84,7 @@ local_settings.py
 *.swp
 *.swo
 *~
+.agents
 
 # OS files
 .DS_Store

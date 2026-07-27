@@ -402,6 +402,7 @@ class BehaviorTargetCfg:
 @dataclass
 class LaneMapTargetCfg:
     line_width_m: float
+    centerline_match_radius_m: float
     type_to_class: Dict[str, int]
     unknown_class: int
 
@@ -462,6 +463,7 @@ class DrivingLossWeightsCfg:
     lane_class: float             # 道路线类别
     lane_class_weights: List[float]  # 类别 CE 权重（顺序对齐 model.driving.lane_map.class_names）
     lane_direction: float         # 道路线有向切向量
+    centerline: float             # 轨迹到 GT 所贴近中心线链的米制距离
     boundary: float               # 轨迹到可行驶区域的越界距离（道路外/可见占用内）
     stop_line: float              # 相关交通灯停止线几何
     traffic_light_state: float    # 停止线区域灯色分类
@@ -942,11 +944,18 @@ def _validate_data(data, model_lane, camera_rig):
     assert dr.dist_sigma_m > 0 and dr.lane_half_width_m > 0, \
         "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
     lane = dr.lane_map
-    assert lane.line_width_m > 0, "data.driving.lane_map.line_width_m 必须 > 0"
+    assert lane.line_width_m > 0 and lane.centerline_match_radius_m > 0, \
+        "data.driving.lane_map.line_width_m / centerline_match_radius_m 必须 > 0"
     class_ids = list(lane.type_to_class.values()) + [lane.unknown_class]
     assert lane.type_to_class and all(isinstance(i, int) and 0 < i < len(model_lane.class_names)
                                       for i in class_ids), \
         "data.driving.lane_map 类别索引须落在 model.driving.lane_map.class_names 的非背景范围"
+    # 校验对象: 中心线贴合监督类别映射 —— 模型须声明中心线且至少一个地图 Type 映射到它
+    assert "centerline" in model_lane.class_names, \
+        "model.driving.lane_map.class_names 必须包含 centerline"
+    centerline_class = model_lane.class_names.index("centerline")
+    assert centerline_class in lane.type_to_class.values(), \
+        "data.driving.lane_map.type_to_class 至少一个 Type 须映射到 centerline"
     traffic = dr.traffic_control
     assert traffic.route_lookahead_m > 0 and traffic.route_corridor_m > 0 \
         and traffic.line_expand_m >= 0 \
@@ -990,7 +999,7 @@ def _validate_train(train, model_lane):
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
                ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable",
-                "lane_class", "lane_direction", "boundary", "stop_line",
+                "lane_class", "lane_direction", "centerline", "boundary", "stop_line",
                 "traffic_light_state", "stop_crossing")), \
         "train.driving_loss_weights.* 必须 >= 0"
     assert 0 < dw.trajectory_unmatched_weight <= 1, \
