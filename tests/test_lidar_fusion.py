@@ -58,12 +58,13 @@ class LidarFusionTest(unittest.TestCase):
             output = fusion(query, visual, stats, occupied, valid)
             self.assertEqual(len(projection_inputs), 1)
             torch.testing.assert_close(
-                projection_inputs[0],
-                stats * 4.0,
+                projection_inputs[0][0],
+                stats[0] * 4.0,
                 atol=0.0,
                 rtol=0.0,
             )
-            self.assertTrue(bool((projection_inputs[0] > 1.0).all()))
+            self.assertFalse(bool(projection_inputs[0][1].any()))
+            self.assertTrue(bool((projection_inputs[0][0] > 1.0).all()))
             self.assertTrue(bool((output[0] != query[0]).any()))
             torch.testing.assert_close(output[1], query[1], atol=0.0, rtol=0.0)
 
@@ -74,6 +75,21 @@ class LidarFusionTest(unittest.TestCase):
             self.assertIs(fusion(query, visual), query)
         finally:
             handle.remove()
+
+    def test_invalid_sample_strictly_bypasses_nonfinite_inputs(self):
+        fusion = LidarQueryFusion(_config())
+        query = torch.randn((2, 2, 1, 1))
+        visual = torch.zeros((2, 1, 2, 1, 1))
+        stats = torch.full((2, 6, 1, 2, 2), 0.25)
+        occupied = torch.ones((2, 1, 1, 2, 2), dtype=torch.bool)
+        valid = torch.tensor([1.0, 0.0])
+        visual[1].fill_(float("nan"))
+        stats[1].fill_(float("nan"))
+
+        output = fusion(query, visual, stats, occupied, valid)
+
+        self.assertTrue(bool(torch.isfinite(output).all()))
+        torch.testing.assert_close(output[1], query[1], atol=0.0, rtol=0.0)
 
 
 if __name__ == "__main__":

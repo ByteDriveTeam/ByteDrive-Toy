@@ -69,22 +69,28 @@ class LidarQueryFusion(nn.Module):
         check_lidar_fusion_inputs(
             query, visual, stats, occupied, valid, self.work_dim,
             self.grid_shape, self.bev_shape)
-        if not bool(valid.any()):
+        frame_valid = valid.to(torch.bool)
+        if not bool(frame_valid.any()):
             return query
 
-        scaled_stats = stats.float() * 4.0
+        voxel_valid = frame_valid[:, None, None, None, None]
+        safe_stats = torch.where(voxel_valid, stats, torch.zeros_like(stats))
+        safe_occupied = occupied & voxel_valid
+        scaled_stats = safe_stats.float() * 4.0
         encoded = self.voxel_projection(scaled_stats)
         empty = self.empty_embedding.to(encoded.dtype)[None, :, None, None, None]
-        encoded = torch.where(occupied, encoded, empty)
+        encoded = torch.where(safe_occupied, encoded, empty)
         batch, channels, depth, height, width = encoded.shape
         planar = encoded.reshape(batch, channels * depth, height, width)
         lidar_feature = self.spatial_alignment(self.height_reducer(planar))
 
         visual_global = visual.mean(dim=(1, 3, 4))
+        visual_global = torch.where(
+            frame_valid[:, None], visual_global, torch.zeros_like(visual_global))
         local = lidar_feature.permute(0, 2, 3, 1)
         global_grid = visual_global[:, None, None, :].expand(
             -1, local.shape[1], local.shape[2], -1)
         gate = torch.sigmoid(self.gate(torch.cat((global_grid, local), dim=-1)))
         weighted = (gate * local).permute(0, 3, 1, 2)
-        frame_valid = valid.to(weighted.dtype)[:, None, None, None]
-        return query + frame_valid * weighted
+        fused = query + weighted
+        return torch.where(frame_valid[:, None, None, None], fused, query)
