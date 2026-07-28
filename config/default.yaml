@@ -370,6 +370,10 @@ train:
   driving_loss_weights:
     trajectory: 1.0
     trajectory_unmatched_weight: 0.05  # 匈牙利匹配外的 7 条轨迹仍以该小权重回归，不丢弃候选
+    trajectory_distance_weight_min: 0.25  # 远端轨迹监督保留的最低权重
+    trajectory_distance_decay_m: 20.0     # 沿 GT 路径每前进该距离，近端额外权重按 exp(-d/scale) 衰减
+    trajectory_turn_weight_gain: 1.0      # 局部转角充分大时额外放大至 2 倍
+    trajectory_turn_angle_deg: 15.0       # 局部转角达到该值时使用最大弯道增权
     confidence: 0.5
     behavior: 1.0
     distribution: 0.05

@@ -167,6 +167,7 @@ class DrivingDataset(SingleFrameSceneBase):
             state_idx = int(np.argmin(np.abs(states["times"] - float(frame["meta"]["sim_time"]))))
         poses, accelerations = states["poses"], states["accelerations"]
         waypoints, valid = self._trajectory(states, state_idx, pose)
+        ego_extent = np.asarray(self._ego_box(frame["meta"])["extent"][:2], dtype=np.float32)
         target_point = self._target_point(poses, state_idx, pose, meta)
         ego_velocity = (world_to_ego(pose)[:2, :2] @ world_vel[:2]).astype(np.float32)
         hd_map = self._hd_map(meta["map"])
@@ -214,6 +215,7 @@ class DrivingDataset(SingleFrameSceneBase):
             "extrinsics": torch.from_numpy(extrinsics),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
             "ego_velocity": torch.from_numpy(ego_velocity),
+            "ego_extent": torch.from_numpy(ego_extent),
             "trajectory": torch.from_numpy(waypoints),
             "traj_valid": torch.from_numpy(valid),
             "behavior": torch.from_numpy(behavior),

@@ -13,7 +13,7 @@ _DRIVING_TARGETS = (
     "gt_centerline_distance", "gt_centerline_valid",
     "stop_line", "traffic_light_state", "traffic_light_state_valid",
     "stop_point", "stop_direction", "red_stop_valid",
-    "trajectory", "traj_valid", "behavior",
+    "trajectory", "traj_valid", "ego_extent", "behavior",
 )
 
 
@@ -48,3 +48,8 @@ def check_driving_losses_io(outputs, targets):
     if targets["gt_centerline_valid"].shape != targets["traj_valid"].shape:
         raise ValueError("gt_centerline_valid 与 traj_valid 形状须一致，实际 {} / {}。".format(
             tuple(targets["gt_centerline_valid"].shape), tuple(targets["traj_valid"].shape)))
+    if targets["ego_extent"].ndim != 2 or targets["ego_extent"].shape[-1] != 2:
+        raise ValueError("ego_extent 须为 [B,2] 的自车 x/y 半尺寸，实际 {}。".format(
+            tuple(targets["ego_extent"].shape)))
+    if bool((targets["ego_extent"] <= 0).any()):
+        raise ValueError("ego_extent 的自车 x/y 半尺寸须均 > 0。")

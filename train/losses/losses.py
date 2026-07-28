@@ -8,7 +8,9 @@
     train.loss_weights.semantic / depth / depth_grad / depth_range
     train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable /
         lane_class / lane_class_weights / lane_direction / centerline / boundary /
-        stop_line / traffic_light_state / stop_crossing / trajectory_unmatched_weight
+        stop_line / traffic_light_state / stop_crossing / trajectory_unmatched_weight /
+        trajectory_distance_weight_min / trajectory_distance_decay_m /
+        trajectory_turn_weight_gain / trajectory_turn_angle_deg
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
     data.driving.traffic_control.stop_margin_m
 对外接口:
@@ -121,13 +123,14 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     风险/可行驶为二值场：可行驶 GT 已从 HDMap 道路中扣除深度确认可见的 box 占用；二者在视场内掩码下做
     BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
     分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
-    占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹按米制 ADE 的 8×1 匈牙利代价
-    选择最相似 Mode，在物理（米）空间全权重回归，其余 Mode 仍小权重更新；同一权重还约束各轨迹到 GT
+    占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹按近端高、远端低且弯道额外增权的米制 ADE
+    做 8×1 匈牙利匹配并回归，其余 Mode 仍小权重更新；同一模态权重还约束各轨迹到 GT
     可靠贴近的 HD Map 中心线链距离，避免重复匹配且不干扰规控主动偏离。置信度学习匹配结果。行为固定八类彼此独立，以
       BCE-with-logits 监督同一帧同时激活的多个类别；样本始终保留在 batch 归一分母中。道路线图以加权
     CE 监督类别，并仅在道路线像素上以有符号余弦距离监督单位
-    切向量；该方向来自 HD Map yaw，保留真实行驶正反向。越界损失把全部候选轨迹航点投影到不可行驶单侧距离场：道路外或可见 box 占用内
-    按米制距离惩罚；超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
+    切向量；该方向来自 HD Map yaw，保留真实行驶正反向。越界损失沿全部候选轨迹切向展开逐帧自车半长/半宽，
+    以 3×3 有向车身足迹投影到不可行驶单侧距离场：道路外或可见 box 占用内按最严重的米制距离惩罚；
+    超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
     """
     check_driving_losses_io(outputs, targets)
     w = cfg.train.driving_loss_weights
@@ -145,19 +148,24 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
         outputs["lane_direction"], targets["lane_direction"], targets["lane_class"], inview)
     stop_line, traffic_light_state, stop_crossing = _traffic_control_losses(
         outputs, targets, cfg, inview)
+    waypoint_weights = _trajectory_waypoint_weights(
+        targets["trajectory"], targets["traj_valid"],
+        w.trajectory_distance_weight_min, w.trajectory_distance_decay_m,
+        w.trajectory_turn_weight_gain, w.trajectory_turn_angle_deg)
     matched_modes, mode_weights, trajectory_sample_valid = _trajectory_matching(
         outputs["trajectories"], targets["trajectory"], targets["traj_valid"],
-        w.trajectory_unmatched_weight)
+        waypoint_weights, w.trajectory_unmatched_weight)
     trajectory, confidence = _trajectory_losses(
         outputs["trajectories"], outputs["confidence"], targets["trajectory"],
-        targets["traj_valid"], matched_modes, mode_weights, trajectory_sample_valid)
+        waypoint_weights, matched_modes, mode_weights, trajectory_sample_valid)
     centerline = _centerline_loss(
         outputs["trajectories"], targets["gt_centerline_distance"],
         targets["gt_centerline_valid"] * targets["traj_valid"],
         mode_weights, cfg.model.driving.bev)
     behavior = F.binary_cross_entropy_with_logits(outputs["behavior_logits"], targets["behavior"])
     boundary = _boundary_loss(
-        outputs["trajectories"], targets["offroad_distance"], cfg.model.driving.bev)
+        outputs["trajectories"], targets["offroad_distance"], targets["ego_extent"],
+        cfg.model.driving.bev)
     components = {"risk": risk, "drivable": drivable, "distribution": distribution,
                   "lane_class": lane_class, "lane_direction": lane_direction,
                   "centerline": centerline,
@@ -241,39 +249,74 @@ def _distribution_energy(field_logit: torch.Tensor, target_soft: torch.Tensor,
     return (-contrib.sum(1)).mean()
 
 
-def _trajectory_matching(trajectories_meters, gt_meters, valid, unmatched_weight):
-    """按有效 GT 航点的米制 ADE 返回匹配 Mode、模态权重与样本有效位。"""
-    waypoint_mask = valid[:, None]
+def _trajectory_waypoint_weights(gt_meters: torch.Tensor, valid: torch.Tensor,
+                                 distance_weight_min: float, distance_decay_m: float,
+                                 turn_weight_gain: float,
+                                 turn_angle_deg: float) -> torch.Tensor:
+    """生成近大远小、弯道增大的 GT 航点权重。
+
+    距离使用从当前自车原点沿 GT 折线累计的路径长度，避免急弯时欧氏距离不能反映实际远近；基础权重从 1
+    按指数衰减并保留 ``distance_weight_min``。弯道权重取相邻 GT 线段夹角，达到
+    ``turn_angle_deg`` 时得到最大 ``1 + turn_weight_gain`` 倍增益。无效或零长度线段不产生弯道增权。
+    """
+    valid_float = valid.to(gt_meters.dtype)
+    valid_bool = valid > 0
+    origin = torch.zeros_like(gt_meters[:, :1])
+    segments = torch.cat((origin, gt_meters), dim=1).diff(dim=1)
+    previous_valid = torch.cat(
+        (torch.ones_like(valid_bool[:, :1]), valid_bool[:, :-1]), dim=1)
+    segment_valid = valid_bool & previous_valid
+    segment_length = torch.linalg.vector_norm(segments, dim=-1)
+    path_distance = (segment_length * segment_valid.to(gt_meters.dtype)).cumsum(dim=-1)
+    distance_weight = distance_weight_min + (1.0 - distance_weight_min) * torch.exp(
+        -path_distance / distance_decay_m)
+
+    unit_segments = F.normalize(segments, dim=-1, eps=_VECTOR_EPS)
+    adjacent_dot = (unit_segments[:, :-1] * unit_segments[:, 1:]).sum(-1)
+    adjacent_angle = torch.acos(adjacent_dot.clamp(-1.0, 1.0))
+    adjacent_valid = (
+        segment_valid[:, :-1] & segment_valid[:, 1:]
+        & (segment_length[:, :-1] > _VECTOR_EPS)
+        & (segment_length[:, 1:] > _VECTOR_EPS)
+    )
+    adjacent_angle = adjacent_angle * adjacent_valid.to(gt_meters.dtype)
+    turn_angle = torch.cat((adjacent_angle, torch.zeros_like(valid_float[:, :1])), dim=-1)
+    turn_scale = (turn_angle / (turn_angle_deg * torch.pi / 180.0)).clamp(0.0, 1.0)
+    return distance_weight * (1.0 + turn_weight_gain * turn_scale) * valid_float
+
+
+def _trajectory_matching(trajectories_meters, gt_meters, valid, waypoint_weights,
+                         unmatched_weight):
+    """按加权有效 GT 航点的米制 ADE 返回匹配 Mode、模态权重与样本有效位。"""
     displacement = torch.linalg.vector_norm(
         trajectories_meters - gt_meters[:, None], dim=-1)
-    valid_count = valid.sum(-1)
-    matching_cost = (displacement * waypoint_mask).sum(-1) \
-        / valid_count[:, None].clamp_min(_MASK_EPS)
+    weight_sum = waypoint_weights.sum(-1)
+    matching_cost = (displacement * waypoint_weights[:, None]).sum(-1) \
+        / weight_sum[:, None].clamp_min(_MASK_EPS)
     matched_modes = _hungarian_single_target(matching_cost)
     mode_weights = torch.full_like(matching_cost, unmatched_weight)
     mode_weights.scatter_(1, matched_modes[:, None], 1.0)
-    return matched_modes, mode_weights, (valid_count > 0).to(trajectories_meters.dtype)
+    sample_valid = (valid.sum(-1) > 0).to(trajectories_meters.dtype)
+    return matched_modes, mode_weights, sample_valid
 
 
 def _trajectory_losses(trajectories_meters: torch.Tensor, confidence: torch.Tensor,
-                       gt_meters: torch.Tensor, valid: torch.Tensor,
+                       gt_meters: torch.Tensor, waypoint_weights: torch.Tensor,
                        matched_modes: torch.Tensor, mode_weights: torch.Tensor,
                        sample_valid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """8×1 匈牙利匹配后的物理（米）空间轨迹监督，未匹配 Mode 仍小权重更新。
+    """8×1 匈牙利匹配后的加权米制轨迹监督，未匹配 Mode 仍小权重更新。
 
-    每个样本只有一条专家 GT，米制平均位移代价上的矩形匈牙利精确解就是代价最小的 Mode。匹配 Mode
+    每个样本只有一条专家 GT，加权米制平均位移代价上的矩形匈牙利精确解就是代价最小的 Mode。近端航点权重大、
+    远端权重小，局部弯道航点额外增权。匹配 Mode
     权重为 1，其余 Mode 使用匹配阶段传入的小权重；全部样本仍保留在 batch 均值分母中。缺少未来航点的样本贡献可微零值，
     不会被数据管线或 batch 过滤掉。回归与匹配代价同在米制空间，量纲一致、与越界/停线等安全损失可直接比较。
     """
-    waypoint_mask = valid[:, None]                               # [B,1,T]
-    valid_count = valid.sum(-1)                                  # [B]
-
     expanded_gt = gt_meters[:, None].expand_as(trajectories_meters)
     per_waypoint = F.smooth_l1_loss(
         trajectories_meters, expanded_gt, reduction="none").sum(-1)
-    per_waypoint = per_waypoint * waypoint_mask                  # [B,M,T]
+    per_waypoint = per_waypoint * waypoint_weights[:, None]       # [B,M,T]
     numerator = (per_waypoint * mode_weights[:, :, None]).sum((1, 2))
-    denominator = valid_count * mode_weights.sum(1)
+    denominator = waypoint_weights.sum(-1) * mode_weights.sum(1)
     trajectory = (numerator / denominator.clamp_min(_MASK_EPS) * sample_valid).mean()
     confidence_loss = F.cross_entropy(confidence, matched_modes, reduction="none")
     confidence_loss = (confidence_loss * sample_valid).mean()
@@ -298,21 +341,60 @@ def _centerline_loss(trajectories, distance_field, waypoint_valid, mode_weights,
     return (numerator / denominator.clamp_min(_MASK_EPS) * sample_valid).mean()
 
 
-def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor, bev) -> torch.Tensor:
-    """轨迹越界损失：可微采样道路外/可见占用距离场，并惩罚超出 BEV 覆盖范围的部分。
+def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor,
+                   ego_extent: torch.Tensor, bev) -> torch.Tensor:
+    """自车包围框越界损失：可微采样道路外/可见占用距离场，并惩罚超出 BEV 覆盖范围的部分。
 
-    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸到道路外或穿过占用。`grid_sample` 的最后一维依次是列、行，
+    由预测轨迹切向确定每个未来时刻的车身朝向，用逐帧标注中的自车 x/y 半尺寸在每个轨迹点构造 3×3
+    有向包围框采样点。每个包围框取最严重的越界值，使任意车身部分越界或进入占用都受罚，而非只约束车身中心。
+    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸。`grid_sample` 的最后一维依次是列、行，
     因而 ego 的 `(x前向, y右向)` 要换成 `(y归一列, x反向归一行)`。
     """
-    x, y = trajectories[..., 0], trajectories[..., 1]
-    grid = _trajectory_grid(trajectories, bev)
+    footprint = _ego_footprint_points(trajectories, ego_extent)  # [B,M,T,9,2]
+    b, modes, waypoints, points, _ = footprint.shape
+    grid = _trajectory_grid(footprint, bev).reshape(b, modes, waypoints * points, 2)
     sampled = F.grid_sample(
         offroad_distance[:, None], grid, mode="bilinear", padding_mode="border",
-        align_corners=False)[:, 0]                                 # [B,M,T]，单位米
+        align_corners=False)[:, 0].reshape(b, modes, waypoints, points)
 
-    x_over = F.relu(bev.x_min_m - x) + F.relu(x - bev.x_max_m)
+    x, y = footprint[..., 0], footprint[..., 1]
+    # x_min 通常正好位于当前自车中心；近端航点的车尾自然会伸到 BEV 后方，不能把这部分当作物理越界。
+    # 因此后方仅约束轨迹中心不逃出 BEV，前方和左右边界则要求完整车身留在覆盖范围内。
+    center_x_under = F.relu(bev.x_min_m - trajectories[..., 0]).unsqueeze(-1)
+    x_over = center_x_under + F.relu(x - bev.x_max_m)
     y_over = F.relu(bev.y_min_m - y) + F.relu(y - bev.y_max_m)
-    return (sampled + x_over + y_over).mean()
+    return (sampled + x_over + y_over).amax(dim=-1).mean()
+
+
+def _ego_footprint_points(trajectories: torch.Tensor,
+                          ego_extent: torch.Tensor) -> torch.Tensor:
+    """沿轨迹切向把自车半长/半宽展开为每个航点的 3×3 有向包围框采样点。"""
+    if trajectories.shape[-2] == 1:
+        tangent = trajectories
+    else:
+        first = trajectories[..., :1, :]
+        middle = trajectories[..., 2:, :] - trajectories[..., :-2, :]
+        last = trajectories[..., -1:, :] - trajectories[..., -2:-1, :]
+        tangent = torch.cat((first, middle, last), dim=-2)
+    tangent_norm = torch.linalg.vector_norm(tangent, dim=-1, keepdim=True)
+    forward_default = torch.zeros_like(tangent)
+    forward_default[..., 0] = 1.0
+    forward = torch.where(
+        tangent_norm > _VECTOR_EPS, tangent / tangent_norm.clamp_min(_VECTOR_EPS),
+        forward_default)
+    right = torch.stack((-forward[..., 1], forward[..., 0]), dim=-1)
+
+    axis_samples = trajectories.new_tensor((-1.0, 0.0, 1.0))
+    longitudinal, lateral = torch.meshgrid(axis_samples, axis_samples, indexing="ij")
+    longitudinal = longitudinal.reshape(1, 1, 1, -1, 1)
+    lateral = lateral.reshape(1, 1, 1, -1, 1)
+    half_length = ego_extent[:, 0].reshape(-1, 1, 1, 1, 1)
+    half_width = ego_extent[:, 1].reshape(-1, 1, 1, 1, 1)
+    offsets = (
+        longitudinal * half_length * forward.unsqueeze(-2)
+        + lateral * half_width * right.unsqueeze(-2)
+    )
+    return trajectories.unsqueeze(-2) + offsets
 
 
 def _trajectory_grid(trajectories, bev):

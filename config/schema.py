@@ -453,6 +453,10 @@ class LossWeightsCfg:
 class DrivingLossWeightsCfg:
     trajectory: float             # 匈牙利匹配多模态轨迹回归
     trajectory_unmatched_weight: float  # 未匹配 Mode 的小权重回归系数
+    trajectory_distance_weight_min: float  # 远端航点权重下限
+    trajectory_distance_decay_m: float  # 航点沿 GT 路径距离的指数衰减尺度
+    trajectory_turn_weight_gain: float  # 弯道航点相对直线的额外增权上限
+    trajectory_turn_angle_deg: float  # 达到最大弯道增权的局部转角
     confidence: float             # 模态置信度分类
     behavior: float               # 行为多标签分类
     distribution: float           # 轨迹分布场
@@ -1014,6 +1018,14 @@ def _validate_train(train, model_lane):
         "train.driving_loss_weights.* 必须 >= 0"
     assert 0 < dw.trajectory_unmatched_weight <= 1, \
         "train.driving_loss_weights.trajectory_unmatched_weight 必须在 (0,1]"
+    assert 0 < dw.trajectory_distance_weight_min <= 1, \
+        "train.driving_loss_weights.trajectory_distance_weight_min 必须在 (0,1]"
+    assert dw.trajectory_distance_decay_m > 0, \
+        "train.driving_loss_weights.trajectory_distance_decay_m 必须 > 0"
+    assert dw.trajectory_turn_weight_gain >= 0, \
+        "train.driving_loss_weights.trajectory_turn_weight_gain 必须 >= 0"
+    assert 0 < dw.trajectory_turn_angle_deg <= 180, \
+        "train.driving_loss_weights.trajectory_turn_angle_deg 必须在 (0,180]"
     assert len(dw.lane_class_weights) == len(model_lane.class_names) \
         and all(weight > 0 for weight in dw.lane_class_weights), \
         "train.driving_loss_weights.lane_class_weights 须与道路线类别等长且各项 > 0"

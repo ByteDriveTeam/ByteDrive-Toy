@@ -621,7 +621,8 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | 模型输入 | `extrinsics` | 三路 `[3,6]`，每路为相机在 ego 系的 `[x,y,z,roll,pitch,yaw]` |
 | 模型输入 | `target_point` | 未来 16–32 m 窗口内随机导航目标点，用作规划条件 |
 | 模型输入 | `ego_velocity` | 世界速度旋转到当前 ego 系后的 `[vₓ,vᵧ]` |
-| 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算 |
+| 轨迹监督 | `trajectory/traj_valid` | 未来航点及有效掩码；匹配关系由预测与 GT 动态计算，近端和弯道航点权重更高 |
+| 自车几何 | `ego_extent` | 当前自车包围框的 x/y 半尺寸 `[half_length, half_width]`，用于整车足迹越界约束 |
 | 中心线贴合监督 | `gt_centerline_distance/gt_centerline_valid` | GT 距中心线不超过 0.25 m 时生成的路线中心线米制距离场与逐航点有效位 |
 | 行为监督 | `behavior` | 8 类多热向量 |
 | 场监督 | `risk/drivable/distribution/inview` | 三场与视场掩码；drivable 已扣除可见 box 占用 |
@@ -726,17 +727,17 @@ K_{13}\mathcal{L}_{stop\_crossing}
 | `distribution` | 视场内空间 softmax，与归一化 GT 高斯软占据做交叉熵 |
 | `lane_class` | 视场内 5 类加权交叉熵，背景权重 0.1，细线类别权重 1.0 |
 | `lane_direction` | 仅道路线像素上的有向余弦距离，保留正反行驶方向 |
-| `trajectory` | 米制 ADE 做 8×1 匈牙利匹配并在米制空间回归；最相似 Mode 全权重，其余 7 个 Mode 以 0.05 小权重更新 |
+| `trajectory` | 加权米制 ADE 做 8×1 匈牙利匹配并回归；沿 GT 路径由近到远指数降权，局部弯道额外增权；最相似 Mode 全权重，其余 7 个 Mode 以 0.05 小权重更新 |
 | `centerline` | 可微采样 GT 所贴近中心线链的米制距离场；仅 GT 距线不超过 0.25 m 的航点有效，模态权重与 trajectory 共用 |
 | `confidence` | 以匈牙利匹配结果为标签的 8 Mode 交叉熵 |
 | `behavior` | 8 类独立 BCE-with-logits，允许同一帧多个行为同时激活 |
-| `boundary` | 对全部模态/航点可微采样道路外/可见占用距离；超出 BEV 另加坐标越界距离 |
+| `boundary` | 按预测轨迹切向展开自车真实半长/半宽，以 3×3 有向车身足迹采样道路外/可见占用距离，并取车身最严重越界值 |
 | `stop_line` | 前景/背景分别归一的均衡 BCE，避免稀疏停止线被背景淹没 |
 | `traffic_light_state` | 仅在相关停止线且状态已知区域做 red/yellow/green 交叉熵 |
 | `stop_crossing` | 红灯时按路线切向惩罚全部候选航点越过带安全余量的停止位置 |
 
 `centerline` 默认权重为 0.5；GT 偏离最近中心线超过 0.25 m 时视为规控有意行为，不额外拉回。
-`boundary` 对所有候选轨迹等权约束，因此低置信度模态也不能无代价地逃逸到道路外。
+`boundary` 对所有候选轨迹等权约束，因此低置信度模态也不能无代价地让任何车身部分逃逸到道路外。
 
 ### 默认优化配置
 
