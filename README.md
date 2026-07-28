@@ -750,6 +750,7 @@ K_{13}\mathcal{L}_{stop\_crossing}
 | `persistent_workers` | true | 场景缓存有界后跨 epoch 安全复用 worker |
 | `compile` | true | CUDA 训练原位启用 `torch.compile`；CPU 本地开发自动保持 eager |
 | `fused_optimizer` | true | CUDA 优先使用 fused AdamW，不支持或 CPU 时自动回退 |
+| `float32_matmul_precision` | high | CUDA FP32 matmul 允许 TF32 路径，消除 Inductor 的未启用提示 |
 | `lr` | `1e-4` | 驾驶新增模块/感知训练基础学习率 |
 | `weight_decay` | `1e-5` | AdamW 权重衰减 |
 | `grad_clip_norm` | 0 | 0 表示关闭裁剪 |

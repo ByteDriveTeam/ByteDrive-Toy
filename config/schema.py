@@ -485,6 +485,7 @@ class TrainCfg:
     persistent_workers: bool
     compile: bool
     fused_optimizer: bool
+    float32_matmul_precision: str
     lr: float
     weight_decay: float
     grad_clip_norm: float
@@ -998,6 +999,8 @@ def _validate_train(train, model_lane):
     assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
     assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
+    assert train.float32_matmul_precision in ("highest", "high", "medium"), \
+        "train.float32_matmul_precision 必须为 highest/high/medium"
     assert all(isinstance(getattr(train, name), bool) for name in
                ("in_order", "shuffle", "drop_last", "pin_memory", "persistent_workers",
                 "compile", "fused_optimizer")), \

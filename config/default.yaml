@@ -352,6 +352,7 @@ train:
   persistent_workers: true   # 跨 epoch 复用 worker；场景缓存有界后不会随 epoch 增长
   compile: true              # CUDA 训练使用 torch.compile；CPU 本地开发不编译，避免长时间冷启动
   fused_optimizer: true      # CUDA 优先使用 fused AdamW；CPU/不支持环境自动回退普通 AdamW
+  float32_matmul_precision: high  # CUDA FP32 matmul 允许 TF32 路径；可选 highest/high/medium
   lr: 0.0001                 # 1e-4
   weight_decay: 0.00001      # 1e-5
   grad_clip_norm: 0          # 梯度裁剪上限（0 表示不裁剪）

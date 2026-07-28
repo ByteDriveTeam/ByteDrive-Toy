@@ -7,7 +7,8 @@
       train.optimizer, train.loop, train.checks.run_checks
 读取配置:
     train.device / epochs / batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
-        shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer / ckpt_dir / resume
+        shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer /
+        float32_matmul_precision / ckpt_dir / resume
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -65,6 +66,15 @@ def _compile_for_cuda(model, cfg, device) -> None:
         return
     model.compile()
     print("[train] 已启用 torch.compile（首次迭代包含编译冷启动）")
+
+
+def _configure_cuda_math(cfg, device) -> None:
+    """显式配置 CUDA FP32 matmul 精度，避免 Inductor 对未启用 TF32 的性能告警。"""
+    if device.type != "cuda":
+        return
+    torch.set_float32_matmul_precision(cfg.train.float32_matmul_precision)
+    print("[train] float32 matmul precision={}".format(
+        cfg.train.float32_matmul_precision))
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -259,6 +269,7 @@ def main(argv=None) -> None:
 
     cfg = load_config(args.config, args.env)
     device = _resolve_device(cfg.train.device)
+    _configure_cuda_math(cfg, device)
     model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
 
     model = model_cls(cfg).to(device)
