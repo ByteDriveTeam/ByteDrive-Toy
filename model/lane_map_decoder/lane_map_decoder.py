@@ -2,16 +2,16 @@
 
 模块: model/lane_map_decoder/lane_map_decoder.py
 依赖: torch, config.schema.DrivingCfg, model.residual_block.ResidualBlock,
-      model.pixel_shuffle_upsampler.PixelShuffleUpsampler, model.lane_map_decoder.checks.lane_map_decoder_checks
+      model.bev_upsampler.BevUpsampler, model.lane_map_decoder.checks.lane_map_decoder_checks
 读取配置:
     model.driving.work_dim / model.driving.traffic_control.state_names
     model.driving.lane_map.class_names / reduce_channels / up_channels / feature_channels
 对外接口:
     - LaneMapDecoder(cfg_driving) -> nn.Module
         forward(bev_feat) -> dict[str, Tensor]   # 道路线 + stop_line_logits + traffic_light_state_logits
-说明: 道路线图与风险/可行驶/分布三场使用完全独立的残差、压缩和像素洗牌上采样参数，避免细线类别与稠密场
-      互相挤占解码容量。停止线与灯色只新增末端 1×1 头，旧检查点可完整复用共享上采样部分；新增头零初始化，
-      首次恢复时分别从中性二分类概率与均匀灯色概率开始，不扰动已有道路线输出。
+说明: 道路线图与风险/可行驶/分布三场使用完全独立的残差、压缩和 BEV 专用上采样参数，避免细线类别与
+      稠密场互相挤占解码容量。BEV 上采样参数路径独立于旧感知上采样器，旧视场检查点兼容恢复时自动重新
+      初始化；停止线与灯色头零初始化，分别从中性二分类概率与均匀灯色概率开始。
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ import torch
 import torch.nn as nn
 
 from config.schema import DrivingCfg
+from model.bev_upsampler import BevUpsampler
 from model.lane_map_decoder.checks.lane_map_decoder_checks import check_lane_map_features
-from model.pixel_shuffle_upsampler import PixelShuffleUpsampler
 from model.residual_block import ResidualBlock
 
 
@@ -40,9 +40,8 @@ class LaneMapDecoder(nn.Module):
         self.num_classes = len(lane.class_names)
         self.residual = ResidualBlock(self.work_dim)
         self.reduce = nn.Conv2d(self.work_dim, lane.reduce_channels, kernel_size=1)
-        self.upsampler = PixelShuffleUpsampler(
+        self.bev_upsampler = BevUpsampler(
             lane.reduce_channels, lane.up_channels, lane.feature_channels)
-        self.act = nn.GELU()
         self.class_head = nn.Conv2d(lane.feature_channels, self.num_classes, kernel_size=1)
         self.direction_head = nn.Conv2d(lane.feature_channels, 2, kernel_size=1)
         state_count = len(cfg_driving.traffic_control.state_names)
@@ -57,7 +56,7 @@ class LaneMapDecoder(nn.Module):
     def forward(self, bev_feat: torch.Tensor) -> Dict[str, torch.Tensor]:
         """返回道路线/停止线/灯色 logits 与道路线方向向量。"""
         check_lane_map_features(bev_feat, self.work_dim)
-        shared = self.act(self.upsampler(self.reduce(self.residual(bev_feat))))
+        shared = self.bev_upsampler(self.reduce(self.residual(bev_feat)))
         return {
             "lane_class_logits": self.class_head(shared),
             "lane_direction": self.direction_head(shared),

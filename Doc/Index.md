@@ -77,6 +77,8 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — LiDAR 体素融合：局部米制统计乘 4 编码，并以视觉条件门控注入初始 BEV 查询。
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
 - [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼。
+- [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。公开 API 重导出入口。
+- [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
 - [model/field_decoder/field_decoder.py](../model/field_decoder/field_decoder.py) — 三场解码头：BEV 特征上采样解码为风险/可行驶/轨迹分布场
 - [model/lane_map_decoder/lane_map_decoder.py](../model/lane_map_decoder/lane_map_decoder.py) — 道路细线解码器：共享高分辨率特征输出道路线、相关停止线与交通灯状态。
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。

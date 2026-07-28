@@ -335,7 +335,7 @@ flowchart TB
     TRANS6 --> F6["第 6 层特征"]
     F6 --> BEV["丢弃寄存器<br/>BEV Feature 384×32×32"]
 
-    BEV --> FIELD["共享 PixelShuffle 场解码器"]
+    BEV --> FIELD["共享 BEV PixelShuffle 场解码器"]
     FIELD --> RISK["Risk<br/>256×256"]
     FIELD --> DRIVE["Drivable<br/>256×256"]
     FIELD --> DIST["Distribution<br/>256×256"]
@@ -418,8 +418,9 @@ LiDAR 初始残差严格为零。整帧缺失 LiDAR 时由有效位严格旁路�
 
 #### 6. 三场解码
 
-BEV 特征经残差块、通道压缩和三级 PixelShuffle，从 `32×32` 放大到 `256×256`。三个 `1×1` 头共享
-上采样特征，分别输出未经过 sigmoid 的 logits：
+BEV 特征经残差块、通道压缩和三级专用上采样器，从 `32×32` 放大到 `256×256`。每级采用
+`3×3 Conv → PixelShuffle → SiLU → 1×1 Conv`，并从 PixelShuffle 输出、SiLU 之前引出残差；
+末端投影到共享特征后，由三个 `1×1` 头分别输出未经过 sigmoid 的 logits：
 
 | 场 | 监督来源 | 含义 |
 | --- | --- | --- |
@@ -1261,6 +1262,7 @@ ByteDrive-Toy/
 │   ├── lidar_fusion/                  # 局部米制统计 ×4 编码与视觉条件门控
 │   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
 │   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
+│   ├── bev_upsampler/                # 驾驶 BEV 专用空间卷积 + PixelShuffle 激活残差上采样
 │   ├── field_decoder/                # 风险/可行驶/轨迹分布三场
 │   ├── lane_map_decoder/             # 独立道路线图（5 类 + 有向切向量）与交通控制头
 │   ├── trajectory_decoder/           # 多模态轨迹/置信度/行为联合 Token
