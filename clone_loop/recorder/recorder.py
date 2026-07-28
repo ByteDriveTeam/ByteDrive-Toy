@@ -8,7 +8,7 @@
     carla_collector.cameras.width / height
     data.driving.cameras
     clone_loop.simulation.fixed_delta_seconds
-    model.driving.bev.* / model.driving.fields.up_channels
+    model.driving.bev.* / model.driving.bev_decoder.up_channels
     driving_vis.field_colormap / lane_map.* / traffic_control.*
 对外接口:
     - EpisodeRecorder(run_dir, episode_index, cfg)
@@ -106,7 +106,7 @@ class EpisodeRecorder:
 
     def _prepare_geometry(self):
         bev_cfg = self._cfg.model.driving.bev
-        scale = 2 ** len(self._cfg.model.driving.fields.up_channels)
+        scale = 2 ** len(self._cfg.model.driving.bev_decoder.up_channels)
         self._bev = BevParams(
             bev_cfg.x_min_m, bev_cfg.x_max_m, bev_cfg.y_min_m, bev_cfg.y_max_m,
             bev_cfg.height * scale, bev_cfg.width * scale)

@@ -3,12 +3,12 @@
 模块: model/driving_model/driving_model.py
 依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionFeatureEncoder,
       model.driving_neck.DrivingNeck, model.bev_query_embedding.BevQueryEmbedding,
-      model.lidar_fusion.LidarQueryFusion, model.bev_encoder.BevEncoder, model.field_decoder.FieldDecoder,
-      model.lane_map_decoder.LaneMapDecoder, model.trajectory_decoder.TrajectoryDecoder,
+      model.lidar_fusion.LidarQueryFusion, model.bev_encoder.BevEncoder, model.bev_decoder.BevDecoder,
+      model.trajectory_decoder.TrajectoryDecoder,
       model.driving_model.checks.driving_model_checks
 读取配置:
     model.driving.work_dim / freeze_perception / neck_num_residual_blocks
-    model.driving.bev / query / lidar_fusion / frustum / attention / bev_encoder / fields / lane_map /
+    model.driving.bev / query / lidar_fusion / frustum / attention / bev_encoder / bev_decoder / lane_map /
         traffic_control / trajectory / behavior 各键
     model.dinov3_backbone.patch_size / hidden_dim（frustum 像素反投影、DINO 原始特征通道）
     model.feature_trunk.channels（trunk 通道）
@@ -25,9 +25,10 @@
       bev_query_embedding 仅以 BEV xyz 几何初始化查询，lidar_fusion 在图像交叉注意力前以逐通道门控
       注入当前/历史帧体素中心相对坐标的米制均值与标准差，
       bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
-      field_decoder 上采样解码三场。上一帧由同一套纯几何查询得到 BEV 骨干末端特征；其每个 cell 的坐标由
+      bev_decoder 共享一次上采样解码三场、道路线与交通控制。上一帧由同一套纯几何查询得到 BEV 骨干末端
+      特征；其每个 cell 的坐标由
       previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
-      BEV 查询先查图像、再查上一帧 BEV。lane_map_decoder 输出道路线、停止线与灯色；trajectory_decoder
+      BEV 查询先查图像、再查上一帧 BEV；trajectory_decoder
       以目标点、ego 平面速度为条件，用可学习 Mode Token 依次查询主干第 3/6 层。前向三目，自车位于 BEV 下方中心。
       混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
       freeze_perception 为真时视觉编码器冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时优化驾驶实际经过的
@@ -43,12 +44,11 @@ import torch
 import torch.nn as nn
 
 from config.schema import Config
+from model.bev_decoder import BevDecoder
 from model.bev_encoder import BevEncoder
 from model.bev_query_embedding import BevQueryEmbedding
 from model.driving_model.checks.driving_model_checks import check_driving_inputs
 from model.driving_neck import DrivingNeck
-from model.field_decoder import FieldDecoder
-from model.lane_map_decoder import LaneMapDecoder
 from model.lidar_fusion import LidarQueryFusion
 from model.perception_model import PerceptionFeatureEncoder
 from model.trajectory_decoder import TrajectoryDecoder
@@ -95,14 +95,13 @@ class DrivingModel(nn.Module):
             coord_symlog_scale=drv.query.coord_symlog_scale, mlp_hidden=drv.query.mlp_hidden)
         self.lidar_fusion = LidarQueryFusion(drv)
         self.bev_encoder = BevEncoder(drv)
-        self.field_decoder = FieldDecoder(drv)
-        self.lane_map_decoder = LaneMapDecoder(drv)
+        self.bev_decoder = BevDecoder(drv)
         self.trajectory_decoder = TrajectoryDecoder(drv)
 
     def _driving_modules(self):
         """驾驶新增模块（不含复用的感知子模块）。"""
-        return (self.neck, self.query, self.lidar_fusion, self.bev_encoder, self.field_decoder,
-                self.lane_map_decoder, self.trajectory_decoder)
+        return (self.neck, self.query, self.lidar_fusion, self.bev_encoder, self.bev_decoder,
+                self.trajectory_decoder)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         """可训练参数：驾驶各件，以及未冻结时驾驶前向实际使用的感知 fusion/trunk。"""
@@ -161,11 +160,10 @@ class DrivingModel(nn.Module):
                 current_query, image_feat, previous_bev, previous_geometry, previous_valid,
                 return_intermediate=True)
 
-        # FP32 段：三场、独立道路线图与轨迹/行为末端解码。
+        # FP32 段：共享空间解码头与轨迹/行为末端解码。
         with self._autocast(device, enabled=False):
             bev_feat = bev_feat.float()
-            outputs = self.field_decoder(bev_feat)
-            outputs.update(self.lane_map_decoder(bev_feat))
+            outputs = self.bev_decoder(bev_feat)
             outputs.update(self.trajectory_decoder(
                 tuple(feature.float() for feature in planning_features),
                 target_point.float(), ego_velocity.float()))

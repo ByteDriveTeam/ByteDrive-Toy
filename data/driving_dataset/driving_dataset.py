@@ -19,7 +19,7 @@
     data.dataset.dino_mean / dino_std
     model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
     model.driving.lidar_fusion.voxel_size_m
-    model.driving.fields.up_channels（推导场分辨率 = bev.height/width · 2^L）
+    model.driving.bev_decoder.up_channels（推导场分辨率 = bev.height/width · 2^L）
     model.driving.lane_map.class_names（定位中心线类别索引）
     model.driving.trajectory.num_waypoints / waypoint_dt_s
     model.driving.traffic_control.state_names
@@ -42,7 +42,7 @@
       当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
       风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
-      独立道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；GT 可靠贴近的中心线折线
+      道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；GT 可靠贴近的中心线折线
       另生成米制距离场，规控主动偏离超过配置阈值的航点不参与贴线监督；分布场由 GT 航点高斯软化，视场掩码为常量
       （构造期预算）。全帧 ego 位姿与速度加速度采用同一有界 LRU 场景缓存，供轨迹/行为/目标点复用且不随场景数涨内存。场分辨率与
       模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
@@ -89,8 +89,8 @@ class DrivingDataset(SingleFrameSceneBase):
         self._lidar_voxel_size = cfg.model.driving.lidar_fusion.voxel_size_m
         self._fov = bev.fov_deg
         self._previous_offset = drv_data.previous_frame_offset
-        # 场分辨率 = BEV 工作分辨率 · 上采样倍率（与 field_decoder 输出一致）
-        scale = 2 ** len(cfg.model.driving.fields.up_channels)
+        # 场分辨率 = BEV 工作分辨率 · 统一解码头上采样倍率
+        scale = 2 ** len(cfg.model.driving.bev_decoder.up_channels)
         self._bev = dt.BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
                                  bev.height * scale, bev.width * scale)
         self._num_waypoints = cfg.model.driving.trajectory.num_waypoints

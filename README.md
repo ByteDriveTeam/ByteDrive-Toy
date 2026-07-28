@@ -58,7 +58,7 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 1. **感知预训练**：以冻结的 DINOv3 ViT-S+/16 为视觉骨干，融合浅/中/深层完整 Token 序列，联合学习
    29 类语义分割与米制深度估计。
 2. **驾驶学习**：复用感知表征，以三路相机 frustum 与纯 BEV xyz 几何把当前图像聚合到前向 BEV，
-   再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、独立道路线图、8 模态未来轨迹、
+再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、道路线图、8 模态未来轨迹、
    模态置信度和 8 类行为标签。规划分支以目标点与 ego 平面速度为条件，用 8 个可学习 Mode Token 查询
    BEV 主干第 3、6 层特征。
 
@@ -120,8 +120,8 @@ flowchart LR
 
 ### 驾驶三场、道路线、交通控制与多模态轨迹
 
-下图由 `vis/driving_vis/run.py` 生成，展示 RGB/语义/深度、风险场、可行驶场、轨迹分布场、独立道路线图及候选轨迹。
-道路线图按类别着色，并以稀疏箭头显示 ego 坐标系中的有向切向量，具体类别/方向编码见“独立道路线图”章节。
+下图由 `vis/driving_vis/run.py` 生成，展示 RGB/语义/深度、风险场、可行驶场、轨迹分布场、道路线图及候选轨迹。
+道路线图按类别着色，并以稀疏箭头显示 ego 坐标系中的有向切向量，具体类别/方向编码见“道路线图”章节。
 `gt` 与 `pred` 行采用相同几何范围和着色口径，可直接观察 BEV 空间对齐情况。
 
 ![ByteDrive 驾驶预测可视化](assets/visualizations/driving.png)
@@ -335,12 +335,13 @@ flowchart TB
     TRANS6 --> F6["第 6 层特征"]
     F6 --> BEV["丢弃寄存器<br/>BEV Feature 384×32×32"]
 
-    BEV --> FIELD["共享 BEV PixelShuffle 场解码器"]
+    BEV --> BDEC["统一 BEV PixelShuffle 解码器"]
+    BDEC --> FIELD["三场 1×1 头"]
     FIELD --> RISK["Risk<br/>256×256"]
     FIELD --> DRIVE["Drivable<br/>256×256"]
     FIELD --> DIST["Distribution<br/>256×256"]
 
-    BEV --> LANE["独立 LaneMapDecoder"]
+    BDEC --> LANE["道路线/交通控制 1×1 头"]
     LANE --> LCLS["5 类道路线 logits<br/>256×256"]
     LANE --> LDIR["有向切向量 dx,dy<br/>2×256×256"]
 
@@ -418,9 +419,9 @@ LiDAR 初始残差严格为零。整帧缺失 LiDAR 时由有效位严格旁路�
 
 #### 6. 三场解码
 
-BEV 特征经残差块、通道压缩和三级专用上采样器，从 `32×32` 放大到 `256×256`。每级采用
+BEV 特征只经过一套残差块、通道压缩和三级专用上采样器，从 `32×32` 放大到 `256×256`。每级采用
 `3×3 Conv → PixelShuffle → SiLU → 1×1 Conv`，并从 PixelShuffle 输出、SiLU 之前引出残差；
-末端投影到共享特征后，由三个 `1×1` 头分别输出未经过 sigmoid 的 logits：
+末端投影到共享特征后，三场、道路线和交通控制任务各自通过轻量 `1×1` 头输出；三个场 logits 为：
 
 | 场 | 监督来源 | 含义 |
 | --- | --- | --- |
@@ -428,14 +429,14 @@ BEV 特征经残差块、通道压缩和三级专用上采样器，从 `32×32` 
 | `drivable` | HDMap 车道栅格减去可见运动 box 足迹 | 只考虑 vehicle/pedestrian，二者统一为占用；框内至少 10 个深度像素 |
 | `distribution` | 未来 GT 航点高斯软化 | 期望未来轨迹经过位置的空间分数场 |
 
-#### 7. 独立道路线图
+#### 7. 道路线图
 
-道路线图不与三场共享上采样参数，单独解码 5 类 logits：`background / centerline / lane_separator /
+道路线图与三场、交通控制共享统一高分辨率特征，独立的 `1×1` 头解码 5 类 logits：`background / centerline / lane_separator /
 road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Broken / NONE → 1 / 2 / 3`，未知
 非触发区标线落入 `other_marking`。另一路输出每个道路线像素的有向单位切向量 `(dx,dy)`；方向直接由 HD Map
 采样点 yaw 变换到当前 ego 系，因此 `v` 与 `-v` 表示相反行驶方向。
 
-交通控制头复用道路线图的细线高分辨率特征，只新增停止线二值头和三类灯色头。新采集数据由 CARLA Worker
+交通控制头同样复用统一高分辨率特征，只新增停止线二值头和三类灯色头。新采集数据由 CARLA Worker
 读取每盏灯的 `get_affected_lane_waypoints()` 与 `get_stop_waypoints()`，再和 BehaviorAgent 当前规划匹配，
 直接记录路线最先到达的原生停止 waypoint；离线端据其位置、方向和车道宽度生成停止线。历史数据没有该字段时，
 自动回退到 HD Map `Trigger_Volumes/TrafficLight` 四边形与当前路线走廊相交的旧算法，多候选仍取沿路线
@@ -1091,7 +1092,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 | `model.driving.bev/query/frustum` | BEV 几何、目标查询和视锥采样 |
 | `model.driving.lidar_fusion` | LiDAR 体素尺寸、编码通道与视觉条件门控 |
 | `model.driving.attention/bev_encoder` | 三目图像 Token/上一帧 BEV 注意力和 BEV 空间提炼 |
-| `model.driving.fields/lane_map/traffic_control/trajectory/behavior` | 三场、道路线、停止线灯色、轨迹和行为输出 |
+| `model.driving.bev_decoder/lane_map/traffic_control/trajectory/behavior` | 统一空间解码、道路线类别、停止线灯色、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
 | `pred_vis/driving_vis` | 权重、场景、帧数、保存目录和配色 |
@@ -1102,7 +1103,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 
 1. 将 `train.batch_size` 从 32 降到 1–4；
 2. 训练驾驶模型时设 `model.driving.freeze_perception: true`；
-3. 降低 `model.driving.fields.up_channels` 的通道数，而不是随意改变列表长度；改变长度会改变场分辨率；
+3. 降低 `model.driving.bev_decoder.up_channels` 的通道数，而不是随意改变列表长度；改变长度会改变场分辨率；
 4. 减少 `model.driving.bev_encoder.num_register_tokens`（Transformer 层数固定为 6）；
 5. 谨慎调整 frustum 采样——更小步长会扩大 MLP 输入和中间几何张量。
 
@@ -1263,8 +1264,7 @@ ByteDrive-Toy/
 │   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
 │   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
 │   ├── bev_upsampler/                # 驾驶 BEV 专用空间卷积 + PixelShuffle 激活残差上采样
-│   ├── field_decoder/                # 风险/可行驶/轨迹分布三场
-│   ├── lane_map_decoder/             # 独立道路线图（5 类 + 有向切向量）与交通控制头
+│   ├── bev_decoder/                  # 共享一次上采样的三场/道路线/交通控制统一解码头
 │   ├── trajectory_decoder/           # 多模态轨迹/置信度/行为联合 Token
 │   ├── driving_model/                # 驾驶总模型
 │   └── residual_block/ swiglu/ pixel_shuffle_upsampler/ rope_3d/ ...  # 可复用基础构件及 checks

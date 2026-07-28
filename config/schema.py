@@ -278,18 +278,15 @@ class BevEncoderCfg:
 
 
 @dataclass
-class FieldsCfg:
+class BevDecoderCfg:
     reduce_channels: int           # 上采样前 1×1 压缩到的通道
-    up_channels: List[int]         # 各级 2× 像素洗牌输出通道（Hb·2^L = 场分辨率）
-    feature_channels: int          # 共享上采样输出特征通道（再由各场 1×1 头解码）
+    up_channels: List[int]         # 各级 2× 像素洗牌输出通道（Hb·2^L = 输出分辨率）
+    feature_channels: int          # 全部 BEV 任务共享的高分辨率特征通道
 
 
 @dataclass
 class LaneMapCfg:
     class_names: List[str]         # 0 固定为背景，其余为道路线类别
-    reduce_channels: int
-    up_channels: List[int]
-    feature_channels: int
 
 
 @dataclass
@@ -320,7 +317,7 @@ class BehaviorCfg:
 
 @dataclass
 class DrivingCfg:
-    """驾驶系统（双帧时序 BEV → 三场 + 独立道路线图 + 多模态轨迹/行为）网络参数。"""
+    """驾驶系统（双帧时序 BEV → 统一空间解码 + 多模态轨迹/行为）网络参数。"""
     work_dim: int                  # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: bool        # 是否冻结感知主干（复用其预训练表征）
     neck_num_residual_blocks: int  # driving_neck 融合后 2D 残差块层数
@@ -330,7 +327,7 @@ class DrivingCfg:
     frustum: FrustumCfg
     attention: DrivingAttentionCfg
     bev_encoder: BevEncoderCfg
-    fields: FieldsCfg
+    bev_decoder: BevDecoderCfg
     lane_map: LaneMapCfg
     traffic_control: TrafficControlCfg
     trajectory: TrajectoryCfg
@@ -1053,25 +1050,20 @@ def _validate_driving(dv):
         "model.driving.bev_encoder 每头维度必须被 4 整除（二维 RoPE）"
     assert math.isfinite(be.rope_theta) and be.rope_theta > 0, \
         "model.driving.bev_encoder.rope_theta 必须为有限正数"
-    # 校验对象: fields —— 通道为正、每级像素洗牌通道为正整数
-    assert dv.fields.reduce_channels > 0 and dv.fields.feature_channels > 0, \
-        "model.driving.fields.reduce_channels / feature_channels 必须 > 0"
-    assert len(dv.fields.up_channels) > 0 and all(
-        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in dv.fields.up_channels), \
-        "model.driving.fields.up_channels 每级必须为正整数"
-    # 校验对象: lane_map —— 独立道路线图类别与上采样结构
+    # 校验对象: bev_decoder —— 共享解码通道与每级像素洗牌通道均为正整数
+    decoder = dv.bev_decoder
+    assert decoder.reduce_channels > 0 and decoder.feature_channels > 0, \
+        "model.driving.bev_decoder.reduce_channels / feature_channels 必须 > 0"
+    assert decoder.up_channels and all(
+        isinstance(c, int) and not isinstance(c, bool) and c > 0
+        for c in decoder.up_channels), \
+        "model.driving.bev_decoder.up_channels 每级必须为正整数"
+    # 校验对象: lane_map.class_names —— 道路线类别稳定且索引 0 为背景
     lane = dv.lane_map
     assert len(lane.class_names) >= 2 and lane.class_names[0] == "background", \
         "model.driving.lane_map.class_names 至少含背景+一道路线，且索引 0 必须为 background"
     assert len(lane.class_names) == len(set(lane.class_names)), \
         "model.driving.lane_map.class_names 不得重复"
-    assert lane.reduce_channels > 0 and lane.feature_channels > 0, \
-        "model.driving.lane_map.reduce_channels / feature_channels 必须 > 0"
-    assert len(lane.up_channels) > 0 and all(
-        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in lane.up_channels), \
-        "model.driving.lane_map.up_channels 每级必须为正整数"
-    assert len(lane.up_channels) == len(dv.fields.up_channels), \
-        "model.driving.lane_map 与 fields 上采样级数须一致，保证监督分辨率对齐"
     # 校验对象: traffic_control —— 灯色类别稳定且至少覆盖红灯越线监督所需的 red
     states = dv.traffic_control.state_names
     assert states and len(states) == len(set(states)) and "red" in states, \

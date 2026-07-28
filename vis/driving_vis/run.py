@@ -11,7 +11,7 @@
     driving_vis.traffic_control.*（灯态配色、停止线阈值与轨迹叠加强度）
     data.dataset.dino_mean / dino_std（模型输入归一化；展示直接使用紧凑 uint8 RGB）
     data.driving.cameras（三目轴顺序与原始 Seg/Depth 展示）
-    model.driving.bev.*（BEV 场几何与视场）/ fields.up_channels（场分辨率）
+    model.driving.bev.*（BEV 场几何与视场）/ bev_decoder.up_channels（场分辨率）
     model.driving.traffic_control.state_names（灯态显示名）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -81,9 +81,9 @@ def _select_frames(dataset: DrivingDataset, scene: str, max_frames: int):
 
 
 def _bev_params(cfg) -> BevParams:
-    """场分辨率 BEV 几何（与 field_decoder 输出/DrivingDataset 一致）。"""
+    """场分辨率 BEV 几何（与统一 BEV 解码头/DrivingDataset 一致）。"""
     bev = cfg.model.driving.bev
-    scale = 2 ** len(cfg.model.driving.fields.up_channels)
+    scale = 2 ** len(cfg.model.driving.bev_decoder.up_channels)
     return BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
                      bev.height * scale, bev.width * scale)
 
