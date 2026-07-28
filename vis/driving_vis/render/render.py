@@ -197,9 +197,24 @@ def _draw_path(canvas, ego_px, waypoints, valid, bev, color, thickness) -> None:
 def _draw_fov(canvas, bev: BevParams, ego_px, fov_deg: float) -> None:
     """从自车画出前向视场两条边界线（按 x 量程延伸）。"""
     half = math.radians(fov_deg) * 0.5
-    far_x = bev.x_max
     for sign in (-1.0, 1.0):
-        edge = np.array([[far_x, sign * far_x * math.tan(half)]])
+        # Do not use ``tan(half)`` here: a 180-degree FOV has half=90 degrees,
+        # where tangent is numerically enormous and produces coordinates beyond
+        # OpenCV's integer range.  Intersect the ray with the BEV rectangle
+        # instead, which also correctly handles vertical FOV boundaries.
+        direction_x = math.cos(half)
+        direction_y = sign * math.sin(half)
+        distances = []
+        if direction_x > 1e-12:
+            distances.append(bev.x_max / direction_x)
+        elif direction_x < -1e-12:
+            distances.append(bev.x_min / direction_x)
+        if direction_y > 1e-12:
+            distances.append(bev.y_max / direction_y)
+        elif direction_y < -1e-12:
+            distances.append(bev.y_min / direction_y)
+        distance = min(value for value in distances if value >= 0.0)
+        edge = np.array([[distance * direction_x, distance * direction_y]])
         px = _to_px(edge, bev)[0]
         cv2.line(canvas, (int(ego_px[1]), int(ego_px[0])), (int(px[1]), int(px[0])),
                  (90, 90, 90), 1, cv2.LINE_AA)
