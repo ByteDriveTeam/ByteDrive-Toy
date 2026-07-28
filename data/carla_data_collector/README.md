@@ -143,9 +143,10 @@ data/carla_data_collector/
 - **内存**：新增语义图使单帧内存约增 ~10%（每相机 H×W×1 字节）；如需更长场景，调大 `ipc.arena_size_mb`。
 - **交通灯**：场景级 `traffic_lights` 在旧字段 `id/transform/trigger_location/trigger_extent` 之外，新增
   `opendrive_id/pole_index/affected_lane_waypoints/stop_waypoints`。帧级 `traffic_light_states` 保存全部灯的
-  `id/state/state_code`；`relevant_traffic_control` 根据 BehaviorAgent 当前规划与受控车道选择下一停止点，
-  始终写入布尔 `valid`。状态名为 `red/yellow/green/off/unknown`，对应 CARLA 原始码 `0/1/2/3/4`。
-  下游以该字段是否存在区分新旧数据：存在且 `valid=false` 表示明确无相关灯，字段缺失才启用旧 HD Map 几何回退。
+  `id/state/state_code`；`relevant_traffic_control` 将每盏灯的原生停止点投影到 BehaviorAgent 当前规划，
+  选择沿路线最先到达者，并始终写入布尔 `valid`。状态名为 `red/yellow/green/off/unknown`，对应 CARLA
+  原始码 `0/1/2/3/4`。下游由 `data.driving.traffic_control.annotation_version` 显式指定解释方式：
+  `v1` 忽略已知损坏的原生关联并启用旧 HD Map 几何回退，`v2` 信任该字段及其 `valid=false` 结论。
 - **可复现**：`tm.set_random_device_seed(seed)` + Python/np 随机种子，seed 随场景元数据落盘。
 - **碰撞**：碰撞传感器置标志；命中即丢弃整场景缓冲、换新 seed 重跑同一路线，队列不前进，超重试上限则跳过该路线。
 - **路线过滤**：先用起终点直线距离筛选候选（实际行驶路径由 BehaviorAgent 规划），再按固定随机顺序贪心保留代表路线；

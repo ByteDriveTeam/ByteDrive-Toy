@@ -7,9 +7,10 @@
     - traffic_light_metadata(traffic_lights) -> list[dict]  # 场景级灯、受控车道与停止点
     - traffic_light_states(traffic_lights) -> list[dict]    # 逐帧全部灯状态
     - relevant_traffic_control(ego, agent, metadata, states) -> dict  # 当前路线下一控制点
-说明: actor id 只负责同一 episode 内逐帧状态关联，OpenDRIVE id 供跨 episode 稳定识别。相关性先要求
-      Agent 规划经过 CARLA 声明的受控车道，再把停止点投影到该车道对应的规划线段；停止点位于 ego 后方
-      时立即排除。空结果仍写 valid=false，使离线端能区分“新方法判定无灯”和“旧数据缺少新字段”。
+说明: actor id 只负责同一 episode 内逐帧状态关联，OpenDRIVE id 供跨 episode 稳定识别。CARLA 的
+      affected_lane_waypoints 位于灯控路口内部，stop_waypoints 位于进入路口的道路，两者的 road_id
+      通常不同，不能互相作等值过滤。相关性直接把每盏灯的停止点投影到 Agent 规划的同一车道上，并排除
+      ego 后方停止点。空结果仍写 valid=false，使离线端能区分“新方法判定无灯”和“旧数据缺少新字段”。
 """
 
 import math
@@ -27,7 +28,7 @@ _TRAFFIC_LIGHT_STATE_NAMES = {
     int(carla.TrafficLightState.Off): "off",
     int(carla.TrafficLightState.Unknown): "unknown",
 }
-_SOURCE = "carla_lane_topology"
+_SOURCE = "carla_stop_waypoint_route_v2"
 
 
 def _lane_key(waypoint):
@@ -171,16 +172,11 @@ def relevant_traffic_control(ego, agent, metadata, states):
     state_by_id = {item["id"]: item for item in states}
     candidates = []
     for light in metadata:
-        affected = {
-            (item["road_id"], item["section_id"], item["lane_id"])
-            for item in light["affected_lane_waypoints"]
-        }
         state = state_by_id[light["id"]]
         candidates.extend(
             candidate for candidate in (
                 _candidate(light, index, stop, route, ego_xy, state)
                 for index, stop in enumerate(light["stop_waypoints"])
-                if (stop["road_id"], stop["section_id"], stop["lane_id"]) in affected
             )
             if candidate is not None
         )

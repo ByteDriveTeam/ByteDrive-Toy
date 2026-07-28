@@ -349,7 +349,8 @@ class DrivingDataset(SingleFrameSceneBase):
             meta["traffic_lights"], frame["traffic_light_states"], self._bev,
             self._traffic_cfg.route_corridor_m, self._traffic_cfg.line_expand_m,
             self._traffic_cfg.actor_match_radius_m, self._traffic_state_names,
-            frame["meta"].get("relevant_traffic_control"))
+            frame["meta"].get("relevant_traffic_control"),
+            annotation_version=self._traffic_cfg.annotation_version)
         stopping_distance = (speed_mps * self._traffic_cfg.reaction_time_s
                              + speed_mps ** 2 / (2.0 * self._traffic_cfg.comfortable_decel_mps2)
                              + self._traffic_cfg.stop_margin_m)

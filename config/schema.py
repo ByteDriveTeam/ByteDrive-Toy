@@ -406,6 +406,7 @@ class LaneMapTargetCfg:
 
 @dataclass
 class TrafficControlTargetCfg:
+    annotation_version: str           # v1=历史坏标注走 HD Map；v2=信任原生 relevant_control
     route_lookahead_m: float        # 旧数据路线走廊前向搜索弧长
     route_corridor_m: float         # 路线与停止区相关性判定的走廊半宽
     line_expand_m: float            # 栅格化停止区的额外膨胀半径
@@ -960,6 +961,8 @@ def _validate_data(data, model_lane, camera_rig):
     assert centerline_class in lane.type_to_class.values(), \
         "data.driving.lane_map.type_to_class 至少一个 Type 须映射到 centerline"
     traffic = dr.traffic_control
+    assert traffic.annotation_version in ("v1", "v2"), \
+        "data.driving.traffic_control.annotation_version 仅支持 v1/v2"
     assert traffic.route_lookahead_m > 0 and traffic.route_corridor_m > 0 \
         and traffic.line_expand_m >= 0 \
         and traffic.actor_match_radius_m > 0 and traffic.stop_margin_m >= 0 \

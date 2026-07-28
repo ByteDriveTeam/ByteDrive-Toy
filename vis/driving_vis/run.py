@@ -134,9 +134,10 @@ def _ground_truth_traffic_control(sample, state_names):
     return stop, state_map, state_valid, annotations
 
 
-def _traffic_control_source(frame_meta):
-    """逐帧字段存在即采用 CARLA 原生关联；缺失表示旧数据由 Dataset 走 HD Map 回退。"""
-    return "source native" if "relevant_traffic_control" in frame_meta else "source legacy"
+def _traffic_control_source(frame_meta, annotation_version):
+    """显示配置实际选择的交通控制来源。"""
+    native = annotation_version == "v2" and "relevant_traffic_control" in frame_meta
+    return "source native" if native else "source legacy"
 
 
 def main(argv=None) -> None:
@@ -264,7 +265,8 @@ def _append_traffic_panels(sample, outputs, frame_meta, cfg, dv, inview, panels)
     pred_stop, pred_state, pred_notes = _predict_traffic_control(
         outputs, state_names, traffic_vis.line_threshold)
     gt_stop, gt_state, gt_valid, gt_notes = _ground_truth_traffic_control(sample, state_names)
-    gt_notes.insert(0, _traffic_control_source(frame_meta))
+    gt_notes.insert(0, _traffic_control_source(
+        frame_meta, cfg.data.driving.traffic_control.annotation_version))
     traffic_args = (traffic_vis.state_colors, traffic_vis.unknown_color, inview)
     gt_traffic = render.colorize_traffic_control(
         gt_stop, gt_state, gt_valid, *traffic_args, gt_notes)

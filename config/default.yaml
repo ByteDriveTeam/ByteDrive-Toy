@@ -313,6 +313,7 @@ data:
         "NONE": 3            # 地图中未细分样式的道路边界
       unknown_class: 4        # 其余非 Trigger_Volumes 道路标线
     traffic_control:
+      annotation_version: v1          # 当前 LMDB 版本：v1=忽略损坏的原生关联并走 HD Map；新采集数据改为 v2
       route_lookahead_m: 64.0       # 旧数据回退：未来专家路线走廊的前向搜索弧长
       route_corridor_m: 0.75        # 路线中心线膨胀半宽；触发区与该走廊相交才视为相关
       line_expand_m: 0.50           # 停止区栅格额外膨胀半径，缓解 256×256 细线正样本稀疏

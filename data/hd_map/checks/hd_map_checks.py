@@ -34,13 +34,16 @@ def check_gt_centerline_inputs(gt_xy, gt_valid, centerline_types):
         raise ValueError("centerline_types 不得为空。")
 
 
-def check_traffic_control_inputs(route_xy, state_names, relevant_control=None):
+def check_traffic_control_inputs(
+        route_xy, state_names, relevant_control=None, annotation_version="v2"):
     """校验对象: HdMap.traffic_control_bev —— 路线、灯色类别及可选原生控制标注须满足契约。"""
     route = np.asarray(route_xy)
     if route.ndim != 2 or route.shape[1] != 2:
         raise ValueError("route_xy 期望 [N,2]，实际 {}。".format(tuple(route.shape)))
     if not state_names or "red" not in state_names:
         raise ValueError("state_names 须非空且包含 red。")
+    if annotation_version not in ("v1", "v2"):
+        raise ValueError("annotation_version 仅支持 v1/v2。")
     if relevant_control is None:
         return
     if not isinstance(relevant_control, dict) or not isinstance(relevant_control.get("valid"), bool):

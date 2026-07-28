@@ -45,8 +45,6 @@ from vis.data_vis.geometry import transform_points, world_to_ego
 __all__ = ["HdMap", "offroad_distance_field"]
 
 _SEGMENT_GRID_CELL_M = 4.0  # 仅影响运行时索引粒度，不影响几何结果
-
-
 class HdMap:
     """车道折线地图 → ego BEV 可行驶掩码与类别/方向道路线图栅格化器。"""
 
@@ -213,15 +211,17 @@ class HdMap:
 
     def traffic_control_bev(self, ego_pose6, route_xy, traffic_lights, states,
                             bev: BevParams, route_corridor_m: float, line_expand_m: float,
-                            actor_match_radius_m: float, state_names, relevant_control=None):
+                            actor_match_radius_m: float, state_names, relevant_control=None,
+                            annotation_version="v2"):
         """生成与当前路线相关的交通灯停止区及状态监督。
 
-        新数据传入 relevant_control 时直接栅格化 CARLA 原生停止 waypoint；即使其 valid=false 也不回退，
-        避免把“明确无相关灯”误解成“缺少标注”。旧数据字段缺失（None）时沿用触发区与路线走廊相交算法。
+        annotation_version=v1 时显式忽略已知损坏的原生关联，沿用触发区与路线走廊相交算法；
+        v2 时直接栅格化 CARLA 原生停止 waypoint，valid=false 表示明确无相关灯。v2 字段缺失时仍回退。
         """
-        check_traffic_control_inputs(route_xy, state_names, relevant_control)
+        check_traffic_control_inputs(
+            route_xy, state_names, relevant_control, annotation_version)
         out = _empty_traffic_control(bev)
-        if relevant_control is not None:
+        if annotation_version == "v2" and relevant_control is not None:
             return _native_traffic_control(
                 relevant_control, ego_pose6, bev, line_expand_m, state_names, out)
 
