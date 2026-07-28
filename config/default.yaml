@@ -342,11 +342,16 @@ train:
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
   batch_size: 32
+  grad_accum_steps: 1        # 梯度累积步数；有效 batch=batch_size×本值，1 表示每批更新
   num_workers: 4
+  prefetch_factor: 1         # 每个 worker 预取 batch 数；驾驶 batch 很大，默认 1 避免过量锁页内存
+  in_order: false            # false=先完成的 worker batch 可先返回，减少慢样本造成的队首阻塞
   shuffle: true              # 按同场景连续帧成批后打乱 batch，兼顾随机性与顺序解码吞吐
   drop_last: true            # 丢弃不足 batch_size 的最终尾批
   pin_memory: true           # CUDA 训练锁页内存，加速 non_blocking 主机到设备传输；CPU 回退时自动关闭
   persistent_workers: true   # 跨 epoch 复用 worker；场景缓存有界后不会随 epoch 增长
+  compile: true              # CUDA 训练使用 torch.compile；CPU 本地开发不编译，避免长时间冷启动
+  fused_optimizer: true      # CUDA 优先使用 fused AdamW；CPU/不支持环境自动回退普通 AdamW
   lr: 0.0001                 # 1e-4
   weight_decay: 0.00001      # 1e-5
   grad_clip_norm: 0          # 梯度裁剪上限（0 表示不裁剪）

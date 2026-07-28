@@ -475,11 +475,16 @@ class TrainCfg:
     device: str
     epochs: int
     batch_size: int
+    grad_accum_steps: int
     num_workers: int
+    prefetch_factor: int
+    in_order: bool
     shuffle: bool
     drop_last: bool
     pin_memory: bool
     persistent_workers: bool
+    compile: bool
+    fused_optimizer: bool
     lr: float
     weight_decay: float
     grad_clip_norm: float
@@ -985,7 +990,8 @@ def _validate_data(data, model_lane, camera_rig):
 
 def _validate_train(train, model_lane):
     """校验对象: cfg.train —— 训练超参数。"""
-    for name in ("epochs", "batch_size", "num_workers", "log_every"):
+    for name in ("epochs", "batch_size", "grad_accum_steps", "num_workers",
+                 "prefetch_factor", "log_every"):
         assert getattr(train, name) >= (1 if name != "num_workers" else 0), \
             "train.{} 取值非法".format(name)
     assert train.lr > 0, "train.lr 必须 > 0"
@@ -993,8 +999,9 @@ def _validate_train(train, model_lane):
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
     assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
     assert all(isinstance(getattr(train, name), bool) for name in
-               ("shuffle", "drop_last", "pin_memory", "persistent_workers")), \
-        "train.shuffle / drop_last / pin_memory / persistent_workers 必须为布尔值"
+               ("in_order", "shuffle", "drop_last", "pin_memory", "persistent_workers",
+                "compile", "fused_optimizer")), \
+        "train 的顺序/加载/编译/融合优化器开关必须为布尔值"
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in

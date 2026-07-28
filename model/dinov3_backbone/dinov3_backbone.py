@@ -12,7 +12,7 @@
     - DinoV3Backbone(cfg) -> nn.Module   # forward([N,3,H,W]) -> [N,L,1+R+P,hidden]
 说明: 骨干是师生头共享的冻结特征源，参数一律 requires_grad=False 且恒 eval（覆写 train 使 .train()
       不解冻）；前向在 no_grad 下运行，返回的特征作为可训练头的叶子输入，梯度不回传骨干、省显存。
-      经 output_hidden_states 取出 feature_layers 指定的多层（浅/中/深层，各 [N,seq,hidden]），
+      编码器逐层前向时只保留 feature_layers 指定的多层（浅/中/深层，各 [N,seq,hidden]），
       保留每层原始的 1 CLS + register + patch 顺序并堆叠为 [N,L,seq,hidden]，交由下游
       feature_fusion 在 Token 维度不变的前提下融合；特殊 Token 直至预测头前都不被裁剪。
       本地权重目录相对仓库根解析；加载走 local_files_only，不联网。
@@ -73,14 +73,28 @@ class DinoV3Backbone(nn.Module):
         grid_width = int(frames.shape[3]) // self.cfg.patch_size
         num_patches = grid_height * grid_width
 
-        # output_hidden_states 返回 embedding(索引0)+各层输出，共 num_layers+1 个 [N,seq,hidden]
-        hidden_states = self.model(pixel_values=frames, output_hidden_states=True).hidden_states
-        check_feature_layers(len(hidden_states), self.cfg.feature_layers)
+        check_feature_layers(self.model.config.num_hidden_layers + 1, self.cfg.feature_layers)
+        hidden_states = self._selected_hidden_states(frames)
         check_sequence_tokens(
             int(hidden_states[0].shape[1]), num_patches, self.cfg.num_register_tokens)
 
         # 层维外的 CLS/register/patch 顺序完整继承 DINOv3，不在骨干边界裁剪。
-        return torch.stack([hidden_states[i] for i in self.cfg.feature_layers], dim=1).contiguous()
+        return torch.stack(hidden_states, dim=1).contiguous()
+
+    def _selected_hidden_states(self, frames):
+        """复刻 DINOv3 编码器前向，但不构造/保留全部 13 层 hidden_states 元组。"""
+        pixel_values = frames.to(self.model.embeddings.patch_embeddings.weight.dtype)
+        hidden = self.model.embeddings(pixel_values)
+        position_embeddings = self.model.rope_embeddings(pixel_values)
+        wanted = set(self.cfg.feature_layers)
+        selected = {}
+        if 0 in wanted:
+            selected[0] = hidden
+        for layer_index, layer in enumerate(self.model.model.layer, start=1):
+            hidden = layer(hidden, position_embeddings=position_embeddings)
+            if layer_index in wanted:
+                selected[layer_index] = hidden
+        return [selected[index] for index in self.cfg.feature_layers]
 
 
 def _load_frozen_dinov3(model_dir: str) -> nn.Module:

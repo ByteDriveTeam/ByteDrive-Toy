@@ -49,13 +49,18 @@ class FeatureTrunk(nn.Module):
             )
             for _ in range(cfg.num_layers)
         ])
+        self._position_cache = {}
 
     def forward(
         self, features: torch.Tensor, grid_height: int, grid_width: int
     ) -> torch.Tensor:
         """对完整序列作三层自注意力，仅为 patch 旋转从 (1,1) 开始的二维位置。"""
         check_trunk_features(features, self.cfg.channels, grid_height, grid_width)
-        patch_positions = _patch_positions(grid_height, grid_width, features.device)
+        key = (grid_height, grid_width, features.device.type, features.device.index)
+        patch_positions = self._position_cache.get(key)
+        if patch_positions is None:
+            patch_positions = _patch_positions(grid_height, grid_width, features.device)
+            self._position_cache[key] = patch_positions
         for block in self.blocks:
             features = block(features, patch_positions)
         return features

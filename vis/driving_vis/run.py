@@ -9,7 +9,7 @@
     driving_vis.field_colormap / depth_colormap / depth_max_display_m / depth_min_display_m / depth_log
     driving_vis.lane_map.*（道路线类别配色与方向箭头样式）
     driving_vis.traffic_control.*（灯态配色、停止线阈值与轨迹叠加强度）
-    data.dataset.dino_mean / dino_std（RGB 去归一化展示）
+    data.dataset.dino_mean / dino_std（模型输入归一化；展示直接使用紧凑 uint8 RGB）
     data.driving.cameras（三目轴顺序与原始 Seg/Depth 展示）
     model.driving.bev.*（BEV 场几何与视场）/ fields.up_channels（场分辨率）
     model.driving.traffic_control.state_names（灯态显示名）
@@ -190,13 +190,19 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, m
     sample = dataset[idx]
     scene_dir, frame_idx = dataset.frame_index[idx]
     frame = dataset.reader(scene_dir).frame(frame_idx)
+    mean_tensor = torch.as_tensor(mean).view(1, 3, 1, 1)
+    std_tensor = torch.as_tensor(std).view(1, 3, 1, 1)
+    rgb = (sample["rgb"].flip(1).float() / 255.0 - mean_tensor) / std_tensor
+    previous_rgb = (
+        sample["previous_rgb"].flip(1).float() / 255.0 - mean_tensor
+    ) / std_tensor
 
     with torch.no_grad():
-        outputs = model(sample["rgb"].unsqueeze(0).to(device), sample["intrinsics"].unsqueeze(0).to(device),
+        outputs = model(rgb.unsqueeze(0).to(device), sample["intrinsics"].unsqueeze(0).to(device),
                         sample["extrinsics"].unsqueeze(0).to(device),
                         sample["target_point"].unsqueeze(0).to(device),
                         sample["ego_velocity"].unsqueeze(0).to(device),
-                        sample["previous_rgb"].unsqueeze(0).to(device),
+                        previous_rgb.unsqueeze(0).to(device),
                         sample["previous_to_current"].unsqueeze(0).to(device),
                         sample["previous_valid"].unsqueeze(0).to(device),
                         lidar_stats=sample["lidar_stats"].unsqueeze(0).to(device),
@@ -208,18 +214,17 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, m
     pred = _predict_fields(outputs)
     inview = sample["inview"].numpy()
     gt = {k: sample[k].numpy() for k in ("risk", "drivable", "distribution")}
-    _append_perspective_panels(sample, frame, cameras, dv, mean, std, panels)
+    _append_perspective_panels(sample, frame, cameras, dv, panels)
     _append_field_panels(gt, pred, inview, dv.field_colormap, panels)
     _append_lane_panels(sample, outputs, inview, dv.lane_map, panels)
     traffic_layers = _append_traffic_panels(sample, outputs, frame["meta"], cfg, dv, inview, panels)
     _append_trajectory_panels(sample, outputs, gt, pred, traffic_layers, dv, bev, fov, panels)
 
 
-def _append_perspective_panels(sample, frame, cameras, dv, mean, std, panels):
+def _append_perspective_panels(sample, frame, cameras, dv, panels):
     """按左/前/右拼接三路 RGB、语义和深度透视面板。"""
     indices = [cameras.index(name) for name in ("front_left", "front", "front_right")]
-    rgb = (sample["rgb"].cpu().numpy() * std[None, :, None, None]
-           + mean[None, :, None, None])
+    rgb = sample["rgb"].flip(1).cpu().numpy().astype(np.float32) / 255.0
     panels["rgb"].append(np.hstack([render.to_display_bgr(rgb[index]) for index in indices]))
     panels["seg"].append(np.hstack([
         render.colorize_semantic(np.ascontiguousarray(frame["semantic"][cameras[index]]))

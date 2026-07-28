@@ -27,7 +27,8 @@
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
         __getitem__(i) -> dict[str, Tensor]
-说明: 复用 SingleFrameSceneBase 的索引/reader 缓存/RGB 归一化。三路相机严格按 data.driving.cameras 堆叠；
+说明: 复用 SingleFrameSceneBase 的索引/reader 缓存；RGB 以 BGR uint8 紧凑返回并在设备侧归一化。
+      三路相机严格按 data.driving.cameras 堆叠；
       当前/历史语义 LiDAR 先按各帧真实自车有向 Box 剔除车体内点，再在 CPU 上编码为 0.5m 体素中心
       相对 XYZ 米制均值与总体标准差；旧场景缺失时按场景告警并旁路。
       每个样本同时返回同场景上一帧三目 RGB 及把
@@ -112,7 +113,7 @@ class DrivingDataset(SingleFrameSceneBase):
             behavior.traffic_light_seg_margin_px, behavior.traffic_light_min_pixels)
         self._map_dir = resolve_repo_path(drv_data.map_dir)
         self._inview_np = dt.inview_mask(self._bev, self._fov)
-        self._inview = torch.from_numpy(self._inview_np)  # 常量，预算一次
+        self._inview = torch.from_numpy(self._inview_np).to(torch.uint8)  # 紧凑常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
         self._state_cache = OrderedDict()  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
         self._missing_lidar_warned = set()
@@ -198,8 +199,8 @@ class DrivingDataset(SingleFrameSceneBase):
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
 
         sample = {
-            "rgb": torch.stack([self.normalize_rgb(image) for image in rgb]),
-            "previous_rgb": torch.stack([self.normalize_rgb(image) for image in previous_rgb]),
+            "rgb": torch.stack([self.bgr_uint8(image) for image in rgb]),
+            "previous_rgb": torch.stack([self.bgr_uint8(image) for image in previous_rgb]),
             "previous_to_current": torch.from_numpy(previous_to_current),
             "previous_valid": torch.tensor(previous_valid, dtype=torch.float32),
             "lidar_stats": lidar_stats,
@@ -218,7 +219,7 @@ class DrivingDataset(SingleFrameSceneBase):
             "behavior": torch.from_numpy(behavior),
             "risk": torch.from_numpy(risk),
             "drivable": torch.from_numpy(drivable),
-            "lane_class": torch.from_numpy(lane_class),
+            "lane_class": torch.from_numpy(lane_class.astype(np.uint8)),
             "lane_direction": torch.from_numpy(lane_direction),
             "gt_centerline_distance": torch.from_numpy(gt_centerline_distance),
             "gt_centerline_valid": torch.from_numpy(gt_centerline_valid),
@@ -226,9 +227,17 @@ class DrivingDataset(SingleFrameSceneBase):
             "distribution": torch.from_numpy(distribution),
             "inview": self._inview,
         }
-        sample.update({name: torch.from_numpy(value) if isinstance(value, np.ndarray)
-                       else torch.tensor(value, dtype=torch.float32)
-                       for name, value in traffic.items()})
+        compact_uint8 = {"stop_line", "traffic_light_state", "traffic_light_state_valid"}
+        sample.update({
+            name: (
+                torch.from_numpy(value).to(torch.uint8)
+                if isinstance(value, np.ndarray) and name in compact_uint8
+                else torch.from_numpy(value)
+                if isinstance(value, np.ndarray)
+                else torch.tensor(value, dtype=torch.float32)
+            )
+            for name, value in traffic.items()
+        })
         return sample
 
     def _lidar_voxels(self, scene_dir, lidar, meta, frame_meta):

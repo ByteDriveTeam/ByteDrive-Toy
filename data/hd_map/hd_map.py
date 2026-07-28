@@ -44,6 +44,8 @@ from vis.data_vis.geometry import transform_points, world_to_ego
 
 __all__ = ["HdMap", "offroad_distance_field"]
 
+_SEGMENT_GRID_CELL_M = 4.0  # 仅影响运行时索引粒度，不影响几何结果
+
 
 class HdMap:
     """车道折线地图 → ego BEV 可行驶掩码与类别/方向道路线图栅格化器。"""
@@ -62,6 +64,25 @@ class HdMap:
         self._radii = np.array(
             [np.linalg.norm(p[:, :2] - c, axis=1).max() for p, c in zip(self._polylines, self._centers)],
             dtype=np.float64)
+        # 世界系线段 AABB 稀疏索引：在线按 GT 轨迹走廊作精确安全的二次筛选。
+        # AABB 与 match_radius 相交是“点到线段可能在阈值内”的必要条件，不改变最终精确距离结果。
+        segment_counts = np.array(
+            [max(len(polyline) - 1, 0) for polyline in self._polylines], dtype=np.int64)
+        self._segment_owners = np.repeat(
+            np.arange(len(self._polylines), dtype=np.int64), segment_counts)
+        segment_starts_list = [
+            polyline[:-1, :2] for polyline in self._polylines if len(polyline) > 1]
+        segment_ends_list = [
+            polyline[1:, :2] for polyline in self._polylines if len(polyline) > 1]
+        segment_starts = (
+            np.concatenate(segment_starts_list, axis=0)
+            if segment_starts_list else np.empty((0, 2), dtype=np.float64))
+        segment_ends = (
+            np.concatenate(segment_ends_list, axis=0)
+            if segment_ends_list else np.empty((0, 2), dtype=np.float64))
+        self._segment_bounds_min = np.minimum(segment_starts, segment_ends)
+        self._segment_bounds_max = np.maximum(segment_starts, segment_ends)
+        self._segment_grids = {}
         controls = _parse_traffic_controls(arr)
         self._control_polygons = [item[0] for item in controls]
         self._control_parent_xy = np.array([item[1] for item in controls], dtype=np.float64)
@@ -125,6 +146,10 @@ class HdMap:
             return np.zeros(shape, dtype=np.float32), waypoint_valid
 
         w2e = world_to_ego(ego_pose6)
+        indices = self._centerline_candidates(
+            indices, gt_xy[gt_valid], w2e, match_radius_m)
+        if indices.size == 0:
+            return np.zeros(shape, dtype=np.float32), waypoint_valid
         polylines = [transform_points(self._polylines[index], w2e)[:, :2] for index in indices]
         distances = np.stack([
             _point_to_polyline_distances(gt_xy, polyline) for polyline in polylines
@@ -141,6 +166,41 @@ class HdMap:
         mask = np.zeros(shape, dtype=np.uint8)
         cv2.polylines(mask, curves, isClosed=False, color=1, thickness=1)
         return _distance_to_mask(mask, bev), waypoint_valid
+
+    def _centerline_candidates(self, indices, valid_gt_xy, world_to_ego_matrix, match_radius_m):
+        """以世界系线段 AABB 筛掉不可能进入匹配半径的中心线，保留精确结果的超集。"""
+        ego_xyz = np.column_stack((
+            valid_gt_xy, np.zeros(len(valid_gt_xy), dtype=np.float64)))
+        world_xy = transform_points(ego_xyz, np.linalg.inv(world_to_ego_matrix))[:, :2]
+        radius = np.nextafter(float(match_radius_m), math.inf)
+        allowed = set(indices.tolist())
+        type_key = tuple(sorted({self._line_types[index] for index in indices}))
+        segment_grid = self._segment_grids.get(type_key)
+        if segment_grid is None:
+            allowed_owners = np.isin(self._line_types, type_key)
+            indexed_segments = np.nonzero(allowed_owners[self._segment_owners])[0]
+            segment_grid = _build_segment_grid(
+                self._segment_bounds_min, self._segment_bounds_max,
+                _SEGMENT_GRID_CELL_M, indexed_segments)
+            self._segment_grids[type_key] = segment_grid
+        segment_ids = set()
+        for point in world_xy:
+            lower = np.floor((point - radius) / _SEGMENT_GRID_CELL_M).astype(np.int64)
+            upper = np.floor((point + radius) / _SEGMENT_GRID_CELL_M).astype(np.int64)
+            for cell_x in range(int(lower[0]), int(upper[0]) + 1):
+                for cell_y in range(int(lower[1]), int(upper[1]) + 1):
+                    segment_ids.update(segment_grid.get((cell_x, cell_y), ()))
+        if not segment_ids:
+            return indices[:0]
+        segment_ids = np.fromiter(segment_ids, dtype=np.int64)
+        lower = self._segment_bounds_min[segment_ids] - radius
+        upper = self._segment_bounds_max[segment_ids] + radius
+        intersects = (
+            (world_xy[:, None, :] >= lower[None])
+            & (world_xy[:, None, :] <= upper[None])
+        ).all(axis=2).any(axis=0)
+        owners = np.unique(self._segment_owners[segment_ids[intersects]])
+        return owners[np.fromiter((owner in allowed for owner in owners), dtype=bool)]
 
     def _nearby_indices(self, ego_pose6, bev, line_types=None):
         """用折线外接圆筛出与当前 BEV 相交的地图折线索引。"""
@@ -224,6 +284,20 @@ def _point_to_polyline_distances(points, polyline):
     ratios = np.clip((relative * vectors[None]).sum(2) / squared[None], 0.0, 1.0)
     closest = starts[None] + ratios[..., None] * vectors[None]
     return np.sqrt(np.square(points[:, None] - closest).sum(2).min(1))
+
+
+def _build_segment_grid(bounds_min, bounds_max, cell_size, segment_ids=None):
+    """把世界系线段 AABB 放入稀疏均匀网格，供逐帧小半径精确候选查询。"""
+    grid = {}
+    segment_ids = range(len(bounds_min)) if segment_ids is None else segment_ids
+    for segment_id in segment_ids:
+        lower, upper = bounds_min[segment_id], bounds_max[segment_id]
+        cell_min = np.floor(lower / cell_size).astype(np.int64)
+        cell_max = np.floor(upper / cell_size).astype(np.int64)
+        for cell_x in range(int(cell_min[0]), int(cell_max[0]) + 1):
+            for cell_y in range(int(cell_min[1]), int(cell_max[1]) + 1):
+                grid.setdefault((cell_x, cell_y), []).append(segment_id)
+    return {cell: tuple(segment_ids) for cell, segment_ids in grid.items()}
 
 
 def _polyline_pixels(polyline, bev):

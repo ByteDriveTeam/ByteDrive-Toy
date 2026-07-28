@@ -6,8 +6,8 @@
       data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
       train.optimizer, train.loop, train.checks.run_checks
 读取配置:
-    train.device / epochs / batch_size / num_workers / shuffle / drop_last / pin_memory /
-        persistent_workers / ckpt_dir / resume
+    train.device / epochs / batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
+        shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer / ckpt_dir / resume
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
 from config import load_config
 from data.driving_dataset import DrivingDataset
@@ -44,6 +44,27 @@ _TASKS = {
     "perception": (PerceptionModel, PerceptionDataset, train_one_epoch),
     "driving": (DrivingModel, DrivingDataset, train_driving_epoch),
 }
+
+
+def _compact_collate(samples):
+    """逐键拼批；常量视场掩码只保留一份，避免先堆叠再丢弃。"""
+    first = samples[0]
+    return {
+        name: first[name] if name == "inview"
+        else default_collate([sample[name] for sample in samples])
+        for name in first
+    }
+
+
+def _compile_for_cuda(model, cfg, device) -> None:
+    """仅在云端 CUDA 训练按配置原位编译，保持 state_dict/自定义方法接口不变。"""
+    if not cfg.train.compile or device.type != "cuda":
+        return
+    if not hasattr(model, "compile"):
+        print("[train] 当前 PyTorch 不支持 nn.Module.compile，继续 eager 训练")
+        return
+    model.compile()
+    print("[train] 已启用 torch.compile（首次迭代包含编译冷启动）")
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -248,14 +269,23 @@ def main(argv=None) -> None:
         _load_perception_weights(model, args.perception_ckpt)
     batch_sampler = SceneBatchSampler(
         dataset.frame_index, cfg.train.batch_size, cfg.train.shuffle, cfg.train.drop_last)
-    loader = DataLoader(
-        dataset, batch_sampler=batch_sampler, num_workers=cfg.train.num_workers,
-        pin_memory=cfg.train.pin_memory and device.type == "cuda",
-        persistent_workers=cfg.train.persistent_workers and cfg.train.num_workers > 0)
+    loader_kwargs = {
+        "batch_sampler": batch_sampler,
+        "num_workers": cfg.train.num_workers,
+        "pin_memory": cfg.train.pin_memory and device.type == "cuda",
+        "persistent_workers": cfg.train.persistent_workers and cfg.train.num_workers > 0,
+        "collate_fn": _compact_collate,
+    }
+    if cfg.train.num_workers > 0:
+        loader_kwargs.update(
+            prefetch_factor=cfg.train.prefetch_factor,
+            in_order=cfg.train.in_order)
+    loader = DataLoader(dataset, **loader_kwargs)
     optimizer = build_optimizer(model, cfg)
 
     ckpt_dir = _resolve_ckpt_dir(cfg.train.ckpt_dir, args.task)
     start_epoch = _maybe_resume(model, optimizer, ckpt_dir, cfg.train.resume, args.resume)
+    _compile_for_cuda(model, cfg, device)
 
     for epoch in range(start_epoch, cfg.train.epochs):
         stats = epoch_fn(model, loader, optimizer, cfg, device)

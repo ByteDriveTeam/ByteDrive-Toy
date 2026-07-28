@@ -8,10 +8,11 @@
     - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size) -> Dataset
         .frame_index -> list[(Path, int)]       # (场景目录, 帧号)
         .reader(scene_dir) -> SceneReader        # 惰性构造并按 worker 缓存
-        .normalize_rgb(bgr) -> Tensor            # BGR uint8 → DINO 归一化 [3,H,W]
+        .bgr_uint8(bgr) -> Tensor                # BGR uint8 → 紧凑 [3,H,W]，设备侧再归一化
+        .normalize_rgb(bgr) -> Tensor            # 兼容可视化/独立调用的 DINO 归一化
         .scene_num_frames(scene_dir) -> int      # 轻量读 LMDB num_frames
 说明: 把感知/驾驶两个单帧数据集的公共读取逻辑收拢一处（DRY，规范 §8）：索引期只用 LMDB 轻量读 num_frames、
-      不建 VideoCapture；RGB 由 BGR→RGB、/255、DINO ImageNet 归一化并保持原生分辨率（与 DINOv3 兼容）；
+      不建 VideoCapture；训练数据以 BGR uint8 保持原生分辨率紧凑返回，另保留兼容独立调用的 DINO 归一化助手；
       SceneReader 惰性按需构造并在每个 worker 内做有界 LRU，淘汰时显式关闭视频与 LMDB，避免场景数增长导致 OOM。
       cv2.VideoCapture 非跨进程安全，故缓存不会跨 worker 共享。子类只需实现 __getitem__。
 """
@@ -75,6 +76,11 @@ class SingleFrameSceneBase(Dataset):
         rgb = torch.from_numpy(np.ascontiguousarray(bgr[:, :, ::-1])).float() / 255.0
         rgb = rgb.permute(2, 0, 1)
         return (rgb - self._mean) / self._std
+
+    @staticmethod
+    def bgr_uint8(bgr: np.ndarray) -> torch.Tensor:
+        """保留解码器原生 BGR uint8，仅转通道布局；归一化延后到设备侧。"""
+        return torch.from_numpy(writable_contiguous(bgr)).permute(2, 0, 1)
 
     @staticmethod
     def scene_num_frames(scene_dir: Path) -> int:

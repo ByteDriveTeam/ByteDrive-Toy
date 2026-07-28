@@ -51,6 +51,9 @@ class BevQueryEmbedding(nn.Module):
         self.register_buffer("grid_xy", _build_grid_xy(
             x_min_m, x_max_m, y_min_m, y_max_m, height, width))
         self.register_buffer("z_samples", _build_z_samples(z_min_m, z_max_m, z_step_m))
+        # 当前帧的默认 XYZ 列恒定：只缓存非可训练几何输入；MLP 每步仍按最新权重执行。
+        self.register_buffer(
+            "base_columns", self._build_columns(self.grid_xy[None]), persistent=False)
         self.mlp = nn.Sequential(
             nn.Linear(3, mlp_hidden),
             nn.SiLU(),
@@ -61,10 +64,11 @@ class BevQueryEmbedding(nn.Module):
                 grid_xy: torch.Tensor = None) -> torch.Tensor:
         """编码默认或外部实际网格，返回纯几何 BEV 查询。"""
         check_bev_query_inputs(batch_size, device, grid_xy, self.height, self.width)
-        if grid_xy is None:
-            grid_xy = self.grid_xy[None].expand(batch_size, -1, -1, -1)
         with self._autocast(device, enabled=False):
-            columns = self._build_columns(grid_xy.float().to(device))
+            if grid_xy is None:
+                columns = self.base_columns.expand(batch_size, -1, -1, -1, -1).to(device)
+            else:
+                columns = self._build_columns(grid_xy.float().to(device))
         with self._autocast(device, enabled=True):
             query = self.mlp(columns).mean(dim=3)
         return query.permute(0, 3, 1, 2).reshape(

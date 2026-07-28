@@ -741,11 +741,15 @@ K_{13}\mathcal{L}_{stop\_crossing}
 | 优化器 | AdamW | 只接收可训练参数 |
 | `epochs` | 10 | 目标**总** epoch 数，不是本次额外训练轮数 |
 | `batch_size` | 32 | 对显存要求高，首次运行建议先用 1–4 验证 |
+| `grad_accum_steps` | 1 | 每多少个 micro-batch 更新一次；有效 batch=`batch_size × grad_accum_steps` |
 | `num_workers` | 4 | Windows 下入口已有 `if __name__ == "__main__"` 保护 |
+| `prefetch_factor` / `in_order` | 1 / false | 限制大 batch 预取量；先完成的 worker 可先返回 |
 | `data.scene_cache_size` | 2 | 每个 worker 最多常驻的场景 reader 与驾驶状态数 |
 | `shuffle` / `drop_last` | true / true | 同场景连续帧成批后打乱 batch；仅丢全局最终尾批 |
 | `pin_memory` | true | 仅 CUDA 设备实际启用锁页内存 |
 | `persistent_workers` | true | 场景缓存有界后跨 epoch 安全复用 worker |
+| `compile` | true | CUDA 训练原位启用 `torch.compile`；CPU 本地开发自动保持 eager |
+| `fused_optimizer` | true | CUDA 优先使用 fused AdamW，不支持或 CPU 时自动回退 |
 | `lr` | `1e-4` | 驾驶新增模块/感知训练基础学习率 |
 | `weight_decay` | `1e-5` | AdamW 权重衰减 |
 | `grad_clip_norm` | 0 | 0 表示关闭裁剪 |

@@ -70,8 +70,6 @@ class LidarQueryFusion(nn.Module):
             query, visual, stats, occupied, valid, self.work_dim,
             self.grid_shape, self.bev_shape)
         frame_valid = valid.to(torch.bool)
-        if not bool(frame_valid.any()):
-            return query
 
         voxel_valid = frame_valid[:, None, None, None, None]
         safe_stats = torch.where(voxel_valid, stats, torch.zeros_like(stats))

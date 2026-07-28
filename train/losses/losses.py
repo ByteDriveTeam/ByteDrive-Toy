@@ -132,6 +132,8 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     check_driving_losses_io(outputs, targets)
     w = cfg.train.driving_loss_weights
     inview = targets["inview"]  # [B,Hf,Wf]
+    if inview.ndim == 2:
+        inview = inview.unsqueeze(0).expand(outputs["risk"].shape[0], -1, -1)
 
     risk = _masked_bce(outputs["risk"][:, 0], targets["risk"], inview)
     drivable = _masked_bce(outputs["drivable"][:, 0], targets["drivable"], inview)
@@ -186,10 +188,9 @@ def _balanced_binary_loss(logits, target, valid):
     negative = (target <= 0.5).to(logits.dtype) * valid
     positive_count = positive.sum()
     negative_loss = (per * negative).sum() / negative.sum().clamp_min(_MASK_EPS)
-    if not bool(positive_count > 0):
-        return negative_loss
-    positive_loss = (per * positive).sum() / positive_count
-    return 0.5 * (positive_loss + negative_loss)
+    positive_loss = (per * positive).sum() / positive_count.clamp_min(_MASK_EPS)
+    has_positive = (positive_count > 0).to(logits.dtype)
+    return negative_loss + 0.5 * has_positive * (positive_loss - negative_loss)
 
 
 def _masked_state_ce(logits, target, valid):

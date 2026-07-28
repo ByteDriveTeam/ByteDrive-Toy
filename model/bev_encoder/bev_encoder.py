@@ -61,6 +61,7 @@ class BevEncoder(nn.Module):
             ImageSelfAttentionBlock(
                 self.work_dim, attn.num_heads, attn.mlp_ratio, be.rope_theta)
             for _ in range(be.transformer_layers))
+        self._position_cache = {}
 
     def forward(self, bev_query: torch.Tensor, image_feat: torch.Tensor,
                 previous_bev: torch.Tensor = None, previous_geometry: torch.Tensor = None,
@@ -81,7 +82,11 @@ class BevEncoder(nn.Module):
                 query = query + valid * (fused - query)
         registers = self.register_tokens.expand(b, -1, -1).to(query.dtype)
         sequence = torch.cat((registers, query), dim=1)
-        patch_positions = _patch_positions(hb, wb, query.device)
+        key = (hb, wb, query.device.type, query.device.index)
+        patch_positions = self._position_cache.get(key)
+        if patch_positions is None:
+            patch_positions = _patch_positions(hb, wb, query.device)
+            self._position_cache[key] = patch_positions
         intermediate = []
         for layer_index, layer in enumerate(self.transformer, start=1):
             sequence = layer(sequence, patch_positions)

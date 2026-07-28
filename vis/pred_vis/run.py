@@ -137,9 +137,13 @@ def main(argv=None) -> None:
     gt_list = [] if pv.show_ground_truth else None
     for idx in indices:
         sample = dataset[idx]
+        rgb = sample["rgb"].flip(0).float() / 255.0
+        normalized = (
+            rgb - torch.as_tensor(mean).view(3, 1, 1)
+        ) / torch.as_tensor(std).view(3, 1, 1)
         with torch.no_grad():
-            outputs = model(sample["rgb"].unsqueeze(0).to(device))
-        rgb_list.append(sample["rgb"].cpu().numpy() * std[:, None, None] + mean[:, None, None])
+            outputs = model(normalized.unsqueeze(0).to(device))
+        rgb_list.append(rgb.cpu().numpy())
         pred_list.append(_predictions(outputs, scale, depth_max_m))
         if gt_list is not None:
             gt_list.append(_ground_truth(sample, scale, depth_max_m))
