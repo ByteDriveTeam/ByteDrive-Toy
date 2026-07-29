@@ -483,16 +483,14 @@ flowchart TB
 | 模型 | 总参数 | 默认可训练参数 | 冻结参数 |
 | --- | ---: | ---: | ---: |
 | `PerceptionModel` | 35,195,167 | 6,502,303 | 28,692,864 |
-| `DrivingModel` | 63,954,855 | 35,261,991 | 28,692,864 |
+| `DrivingModel` | 63,886,455 | 35,193,591 | 28,692,864 |
 
-默认 `model.driving.freeze_perception=false`，因此驾驶模型的 35.26M 非冻结参数包含视觉 fusion/trunk、
+默认 `model.driving.freeze_perception=false`，因此驾驶模型的 35.19M 非冻结参数包含视觉 fusion/trunk、
 时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
-LiDAR 融合与 10Hz 新轨迹头都不改动其余既有 state-dict 键；仓库示例旧驾驶检查点在当前模型中有
-`412/432=95.37%` 的非骨干状态项形状兼容，满足默认闭环覆盖率 0.95。LiDAR 新参数与 6 项
-`trajectory_head` 参数保留构造初始化，40 点基线按当前配置重建，旧 `residual_head` 自动忽略。运行时当前帧和历史帧各编码三路图像与
-一帧 LiDAR；BEV 与各解码器计算量保持不变。下表仅保留
+发布的驾驶检查点与当前模型结构完全对齐，非骨干 state-dict 项 `385/385=100%` 形状兼容，满足默认闭环覆盖率门槛。
+运行时当前帧和历史帧各编码三路图像与一帧 LiDAR（模型只取点云 XYZ 几何统计，不使用语义标签）；BEV 与各解码器计算量保持不变。下表仅保留
 不受三目化影响的感知模型实测口径，驾驶显存应在目标硬件上按实际 batch 重新测量。
 
 | 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
@@ -851,7 +849,7 @@ ByteDrive-Toy/
 | --- | ---: | --- | --- |
 | `model.safetensors` | 109.5 MiB | DINOv3 ViT-S+/16 冻结骨干 | 构造任一模型时自动本地加载 |
 | `perception.pt` | 74.6 MiB | 感知 epoch 40；模型+优化器 | 感知推理/续训；初始化驾驶感知模块 |
-| `driving.pt` | 399.9 MiB | 驾驶 epoch 40；模型+优化器 | 驾驶推理/续训 |
+| `driving.pt` | 403.2 MiB | 驾驶 epoch 80；模型+优化器 | 驾驶推理/续训 |
 | `Town02_HD_map.npz` | 3.2 MiB | Town02 车道折线 HDMap | 生成可行驶场和越界距离场 |
 
 快速检查权重能否被当前代码识别：
@@ -936,7 +934,7 @@ python -c "from config import load_config; c=load_config(); print(c.train.device
 python -c "from model.perception_model import PerceptionModel; from config import load_config; m=PerceptionModel(load_config()); print(sum(p.numel() for p in m.parameters()))"
 ```
 
-预期第二条命令能从本地 `model/dinov3-vits16plus-pretrain-lvd1689m/` 加载权重，并输出 `35128815`。
+预期第二条命令能从本地 `model/dinov3-vits16plus-pretrain-lvd1689m/` 加载权重，并输出 `35195167`。
 
 ### 2. 采集少量 CARLA 数据
 
@@ -1002,7 +1000,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 ```yaml
 # config/continue_driving.yaml
 train:
-  epochs: 20
+  epochs: 90
 ```
 
 ```powershell
