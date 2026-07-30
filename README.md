@@ -765,7 +765,7 @@ K_{13}\mathcal{L}_{stop\_crossing}
 训练器把 `cfg.train.ckpt_dir` 再按任务名分目录：
 
 ```text
-train/checkpoints/
+train/ckpt/
 ├── perception/epoch_001.pt
 └── driving/epoch_001.pt
 ```
@@ -805,7 +805,7 @@ train/checkpoints/
 - 每个 epoch 运行验证与保存 best checkpoint；
 - 计算 IoU、深度误差、ADE/FDE、碰撞率等任务指标；
 - 配置学习率 scheduler、warmup、EMA 或早停；
-- 做图像增强或时间序列建模。
+- 做图像增强或超过当前双帧范围的长时序建模。
 
 因此正式实验应先按场景划分数据，避免相邻帧跨集合泄漏，并在独立脚本中调用已有 evaluate 函数或扩展训练入口。
 
@@ -840,7 +840,8 @@ ByteDrive-Toy/
 │           └── driving.pt
 └── data/
     └── map/
-        └── Town02_HD_map.npz
+        ├── Town02_HD_map.npz
+        └── Town05_HD_map.npz
 ```
 
 ### 文件作用与当前版本信息
@@ -851,6 +852,7 @@ ByteDrive-Toy/
 | `perception.pt` | 74.6 MiB | 感知 epoch 40；模型+优化器 | 感知推理/续训；初始化驾驶感知模块 |
 | `driving.pt` | 403.2 MiB | 驾驶 epoch 80；模型+优化器 | 驾驶推理/续训 |
 | `Town02_HD_map.npz` | 3.2 MiB | Town02 车道折线 HDMap | 生成可行驶场和越界距离场 |
+| `Town05_HD_map.npz` | 31.1 MiB | Town05 车道折线 HDMap | 当前默认 `Town05_Opt` 采集数据的驾驶监督 |
 
 快速检查权重能否被当前代码识别：
 
@@ -917,9 +919,10 @@ carla_collector:
 ### CARLA 与编码器前置条件
 
 - 启动 CARLA 0.9.15 服务端，并确保 `127.0.0.1:2000` 可连接；
-- 项目采集器只接受 `*_Opt` 地图，默认 `Town02_Opt`；
+- 项目采集器只接受 `*_Opt` 地图，当前默认 `Town05_Opt`；
 - PyAV 构建需要可用的 `libx265` 编码器才能写 H.265；若编码失败，先检查 `av.codec.Codec('libx265','w')`；
-- 驾驶数据集需要匹配地图的 `data/map/{Town}_HD_map.npz`。
+- 驾驶数据集需要匹配地图的 `data/map/{Town}_HD_map.npz`；默认配置因此需要
+  `data/map/Town05_HD_map.npz`。
 
 ---
 
@@ -955,7 +958,7 @@ python data/carla_data_collector/collector/run.py --config config/default.yaml -
 ### 3. 浏览原始场景
 
 ```powershell
-python vis/data_vis/run.py --scene 0
+python -m vis.data_vis.run --scene 0
 ```
 
 `--scene` 可以是整数索引、`scene_000000` 场景名或完整目录路径。
@@ -965,13 +968,13 @@ HUD 会单列当前相关信号灯的来源、actor id、灯态与沿路线距�
 ### 4. 训练感知模型
 
 ```powershell
-python train/run.py --task perception
+python -m train.run --task perception
 ```
 
 训练结果保存到：
 
 ```text
-train/checkpoints/perception/epoch_001.pt
+train/ckpt/perception/epoch_001.pt
 ...
 ```
 
@@ -984,7 +987,7 @@ train:
 ```
 
 ```powershell
-python train/run.py --task perception --env continue_perception --resume train/ckpt/perception/perception.pt
+python -m train.run --task perception --env continue_perception --resume train/ckpt/perception/perception.pt
 ```
 
 ### 5. 用感知权重初始化并训练驾驶模型
@@ -992,7 +995,7 @@ python train/run.py --task perception --env continue_perception --resume train/c
 全新阶段 2 实验应先在环境覆盖中设置 `train.resume: false`，然后：
 
 ```powershell
-python train/run.py --task driving --env fresh_driving --perception-ckpt train/ckpt/perception/perception.pt
+python -m train.run --task driving --env fresh_driving --perception-ckpt train/ckpt/perception/perception.pt
 ```
 
 从下载的驾驶检查点恢复：
@@ -1004,7 +1007,7 @@ train:
 ```
 
 ```powershell
-python train/run.py --task driving --env continue_driving --resume train/ckpt/driving/driving.pt
+python -m train.run --task driving --env continue_driving --resume train/ckpt/driving/driving.pt
 ```
 
 ### 6. 直接可视化下载的权重
@@ -1012,19 +1015,19 @@ python train/run.py --task driving --env continue_driving --resume train/ckpt/dr
 感知：
 
 ```powershell
-python vis/pred_vis/run.py --checkpoint train/ckpt/perception/perception.pt
+python -m vis.pred_vis.run --checkpoint train/ckpt/perception/perception.pt
 ```
 
 驾驶：
 
 ```powershell
-python vis/driving_vis/run.py --checkpoint train/ckpt/driving/driving.pt
+python -m vis.driving_vis.run --checkpoint train/ckpt/driving/driving.pt
 ```
 
 > [!NOTE]
-> 感知训练器实际保存到 `train/checkpoints/perception/`，而默认配置中的
-> `pred_vis.checkpoint` 当前写的是 `train/checkpoints/epoch_010.pt`。使用训练产物时请显式传
-> `--checkpoint train/checkpoints/perception/epoch_010.pt`，或在环境覆盖文件中修正路径。
+> 默认可视化配置分别指向 `train/ckpt/perception/epoch_010.pt` 和
+> `train/ckpt/driving/epoch_010.pt`，与训练器的默认输出目录一致。下载权重使用
+> `perception.pt` / `driving.pt` 文件名，因此直接使用下载权重时请像上面一样显式传 `--checkpoint`。
 
 ### 7. 运行 CARLA 闭环驾驶
 
@@ -1075,7 +1078,7 @@ model:
 运行时使用：
 
 ```powershell
-python train/run.py --task driving --env fresh_driving --perception-ckpt train/ckpt/perception/perception.pt
+python -m train.run --task driving --env fresh_driving --perception-ckpt train/ckpt/perception/perception.pt
 ```
 
 覆盖文件只需要写变化项；其余键递归继承 `default.yaml`。
@@ -1118,7 +1121,7 @@ python train/run.py --task driving --env fresh_driving --perception-ckpt train/c
 ### 原始数据交互浏览器
 
 ```powershell
-python vis/data_vis/run.py --scene scene_000000
+python -m vis.data_vis.run --scene scene_000000
 ```
 
 | 按键 | 功能 |
@@ -1139,7 +1142,7 @@ python vis/data_vis/run.py --scene scene_000000
 ### 感知预测可视化
 
 ```powershell
-python vis/pred_vis/run.py `
+python -m vis.pred_vis.run `
   --checkpoint train/ckpt/perception/perception.pt
 ```
 
@@ -1149,7 +1152,7 @@ python vis/pred_vis/run.py `
 ### 驾驶预测可视化
 
 ```powershell
-python vis/driving_vis/run.py `
+python -m vis.driving_vis.run `
   --checkpoint train/ckpt/driving/driving.pt
 ```
 
@@ -1180,12 +1183,20 @@ cfg = load_config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = PerceptionModel(cfg).to(device).eval()
-ckpt = torch.load("train/ckpt/perception/perception.pt", map_location=device, weights_only=False)
+ckpt = torch.load(
+    "train/ckpt/perception/perception.pt",
+    map_location="cpu",
+    weights_only=True,
+    mmap=True,
+)
 model.load_state_dict(ckpt["model"], strict=False)  # DINO 骨干键由本地目录加载
 
 sample = PerceptionDataset(cfg)[0]
+mean = torch.tensor(cfg.data.dataset.dino_mean).view(3, 1, 1)
+std = torch.tensor(cfg.data.dataset.dino_std).view(3, 1, 1)
+rgb = (sample["rgb"].flip(0).float() / 255.0 - mean) / std  # BGR uint8 → 归一化 RGB
 with torch.no_grad():
-    output = model(sample["rgb"].unsqueeze(0).to(device))
+    output = model(rgb.unsqueeze(0).to(device))
 
 print(output["semantic"].shape)  # [1, 29, 384, 768]
 print(output["depth"].shape)     # [1, 2, 384, 768]
@@ -1211,19 +1222,36 @@ compatible = {name: value for name, value in ckpt["model"].items()
 model.load_state_dict(compatible, strict=False)
 
 sample = DrivingDataset(cfg)[0]
-inputs = [sample[name].unsqueeze(0).to(device) for name in
-          ("rgb", "intrinsics", "extrinsics", "target_point", "ego_velocity", "previous_rgb",
-           "previous_to_current", "previous_valid")]
+mean = torch.tensor(cfg.data.dataset.dino_mean).view(1, 3, 1, 1)
+std = torch.tensor(cfg.data.dataset.dino_std).view(1, 3, 1, 1)
+
+def normalize_bgr(images):
+    return (images.flip(1).float() / 255.0 - mean) / std
 
 with torch.no_grad():
-    output = model(*inputs)
+    output = model(
+        normalize_bgr(sample["rgb"]).unsqueeze(0).to(device),
+        sample["intrinsics"].unsqueeze(0).to(device),
+        sample["extrinsics"].unsqueeze(0).to(device),
+        sample["target_point"].unsqueeze(0).to(device),
+        sample["ego_velocity"].unsqueeze(0).to(device),
+        normalize_bgr(sample["previous_rgb"]).unsqueeze(0).to(device),
+        sample["previous_to_current"].unsqueeze(0).to(device),
+        sample["previous_valid"].unsqueeze(0).to(device),
+        lidar_stats=sample["lidar_stats"].unsqueeze(0).to(device),
+        lidar_occupied=sample["lidar_occupied"].unsqueeze(0).to(device),
+        lidar_valid=sample["lidar_valid"].unsqueeze(0).to(device),
+        previous_lidar_stats=sample["previous_lidar_stats"].unsqueeze(0).to(device),
+        previous_lidar_occupied=sample["previous_lidar_occupied"].unsqueeze(0).to(device),
+        previous_lidar_valid=sample["previous_lidar_valid"].unsqueeze(0).to(device),
+    )
 
 print(output["risk"].shape)             # [1, 1, 256, 256]
 print(output["lane_class_logits"].shape)  # [1, 5, 256, 256]
 print(output["lane_direction"].shape)     # [1, 2, 256, 256]
 print(output["stop_line_logits"].shape)   # [1, 1, 256, 256]
 print(output["traffic_light_state_logits"].shape)  # [1, 3, 256, 256]
-print(output["trajectories"].shape)     # [1, 8, 8, 2]
+print(output["trajectories"].shape)     # [1, 8, 40, 2]
 print(output["behavior_logits"].shape)  # [1, 8]
 ```
 
@@ -1274,8 +1302,7 @@ ByteDrive-Toy/
 │   ├── loop/                         # 训练与评估循环
 │   ├── losses/                       # 感知/驾驶多任务损失
 │   ├── optimizer/                    # AdamW 与差分学习率分组
-│   ├── ckpt/                         # 下载的示例预训练检查点
-│   └── checkpoints/                  # 本地训练输出（默认）
+│   └── ckpt/                         # 下载权重及本地训练输出（按 perception/driving 分目录）
 ├── vis/
 │   ├── data_vis/                     # 原始数据交互浏览器
 │   ├── pred_vis/                     # 感知预测/GT 对照
@@ -1351,24 +1378,25 @@ model/dinov3-vits16plus-pretrain-lvd1689m/model.safetensors
 <details>
 <summary><strong>3. 驾驶数据集提示缺少 HDMap</strong></summary>
 
-场景元数据中的 `Town02_Opt` 会去掉 `_Opt`，解析为 `data/map/Town02_HD_map.npz`。为使用其他地图，
-提供同格式 `TownXX_HD_map.npz`，或覆盖 `data.driving.map_dir/map_name_template`。
+场景元数据中的地图名会去掉 `_Opt` 后解析，例如当前默认 `Town05_Opt` 对应
+`data/map/Town05_HD_map.npz`，`Town02_Opt` 对应 `data/map/Town02_HD_map.npz`。为使用其他地图，
+请提供同格式 `TownXX_HD_map.npz`，或覆盖 `data.driving.map_dir/map_name_template`。
 </details>
 
 <details>
 <summary><strong>4. DataLoader worker / VideoCapture 在 Windows 上异常</strong></summary>
 
-请从 `python train/run.py ...` 的正式入口运行，不要在没有 `__main__` 保护的临时脚本顶层创建多 worker
+请从仓库根目录以 `python -m train.run ...` 的正式入口运行，不要在没有 `__main__` 保护的临时脚本顶层创建多 worker
 DataLoader。排查时先把 `train.num_workers` 设为 0。
 </details>
 
 <details>
 <summary><strong>5. 感知可视化找不到默认检查点</strong></summary>
 
-训练器保存到 `train/checkpoints/perception/epoch_XXX.pt`；显式传：
+训练器保存到 `train/ckpt/perception/epoch_XXX.pt`；显式传：
 
 ```powershell
-python vis/pred_vis/run.py --checkpoint train/checkpoints/perception/epoch_010.pt
+python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 ```
 </details>
 
