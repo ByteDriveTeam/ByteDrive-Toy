@@ -40,7 +40,8 @@
       HD Map 触发区与未来专家路线走廊相交算法，无需迁移历史 LMDB。
       目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系；
       当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
-      风险场由 GT 深度反投影包络；可行驶场先由 HD 地图按位姿栅格化，再扣除由 GT 深度确认可见的
+      风险场优先由 GT 深度反投影包络、缺失时回退 LiDAR；可行驶场先由 HD 地图按位姿栅格化，再扣除由
+      深度或 LiDAR 确认可见的
       vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
       道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；GT 可靠贴近的中心线折线
       另生成米制距离场，规控主动偏离超过配置阈值的航点不参与贴线监督；分布场由 GT 航点高斯软化，视场掩码为常量
@@ -141,19 +142,27 @@ class DrivingDataset(SingleFrameSceneBase):
             [intr["fx"], intr["fy"], intr["cx"], intr["cy"]] for intr in intrinsics
         ], dtype=np.float32)
         rgb = np.stack([frame["rgb"][camera] for camera in cameras])
-        depth = np.stack([
-            np.ascontiguousarray(frame["depth"][camera]).astype(np.float32)
-            for camera in cameras
-        ])
-        semantic = np.stack([
-            np.ascontiguousarray(frame["semantic"][camera]) for camera in cameras
-        ])
+        depth = (
+            np.stack([
+                np.ascontiguousarray(frame["depth"][camera]).astype(np.float32)
+                for camera in cameras
+            ])
+            if all(camera in frame["depth"] for camera in cameras) else None
+        )
+        semantic = (
+            np.stack([
+                np.ascontiguousarray(frame["semantic"][camera]) for camera in cameras
+            ])
+            if all(camera in frame["semantic"] for camera in cameras) else None
+        )
 
         pose = [float(v) for v in frame["ego"]["transform"]]
         world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
         previous_meta = previous_meta or frame["meta"]
         previous_rgb = previous_rgb if previous_rgb is not None else rgb
         previous_lidar = reader.lidar(previous_idx) if previous_valid else frame["lidar"]
+        lidar_points, lidar_object_ids = self._lidar_target_points(
+            frame["lidar"], meta, frame["meta"])
         lidar_stats, lidar_occupied, lidar_valid = self._lidar_voxels(
             scene_dir, frame["lidar"], meta, frame["meta"])
         previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid = \
@@ -182,7 +191,8 @@ class DrivingDataset(SingleFrameSceneBase):
             red_light_relevant=bool(traffic["red_stop_valid"]))
 
         risk = dt.risk_field(
-            depth, intrinsics4, extrinsics, self._bev, self._fov, self._depth_max_m)
+            depth, intrinsics4, extrinsics, self._bev, self._fov, self._depth_max_m,
+            lidar_points=lidar_points)
         map_drivable = hd_map.drivable_bev(
             pose, self._bev, self._cfg_data.lane_half_width_m)
         lane_cfg = self._cfg_data.lane_map
@@ -194,7 +204,8 @@ class DrivingDataset(SingleFrameSceneBase):
             lane_cfg.centerline_match_radius_m)
         box_occupancy = dt.visible_moving_box_occupancy(
             frame["bboxes"], depth, intrinsics, pose, extrinsics,
-            self._bev, self._depth_max_m, self._box_min_visible_pixels)
+            self._bev, self._depth_max_m, self._box_min_visible_pixels,
+            lidar_points=lidar_points, lidar_object_ids=lidar_object_ids)
         drivable = map_drivable * (1.0 - box_occupancy)
         offroad_distance = offroad_distance_field(drivable, self._bev)
         distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
@@ -261,6 +272,24 @@ class DrivingDataset(SingleFrameSceneBase):
             xyz, extrinsic, self._ego_box(frame_meta),
             self._bev_geometry, self._lidar_voxel_size)
         return stats, occupied, 1.0
+
+    def _lidar_target_points(self, lidar, meta, frame_meta):
+        """把原始 LiDAR 转到 ego 系并剔除自车点，供监督目标在缺深度时回退。"""
+        extrinsic = meta.get("lidar_extrinsic")
+        if lidar is None or extrinsic is None:
+            return None, None
+        points = np.stack((lidar["x"], lidar["y"], lidar["z"]), axis=1).astype(
+            np.float64, copy=False)
+        points = points + np.asarray(extrinsic, dtype=np.float64)
+        ego_box = self._ego_box(frame_meta)
+        box_transform = np.asarray(ego_box["transform"], dtype=np.float64)
+        box_local = (points - box_transform[:3, 3]) @ box_transform[:3, :3]
+        keep = np.any(np.abs(box_local) > np.asarray(ego_box["extent"]), axis=1)
+        object_ids = (
+            np.asarray(lidar["obj_idx"])[keep]
+            if lidar.dtype.names is not None and "obj_idx" in lidar.dtype.names else None
+        )
+        return points[keep], object_ids
 
     @staticmethod
     def _ego_box(frame_meta):

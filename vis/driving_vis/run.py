@@ -16,7 +16,7 @@
 对外接口:
     - main(argv=None) -> None      # 命令行入口
 说明: 复用 DrivingDataset 逐帧取模型输入与 GT 场/轨迹（同一编码路径，保证预测与 GT 口径一致），另经其 reader
-      读同帧原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，RGB/Seg/Depth 行内均按左/前/右拼接，
+      读取同帧可用的原始 Seg/Depth 展示。选定场景取前 max_frames 帧，每列一帧，可用透视模态按左/前/右拼接，
       其后展示 GT/预测
       的风险/可行驶/分布场、带方向箭头的道路线图、停止线/灯态及叠加轨迹 BEV（俯视）；GT 交通控制面板同时标明
       CARLA 原生车道拓扑或旧版 HD Map 回退来源。加载驾驶权重时只接收当前
@@ -223,20 +223,24 @@ def _accumulate_frame(dataset, idx, model, device, cfg, dv, cameras, bev, fov, m
 
 
 def _append_perspective_panels(sample, frame, cameras, dv, panels):
-    """按左/前/右拼接三路 RGB、语义和深度透视面板。"""
+    """按左/前/右拼接透视面板；Depth/Seg 仅在三路数据完整时显示。"""
     indices = [cameras.index(name) for name in ("front_left", "front", "front_right")]
     rgb = sample["rgb"].flip(1).cpu().numpy().astype(np.float32) / 255.0
     panels["rgb"].append(np.hstack([render.to_display_bgr(rgb[index]) for index in indices]))
-    panels["seg"].append(np.hstack([
-        render.colorize_semantic(np.ascontiguousarray(frame["semantic"][cameras[index]]))
-        for index in indices
-    ]))
-    panels["depth"].append(np.hstack([
-        render.colorize_depth(
-            np.ascontiguousarray(frame["depth"][cameras[index]]).astype(np.float32),
-            dv.depth_colormap, dv.depth_max_display_m, dv.depth_min_display_m, dv.depth_log)
-        for index in indices
-    ]))
+    semantic = frame.get("semantic", {})
+    if all(camera in semantic for camera in cameras):
+        panels["seg"].append(np.hstack([
+            render.colorize_semantic(np.ascontiguousarray(semantic[cameras[index]]))
+            for index in indices
+        ]))
+    depth = frame.get("depth", {})
+    if all(camera in depth for camera in cameras):
+        panels["depth"].append(np.hstack([
+            render.colorize_depth(
+                np.ascontiguousarray(depth[cameras[index]]).astype(np.float32),
+                dv.depth_colormap, dv.depth_max_display_m, dv.depth_min_display_m, dv.depth_log)
+            for index in indices
+        ]))
 
 
 def _append_field_panels(gt, pred, inview, colormap, panels):

@@ -11,14 +11,14 @@ def check_camera_calib(meta, cameras):
 
 
 def check_behavior_annotations(meta, frame, cameras):
-    """校验对象: DrivingDataset 三目输入/监督源 —— RGB、Depth、Seg、框与灯标注须存在。"""
-    missing_modalities = {
-        modality: [camera for camera in cameras if camera not in frame.get(modality, {})]
-        for modality in ("rgb", "depth", "semantic")
-    }
-    missing_modalities = {key: value for key, value in missing_modalities.items() if value}
-    if missing_modalities:
-        raise KeyError("驾驶三目输入/监督缺相机模态：{}。".format(missing_modalities))
+    """校验驾驶输入：RGB 必需；监督源须有完整 Depth 或 LiDAR；Seg 可选。"""
+    missing_rgb = [camera for camera in cameras if camera not in frame.get("rgb", {})]
+    if missing_rgb:
+        raise KeyError("驾驶输入缺 RGB 相机：{}。".format(missing_rgb))
+    has_depth = all(camera in frame.get("depth", {}) for camera in cameras)
+    has_lidar = frame.get("lidar") is not None and meta.get("lidar_extrinsic") is not None
+    if not has_depth and not has_lidar:
+        raise KeyError("驾驶监督至少需要完整三目 Depth 或 LiDAR。")
     missing_meta = [key for key in ("traffic_lights", "static_bboxes") if key not in meta]
     missing_frame = [key for key in ("bboxes", "traffic_light_states") if key not in frame]
     if missing_meta or missing_frame:

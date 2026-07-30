@@ -12,14 +12,15 @@
     - speed_accelerations(world_velocities, sim_times) -> (F,) float32   # 逐帧标量速度加速度
     - trajectory_targets(future_poses6, current_pose6, num_waypoints) -> (waypoints(K,2), valid(K))
     - behavior_targets(...) -> (8,) float32                              # 固定顺序的行为多热标签
-    - risk_field(depth_maps, intrinsics, extrinsics, bev, fov_deg, depth_max_m) -> (H,W) float32
-    - visible_moving_box_occupancy(...) -> (H,W) float32                  # 深度筛选后的运动 box BEV 占用
+    - risk_field(..., lidar_points=None) -> (H,W) float32                 # 深度优先、LiDAR 回退
+    - visible_moving_box_occupancy(...) -> (H,W) float32                  # 深度/LiDAR 筛选的运动 box 占用
     - distribution_field(waypoints, valid, bev, sigma_m) -> (H,W) float32           # GT 航点高斯软占据
 说明: BEV 为 ego 前向三目：行(H)沿 x 前向、列(W)沿 y 右向；自车位于下方中心（x=x_min 在最下行）。几何变换复用
       vis.data_vis.geometry（CARLA 左手系，已测），故 data 侧不重复实现投影。风险场把全部深度像素反投影到 ego
-      BEV 合并得表面点云，按方位角取最大观测距离作外缘线包络，cell 落在其方位包络之外（更远）即遮挡/未观测→风险。
+      BEV 合并得表面点云；缺深度时回退 ego 系 LiDAR。按方位角取最大观测距离作外缘线包络，cell 落在其方位
+      包络之外（更远）即遮挡/未观测→风险。
       可行驶区域只考虑可运动类别 vehicle/pedestrian，二者不分类、统一视为占用；先筛出与 BEV 相交的 3D 框，
-      再把 GT 深度像素反投影，框内深度点不少于配置阈值（默认 10 像素）才栅格化其 BEV 足迹。ego 与场景级
+      再以 GT 深度确认可见；缺深度时按 LiDAR actor ID/点落框确认。ego 与场景级
       traffic_sign/traffic_light/pole/static 均不参与。
       行为标签固定为「障碍停车、红灯停车、加速、直行、左转、右转、减速、静止」：静止依据速度，纵向行为依据
       帧间速度加速度，转向依据最远有效航点方位；障碍停车还要求前方本车道走廊内有动态 Agent。新数据管线可
@@ -223,6 +224,8 @@ def _has_front_agent(bboxes, current_pose6, bev, lane_half_width_m):
 def _has_visible_red_light(traffic_lights, states, static_bboxes, semantic, current_pose6,
                            intrinsics, camera_extrinsics, bev, fov_deg, params):
     """红灯 actor 状态 + 静态框联合视场/BEV + 任一路 Seg 像素判定可见红灯。"""
+    if semantic is None:
+        return False
     red_ids = {state["id"] for state in states if state.get("state") == "red"}
     red_lights = [light for light in traffic_lights if light.get("id") in red_ids]
     light_boxes = [box for box in static_bboxes if box.get("semantic") == "traffic_light"]
@@ -274,25 +277,31 @@ def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixe
     return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
 
 
-def visible_moving_box_occupancy(bboxes, depth_maps: np.ndarray, intrinsics, current_pose6,
+def visible_moving_box_occupancy(bboxes, depth_maps, intrinsics, current_pose6,
                                  camera_extrinsics, bev: BevParams, depth_max_m: float,
-                                 min_visible_pixels: int) -> np.ndarray:
-    """把任一路深度确认可见的运动类别 3D box 栅格化为 BEV 占用 `(H,W)`。
+                                 min_visible_pixels: int, lidar_points=None,
+                                 lidar_object_ids=None) -> np.ndarray:
+    """用深度或 LiDAR 确认可见的运动类别 3D box，并栅格化为 BEV 占用。
 
     参数:
         bboxes: 世界系 3D 框；仅 vehicle/pedestrian 参与，二者统一作为占用。
-        depth_maps: 三路 GT 深度图 `[V,H,W]`（米）。
+        depth_maps: 三路 GT 深度图 `[V,H,W]`（米）；非空时优先使用。
         intrinsics: 三路相机内参 dict 序列。
         current_pose6: 当前主车世界位姿。
         camera_extrinsics: 三路相机相对主车外参 `[V,6]`。
         bev: 输出 BEV 几何。
         depth_max_m: 有效监督深度上限。
         min_visible_pixels: 判为可见所需的最少框内深度像素数；配置保证不少于 10。
+        lidar_points: 深度缺失时使用的 ego 系 LiDAR 点 `[N,3]`。
+        lidar_object_ids: 可选的 LiDAR 命中 actor ID `[N]`，优先于几何点落框判断。
     返回:
-        float32 二值占用图；1 表示至少一路相机可见 box 的地面足迹。
+        float32 二值占用图；1 表示被深度或 LiDAR 确认可见 box 的地面足迹。
     """
+    camera_extrinsics = (
+        np.asarray(camera_extrinsics) if camera_extrinsics is not None else None)
+    lidar_points = None if lidar_points is None else np.asarray(lidar_points)
     check_visible_moving_box_inputs(
-        depth_maps, intrinsics, np.asarray(camera_extrinsics), min_visible_pixels)
+        depth_maps, intrinsics, camera_extrinsics, min_visible_pixels, lidar_points)
     occupancy = np.zeros((bev.height, bev.width), dtype=np.uint8)
     boxes = [box for box in bboxes if box.get("semantic") in _MOVING_BOX_SEMANTICS]
     if not boxes:
@@ -308,18 +317,50 @@ def visible_moving_box_occupancy(bboxes, depth_maps: np.ndarray, intrinsics, cur
     boxes = [box for box, keep in zip(boxes, relevant) if keep]
     ego_corners = ego_corners[relevant]
     world_corners = world_corners[relevant]
-    visible = np.zeros(len(boxes), dtype=bool)
-    for depth_m, intrinsic, extrinsic in zip(depth_maps, intrinsics, camera_extrinsics):
-        camera_to_world = transform_matrix(current_pose6) @ transform_matrix(extrinsic)
-        visible |= _visible_boxes_in_camera(
-            boxes, world_corners, depth_m, intrinsic, camera_to_world,
-            depth_max_m, min_visible_pixels)
+    if depth_maps is not None:
+        visible = np.zeros(len(boxes), dtype=bool)
+        for depth_m, intrinsic, extrinsic in zip(depth_maps, intrinsics, camera_extrinsics):
+            camera_to_world = transform_matrix(current_pose6) @ transform_matrix(extrinsic)
+            visible |= _visible_boxes_in_camera(
+                boxes, world_corners, depth_m, intrinsic, camera_to_world,
+                depth_max_m, min_visible_pixels)
+    else:
+        visible = _visible_boxes_in_lidar(
+            boxes, lidar_points, lidar_object_ids, current_pose6)
 
     for corners in ego_corners[visible]:
         rows, cols = ego_xy_to_pixel(corners[:, :2], bev)
         polygon = cv2.convexHull(np.stack((cols, rows), axis=1).round().astype(np.int32))
         cv2.fillConvexPoly(occupancy, polygon, 1)
     return occupancy.astype(np.float32)
+
+
+def _visible_boxes_in_lidar(boxes, lidar_points, lidar_object_ids, current_pose6):
+    """以语义 LiDAR actor ID 或点落入 3D 框确认可见运动框。"""
+    visible = np.zeros(len(boxes), dtype=bool)
+    if len(lidar_points) == 0:
+        return visible
+
+    object_ids = None
+    if lidar_object_ids is not None:
+        object_ids = np.asarray(lidar_object_ids).reshape(-1)
+        if len(object_ids) != len(lidar_points):
+            raise ValueError("lidar_object_ids 须与 lidar_points 等长。")
+        for index, box in enumerate(boxes):
+            actor_id = box.get("id")
+            if actor_id is not None:
+                visible[index] = bool(np.any(object_ids == int(actor_id)))
+
+    ego_to_world = transform_matrix(current_pose6)
+    for index, box in enumerate(boxes):
+        if visible[index]:
+            continue
+        box_pose = [*box["location"], *box["rotation"]]
+        ego_to_box = np.linalg.inv(transform_matrix(box_pose)) @ ego_to_world
+        local = transform_points(lidar_points, ego_to_box)
+        extent = np.asarray(box["extent"], dtype=np.float64) + 1e-3
+        visible[index] = bool(np.any(np.all(np.abs(local) <= extent, axis=1)))
+    return visible
 
 
 def _visible_boxes_in_camera(boxes, world_corners, depth_m, intrinsics, camera_to_world,
@@ -413,25 +454,36 @@ def _image_pixel_grid(hc: int, wc: int):
     return vv, uu
 
 
-def risk_field(depth_maps: np.ndarray, intrinsics, extrinsics, bev: BevParams,
-               fov_deg: float, depth_max_m: float) -> np.ndarray:
-    """三目遮挡风险场 `(H, W)`：联合深度投影外缘线包络之外即风险。
+def risk_field(depth_maps, intrinsics, extrinsics, bev: BevParams,
+               fov_deg: float, depth_max_m: float, lidar_points=None) -> np.ndarray:
+    """深度优先、LiDAR 回退的遮挡风险场；观测外缘线包络之外即风险。
 
-    把全部有效深度像素反投影到 ego BEV 得可视表面点云，按方位角分箱取每个方位的最大观测距离，构成「恰好
+    把全部有效深度像素反投影到 ego BEV；深度缺失时直接使用 ego 系 LiDAR 点。按方位角分箱取每个方位的
+    最大观测距离，构成「恰好
     包裹所有平面投影点的外缘线」。BEV cell 位于其所在方位包络之外（更远）即为遮挡/未观测→风险=1；包络之内
     （已观测的自由/表面）为 0。排除超范围/天空像素（depth>=depth_max_m），使其不把包络推到无穷。无观测点的
     方位（含视场内被完全遮挡）包络为 0，其所有 cell 记为风险。
     """
-    extrinsics = np.asarray(extrinsics)
-    check_multicamera_inputs(depth_maps, intrinsics, extrinsics)
     half = math.radians(fov_deg) * 0.5
-    projected = [
-        _project_depth_to_ego(depth, intrinsic, extrinsic, depth_max_m, half)
-        for depth, intrinsic, extrinsic in zip(depth_maps, intrinsics, extrinsics)
-    ]
-    rng = np.concatenate([item[0] for item in projected])
-    bearing = np.concatenate([item[1] for item in projected])
-    p_valid = np.concatenate([item[2] for item in projected])
+    if depth_maps is not None:
+        extrinsics = np.asarray(extrinsics)
+        check_multicamera_inputs(depth_maps, intrinsics, extrinsics)
+        projected = [
+            _project_depth_to_ego(depth, intrinsic, extrinsic, depth_max_m, half)
+            for depth, intrinsic, extrinsic in zip(depth_maps, intrinsics, extrinsics)
+        ]
+        rng = np.concatenate([item[0] for item in projected])
+        bearing = np.concatenate([item[1] for item in projected])
+        p_valid = np.concatenate([item[2] for item in projected])
+    else:
+        if lidar_points is None:
+            raise ValueError("depth_maps 与 lidar_points 至少须提供一种。")
+        lidar_points = np.asarray(lidar_points)
+        if lidar_points.ndim != 2 or int(lidar_points.shape[1]) != 3:
+            raise ValueError("lidar_points 期望 [N,3]，实际 {}。".format(
+                tuple(lidar_points.shape)))
+        rng, bearing, p_valid = _project_lidar_to_ego(
+            lidar_points, depth_max_m, half)
 
     # 每个方位箱的最大观测距离 = 外缘线包络
     r_max = np.zeros(_RISK_BEARING_BINS)
@@ -447,6 +499,17 @@ def risk_field(depth_maps: np.ndarray, intrinsics, extrinsics, bev: BevParams,
     c_bin = _bearing_bin(c_bear, half)
     risk = c_in & (c_rng > r_max[c_bin])
     return risk.astype(np.float32)
+
+
+def _project_lidar_to_ego(lidar_points, depth_max_m, half_fov):
+    """从 ego 系 LiDAR 点提取风险场所需的距离、方位与有效位。"""
+    points = lidar_points.astype(np.float64, copy=False)
+    rng = np.hypot(points[:, 0], points[:, 1])
+    bearing = np.arctan2(points[:, 1], points[:, 0])
+    finite = np.all(np.isfinite(points), axis=1)
+    valid = (finite & (rng > _RISK_MIN_DEPTH_M) & (rng < depth_max_m)
+             & (points[:, 0] > 0) & (np.abs(bearing) <= half_fov))
+    return rng, bearing, valid
 
 
 def _project_depth_to_ego(depth_m, intrinsics4, extrinsic6, depth_max_m, half_fov):

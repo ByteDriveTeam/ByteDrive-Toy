@@ -23,9 +23,16 @@ def check_multicamera_inputs(depth_maps, intrinsics, extrinsics):
             tuple(depth_maps.shape), len(intrinsics), tuple(extrinsics.shape)))
 
 
-def check_visible_moving_box_inputs(depth_maps, intrinsics, extrinsics, min_visible_pixels):
+def check_visible_moving_box_inputs(depth_maps, intrinsics, extrinsics, min_visible_pixels,
+                                    lidar_points=None):
     """校验对象: visible_moving_box_occupancy 入参 —— 三目几何一致且可见阈值不少于 10 像素。"""
-    check_multicamera_inputs(depth_maps, intrinsics, extrinsics)
+    if depth_maps is not None:
+        check_multicamera_inputs(depth_maps, intrinsics, extrinsics)
+    elif lidar_points is None:
+        raise ValueError("depth_maps 与 lidar_points 至少须提供一种。")
+    elif lidar_points.ndim != 2 or int(lidar_points.shape[1]) != 3:
+        raise ValueError("lidar_points 期望 [N,3]，实际 {}。".format(
+            tuple(lidar_points.shape)))
     if min_visible_pixels < 10:
         raise ValueError("min_visible_pixels 必须 >= 10，实际 {}。".format(min_visible_pixels))
 
@@ -45,5 +52,5 @@ def check_behavior_inputs(waypoints, valid, semantic):
         raise ValueError("waypoints 期望 [K,2]，实际 {}。".format(tuple(waypoints.shape)))
     if valid.ndim != 1 or len(valid) != len(waypoints):
         raise ValueError("valid 期望 [K] 且与航点同长度，实际 {}。".format(tuple(valid.shape)))
-    if semantic.ndim != 3:
+    if semantic is not None and semantic.ndim != 3:
         raise ValueError("semantic 期望三维 Seg (V,H,W)，实际 {}。".format(tuple(semantic.shape)))
