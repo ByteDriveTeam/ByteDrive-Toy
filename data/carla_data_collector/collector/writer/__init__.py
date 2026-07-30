@@ -6,7 +6,8 @@
 对外接口:
     - LmdbWriter(...)         # 场景 LMDB 写入器
     - compact_lmdb(...)       # 逐键值校验后安全压实 LMDB
-    - read_scene_route(lmdb_path)   # 读回场景路线
+    - read_scene_route(lmdb_path)       # 读回场景路线
+    - read_scene_map_route(lmdb_path)   # 读回场景地图与路线
     - pack_array / unpack_array     # 数组<->字节序列化
 说明: 跨模块统一 `from collector.writer import ...`；实现见 writer.py（无校验）。
 """
@@ -15,6 +16,7 @@ from collector.writer.writer import (
     LmdbWriter,
     compact_lmdb,
     pack_array,
+    read_scene_map_route,
     read_scene_route,
     unpack_array,
 )
@@ -22,6 +24,7 @@ from collector.writer.writer import (
 __all__ = [
     "LmdbWriter",
     "compact_lmdb",
+    "read_scene_map_route",
     "read_scene_route",
     "pack_array",
     "unpack_array",

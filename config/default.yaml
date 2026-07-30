@@ -22,7 +22,8 @@ carla_collector:
 
   # 仿真世界
   simulation:
-    map: Town05_Opt          # 仅支持 Opt 地图
+    maps:                    # 要采集的 Opt 地图及各自本次运行的场景数；0 表示遍历该地图全部合法路线
+      Town05_Opt: 0
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
 
@@ -31,7 +32,6 @@ carla_collector:
     min_distance_m: 80.0
     max_distance_m: 300.0
     similarity_threshold_m: 20.0  # 两路线起点、终点的平面距离均不超过此值时只保留一条；0 关闭
-    max_scenes: 0              # 限制路线（行驶）条数上限，0 表示遍历全部合法组合；注意每条行驶可能切成多个场景段
     queue_seed: 20260617       # 组合随机排序的种子（保证队列可复现）
 
   # 交通流（TrafficManager 控制）

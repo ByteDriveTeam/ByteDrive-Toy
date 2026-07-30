@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | ① | BehaviorAgent 控主车、TrafficManager 控交通流 | `worker/actors.py`：主车挂 BehaviorAgent；车流交 TM 自动驾驶 |
 | ② | 行人必须在可行走范围生成 | 生成点取自 `world.get_random_location_from_navigation()`（导航网格）；`WalkerCrowd` 逐 tick 检测到达并重派新目标，使行人全程持续漫游 |
-| ③ | 预读地图可达点，两两组合为起/终点，按距离过滤、剔除相似路线、成队列依次跑且不重复 | `collector/routes/routes.py`：N×N 距离矩阵向量化，保留 min≤d≤max 的有序对；按 `queue_seed` 随机排序后，起终点均落在 `similarity_threshold_m` 邻域内的同向路线只保留一条 |
+| ③ | 按配置逐地图采集；预读当前地图可达点，两两组合为起/终点，按距离过滤、剔除相似路线、成队列依次跑且不重复 | `simulation.maps` 配置地图名与各自场景数；`collector/routes/routes.py` 将 N×N 距离矩阵向量化，保留 min≤d≤max 的有序对；按 `queue_seed` 随机排序后，起终点均落在 `similarity_threshold_m` 邻域内的同向路线只保留一条 |
 | ④ | 自动循环；每场景重载地图；seed 每场景随机且记录；碰撞丢弃该场景数据但不跳过组合，换种子重试 | `collector/orchestrator.py` + `worker/session.py`：逐场景 `load_world` 重置；碰撞→丢弃+换 seed 重试、队列不前进（上限 `collision.max_retries_per_route`） |
 | ⑤ | 天气随机 | `worker/session.py` 枚举本机 CARLA 内置天气预设；`collector/scenarios.py` 随机选取并记录预设名，经 `run_scene` 下发；worker 据名应用 |
 | ⑥ | 明确相机系统：相机数量、各相机 FOV 与外参可配；同一视角各模态共享参数；各传感器模态可单独开关；默认 6 视、H384×W768 | `worker/sensors.py`：每个 rig 视角按 `cameras.modalities` 开关派生 RGB/Depth/语义/光流相机；各视角内参由自身 FOV+分辨率推导；6 视见 `config` |
@@ -149,6 +149,9 @@ data/carla_data_collector/
   `v1` 忽略已知损坏的原生关联并启用旧 HD Map 几何回退，`v2` 信任该字段及其 `valid=false` 结论。
 - **可复现**：`tm.set_random_device_seed(seed)` + Python/np 随机种子，seed 随场景元数据落盘。
 - **碰撞**：碰撞传感器置标志；命中即丢弃整场景缓冲、换新 seed 重跑同一路线，队列不前进，超重试上限则跳过该路线。
+- **多地图计划**：`carla_collector.simulation.maps` 是“地图名 → 本次场景数”的有序映射。采集器按配置顺序切换地图，
+  分别建立路线队列；值为 `0` 时遍历该地图全部合法路线。`--max-scenes N` 仅用于临时调试，会统一覆盖每张地图的数量。
+  落盘 `meta.map` 记录实际地图，断点续采也按地图分别维护已采路线。
 - **路线过滤**：先用起终点直线距离筛选候选（实际行驶路径由 BehaviorAgent 规划），再按固定随机顺序贪心保留代表路线；
   两条同向路线的起点平面距离和终点平面距离都不超过 `route.similarity_threshold_m` 时视为相似，反向路线不合并，
   配为 `0` 可关闭相似路线剔除。断点续采时，已落盘路线优先作为代表，重复或相似的新候选都会被排除。
@@ -170,3 +173,13 @@ data/carla_data_collector/
 ```
 
 参数可调项全部在 `config/default.yaml`；环境差异用 `config/<env>.yaml` 覆盖（`--env <name>`）。
+
+例如只在 Town01 跑 3 个场景、Town05 跑 8 个场景：
+
+```yaml
+carla_collector:
+  simulation:
+    maps:
+      Town01_Opt: 3
+      Town05_Opt: 8
+```

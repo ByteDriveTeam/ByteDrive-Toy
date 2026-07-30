@@ -70,6 +70,31 @@ def read_scene_route(lmdb_path):
         env.close()
 
 
+def read_scene_map_route(lmdb_path):
+    """读取场景地图与路线键，返回 ``(map, start_idx, end_idx)``。
+
+    供多地图断点续采按地图隔离路线索引。旧场景缺少地图、库不可读或路线字段不完整时
+    返回 None；保留 :func:`read_scene_route` 的原接口供其他调用方使用。
+    """
+    try:
+        env = lmdb.open(str(lmdb_path), readonly=True, subdir=True, lock=False)
+    except lmdb.Error:
+        return None
+    try:
+        with env.begin() as txn:
+            blob = txn.get(_key("meta"))
+        if blob is None:
+            return None
+        meta = msgpack.unpackb(blob, raw=False)
+        route = meta.get("route") or {}
+        map_name = meta.get("map")
+        if not map_name or "start_idx" not in route or "end_idx" not in route:
+            return None
+        return (str(map_name), int(route["start_idx"]), int(route["end_idx"]))
+    finally:
+        env.close()
+
+
 def _verify_lmdb_equal(source_path, compact_path):
     """逐键、逐值校验两个 LMDB 完全一致；不解包数组，避免额外峰值内存。"""
     source = lmdb.open(

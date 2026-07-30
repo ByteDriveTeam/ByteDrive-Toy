@@ -36,7 +36,7 @@ class IpcCfg:
 
 @dataclass
 class SimulationCfg:
-    map: str
+    maps: Dict[str, int]
     fixed_delta_seconds: float
     warmup_ticks: int
 
@@ -46,7 +46,6 @@ class RouteCfg:
     min_distance_m: float
     max_distance_m: float
     similarity_threshold_m: float
-    max_scenes: int
     queue_seed: int
 
 
@@ -721,18 +720,22 @@ def validate_config(cfg):
     assert cc.ipc.arena_size_mb > 0, "ipc.arena_size_mb 必须 > 0"
     assert cc.ipc.slot_count > 0, "ipc.slot_count 必须 > 0"
 
-    # 校验对象: simulation.fixed_delta_seconds / warmup_ticks
+    # 校验对象: simulation.maps / fixed_delta_seconds / warmup_ticks
+    assert cc.simulation.maps, "simulation.maps 至少需要配置一张地图"
+    assert all(isinstance(name, str) and name.endswith("_Opt")
+               for name in cc.simulation.maps), \
+        "simulation.maps 中的地图名必须是非空 Opt 地图名（以 _Opt 结尾）"
+    assert all(isinstance(count, int) and not isinstance(count, bool) and count >= 0
+               for count in cc.simulation.maps.values()), \
+        "simulation.maps 中每张地图的场景数必须是 >= 0 的整数（0 表示遍历全部路线）"
     assert cc.simulation.fixed_delta_seconds > 0, "simulation.fixed_delta_seconds 必须 > 0"
     assert cc.simulation.warmup_ticks >= 0, "simulation.warmup_ticks 必须 >= 0"
-    # 校验对象: simulation.map —— 仅支持 Opt 地图（规避静态车辆图层 API 问题）
-    assert cc.simulation.map.endswith("_Opt"), "simulation.map 必须是 Opt 地图（以 _Opt 结尾）"
 
-    # 校验对象: route.min_distance_m/max_distance_m/similarity_threshold_m/max_scenes
+    # 校验对象: route.min_distance_m/max_distance_m/similarity_threshold_m
     assert 0 < cc.route.min_distance_m < cc.route.max_distance_m, \
         "route 需满足 0 < min_distance_m < max_distance_m"
     assert cc.route.similarity_threshold_m >= 0, \
         "route.similarity_threshold_m 必须 >= 0（0 表示关闭相似路线剔除）"
-    assert cc.route.max_scenes >= 0, "route.max_scenes 必须 >= 0（0 表示全部）"
 
     # 校验对象: traffic 数量与奔跑比例
     assert cc.traffic.num_vehicles >= 0 and cc.traffic.num_walkers >= 0, \

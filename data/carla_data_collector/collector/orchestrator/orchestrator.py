@@ -27,7 +27,7 @@ from collector import scenarios
 from collector.encode import encode_camera
 from collector.routes import build_route_queue
 from collector.worker_proc import WorkerProcess
-from collector.writer import LmdbWriter, compact_lmdb, read_scene_route
+from collector.writer import LmdbWriter, compact_lmdb, read_scene_map_route
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _LIDAR_DTYPE = np.dtype(P.SEMANTIC_LIDAR_DTYPE)
@@ -98,7 +98,7 @@ def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on):
     return per_frame * len(frames) + lidar_total
 
 
-def _persist(scene_id, route, seed, weather, frames, kinematics, status, static_meta,
+def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, status, static_meta,
              drive_id, segment_idx, cc, arena, output_root, cam_names):
     """把一段落盘：RGB→mp4，其他传感器/标注与独立运动学时间轴→LMDB。
 
@@ -121,7 +121,7 @@ def _persist(scene_id, route, seed, weather, frames, kinematics, status, static_
     scene_meta = {
         "scene_id": scene_id, "seed": seed, "weather": weather, "status": status,
         "num_frames": len(frames), "num_kinematics": len(kinematics),
-        "map": cc.simulation.map, "fps": cc.output.video_fps,
+        "map": map_name, "fps": cc.output.video_fps,
         "sensor_dt_s": cc.simulation.fixed_delta_seconds * cc.collection.capture_every_n_ticks,
         "kinematics_dt_s": (
             cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks),
@@ -144,7 +144,8 @@ def _persist(scene_id, route, seed, weather, frames, kinematics, status, static_
     compact_lmdb(scene_dir / "lmdb", verify=True)
 
 
-def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng, weather_presets):
+def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_names, rng,
+                   weather_presets):
     """采集单条路线：一次行驶随 arena 反复写满被切成多段，逐段落盘。返回本路线落盘的段数。
 
     每填满一次 arena（partial）→ 落一段、reset、续采；到终点(ok)/达总帧上限(max_frames) → 末段落盘、行驶结束。
@@ -162,9 +163,10 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
         weather = scenarios.random_weather(rng, cc.weather.randomize, weather_presets)
         next_scene = "scene_{:06d}".format(saved + segs_total)
         # 每次行驶起始即打印「本场景跑的是哪条路线 + 种子 + 第几次尝试」，据此判断是否在重复同一路线
-        print("[collector] {} 开始行驶 {} seed={} attempt={}/{}".format(
-            next_scene, route_tag, seed, attempt + 1, retries + 1))
-        r = worker.start_scene(seed, weather, {"start": route["start"], "end": route["end"]})
+        print("[collector] {} 开始行驶 map={} {} seed={} attempt={}/{}".format(
+            next_scene, map_name, route_tag, seed, attempt + 1, retries + 1))
+        r = worker.start_scene(
+            map_name, seed, weather, {"start": route["start"], "end": route["end"]})
         status = r["status"]
         if status == P.STATUS_UNREACHABLE:
             print("[collector] {} 不可达，跳过".format(route_tag))
@@ -186,8 +188,8 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
                 break
             if frames:  # partial/ok/max_frames 段均落盘
                 scene_id = "scene_{:06d}".format(saved + segs_total)
-                _persist(scene_id, route, seed, weather, frames, kinematics, status, static_meta,
-                         drive_id, seg_idx, cc, arena, output_root, cam_names)
+                _persist(scene_id, map_name, route, seed, weather, frames, kinematics, status,
+                         static_meta, drive_id, seg_idx, cc, arena, output_root, cam_names)
                 print("[collector] {} 落盘段 #{}（{}帧, status={}）".format(
                     scene_id, seg_idx, len(frames), status))
                 segs_total += 1
@@ -215,17 +217,17 @@ def _collect_route(worker, route, saved, cc, arena, output_root, cam_names, rng,
 
 
 def _scan_existing(output_root):
-    """断点续采：扫描已存在场景目录，返回 (已采路线键集合, 下一个场景编号)。
+    """断点续采：扫描已存在场景目录，返回 (按地图分组的已采路线, 下一个场景编号)。
 
-    路线键 = (start_idx, end_idx)，取自各场景 LMDB 的 meta；据此把已采过的路线从队列剔除
+    路线按 meta.map 分组，组内键为 (start_idx, end_idx)；据此只从同一地图的队列剔除已采路线
     （无论该次行驶是否跑完，只要落过盘就排除）。编号取已存在 scene_XXXXXX 的最大序号 +1，
     使本次新段从全新编号续写，绝不覆盖既有数据（含 LMDB 不可读的半成品目录）。
     """
     scenes_dir = output_root / "scenes"
-    done_routes = set()
+    done_routes_by_map = {}
     max_idx = -1
     if not scenes_dir.is_dir():
-        return done_routes, 0
+        return done_routes_by_map, 0
     for d in sorted(scenes_dir.iterdir()):
         if not d.is_dir() or not d.name.startswith("scene_"):
             continue
@@ -233,20 +235,27 @@ def _scan_existing(output_root):
             max_idx = max(max_idx, int(d.name.split("_")[1]))
         except (IndexError, ValueError):
             pass  # 命名不符的目录不参与编号推进
-        route_key = read_scene_route(d / "lmdb")
-        if route_key is not None:
-            done_routes.add(route_key)
-    return done_routes, max_idx + 1
+        identity = read_scene_map_route(d / "lmdb")
+        if identity is not None:
+            map_name, start_idx, end_idx = identity
+            done_routes_by_map.setdefault(map_name, set()).add((start_idx, end_idx))
+    return done_routes_by_map, max_idx + 1
 
 
 def run(cfg, max_scenes_override=None):
-    """执行采集主循环，返回成功落盘的场景段数。"""
+    """逐地图执行采集主循环，返回落盘场景段的全局续写编号。
+
+    ``simulation.maps`` 的值分别限制每张地图本次建立的路线队列长度；命令行覆盖值非空时
+    统一覆盖每张地图的限制。
+    """
+    if max_scenes_override is not None and max_scenes_override < 0:
+        raise ValueError("max_scenes_override 必须 >= 0（0 表示遍历每张地图的全部路线）")
     cc = cfg.carla_collector
     output_root = _resolve(cc.output.root)
     output_root.mkdir(parents=True, exist_ok=True)
     cam_names = [c.name for c in cc.cameras.rig]
     # 断点续采：识别已采路线与续写起始编号（输出目录非空时生效）
-    done_routes, start_index = _scan_existing(output_root)
+    done_routes_by_map, start_index = _scan_existing(output_root)
 
     arena_name = "{}_{}".format(cc.ipc.arena_name, os.getpid())
     arena_size = cc.ipc.arena_size_mb * 1024 * 1024
@@ -259,28 +268,37 @@ def run(cfg, max_scenes_override=None):
         info = worker.init(asdict(cfg), arena_name, arena_size)
         print("[collector] worker 就绪:", info)
         weather_presets = info["weather_presets"]  # 随机天气从 worker 实际拥有的内置预设中选
-        spawn_points = worker.query_spawn_points()
-
-        max_scenes = max_scenes_override if max_scenes_override is not None else cc.route.max_scenes
-        # 已采路线作为优先代表参与相似过滤，避免旧数据中的相邻路线在续采时换一个端点组合再次入队。
-        # max_scenes 最后裁剪，使它表示「本次再采多少条新路线」，而非被已采路线占满名额。
-        queue = build_route_queue(
-            spawn_points, cc.route.min_distance_m, cc.route.max_distance_m,
-            cc.route.queue_seed, 0, similarity_threshold=cc.route.similarity_threshold_m,
-            excluded_pairs=done_routes,
-        )
-        if max_scenes:
-            queue = queue[:max_scenes]
-        if done_routes:
-            print("[collector] 断点续采：按 {} 条已采路线剔除重复或相似候选".format(len(done_routes)))
         if start_index:
             print("[collector] 断点续采：新场景从 scene_{:06d} 起编号".format(start_index))
-        print("[collector] 路线队列长度:", len(queue))
 
-        for route in queue:
-            # 一条路线（一次行驶）可能切成多段落盘，saved 据返回段数推进
-            saved += _collect_route(worker, route, saved, cc, arena,
-                                    output_root, cam_names, master_rng, weather_presets)
+        for map_name, configured_scenes in cc.simulation.maps.items():
+            max_scenes = (
+                max_scenes_override
+                if max_scenes_override is not None
+                else configured_scenes
+            )
+            done_routes = done_routes_by_map.get(map_name, set())
+            spawn_points = worker.query_spawn_points(map_name)
+            # 已采路线作为优先代表参与相似过滤，避免同地图旧数据中的相邻路线在续采时
+            # 换一个端点组合再次入队。场景数最后裁剪，表示「本次在该地图再采多少条新路线」。
+            queue = build_route_queue(
+                spawn_points, cc.route.min_distance_m, cc.route.max_distance_m,
+                cc.route.queue_seed, 0, similarity_threshold=cc.route.similarity_threshold_m,
+                excluded_pairs=done_routes,
+            )
+            if max_scenes:
+                queue = queue[:max_scenes]
+            print("[collector] 地图 {}：路线队列长度 {}（配置场景数={}）".format(
+                map_name, len(queue), max_scenes))
+            if done_routes:
+                print("[collector] 地图 {} 断点续采：按 {} 条已采路线剔除重复或相似候选".format(
+                    map_name, len(done_routes)))
+
+            for route in queue:
+                # 一条路线（一次行驶）可能切成多段落盘，saved 据返回段数推进
+                saved += _collect_route(
+                    worker, map_name, route, saved, cc, arena, output_root, cam_names,
+                    master_rng, weather_presets)
         print("[collector] 完成，成功落盘场景段数:", saved)
     finally:
         worker.shutdown()

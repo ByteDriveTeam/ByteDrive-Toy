@@ -6,8 +6,8 @@
 对外接口:
     - WorkerProcess(python_exe)
         .init(config_dict, arena_name, arena_size_bytes) -> dict
-        .query_spawn_points() -> list[list[6]]
-        .start_scene(seed, weather, route) -> dict     # 一次行驶首段（含内外参/静态框）
+        .query_spawn_points(map_name) -> list[list[6]]
+        .start_scene(map_name, seed, weather, route) -> dict  # 一次行驶首段（含内外参/静态框）
         .continue_scene() -> dict                       # 复用存活世界续采下一段
         .shutdown() -> None
         .close() -> None
@@ -56,11 +56,12 @@ class WorkerProcess:
         return self._request(P.CMD_INIT, config=config_dict,
                              arena={"name": arena_name, "size_bytes": arena_size_bytes})
 
-    def query_spawn_points(self):
-        return self._request(P.CMD_QUERY_SPAWN_POINTS)["spawn_points"]
+    def query_spawn_points(self, map_name):
+        return self._request(P.CMD_QUERY_SPAWN_POINTS, map=map_name)["spawn_points"]
 
-    def start_scene(self, seed, weather, route):
-        return self._request(P.CMD_START_SCENE, seed=seed, weather=weather, route=route)
+    def start_scene(self, map_name, seed, weather, route):
+        return self._request(
+            P.CMD_START_SCENE, map=map_name, seed=seed, weather=weather, route=route)
 
     def continue_scene(self):
         return self._request(P.CMD_CONTINUE_SCENE)

@@ -319,11 +319,15 @@ flowchart TB
     QUERY --> BEVQ["BEV Query<br/>384×32×32"]
     LIDAR["当前/历史语义 LiDAR XYZ"] --> VOXEL["0.5m 体素<br/>中心相对 XYZ 均值+总体标准差"]
     VOXEL --> LENC["米制统计 ×4 + 3D/2D CNN<br/>384×32×32"]
-    IMG --> GATE["视觉 GAP + 局部 LiDAR<br/>逐位置逐通道 Sigmoid"]
-    LENC --> GATE
-    GATE --> BEVQ
+    IMG --> GCTX["视觉 GAP + 局部 LiDAR<br/>拼接后经 MLP"]
+    LENC --> GCTX
+    GCTX --> GATE["Sigmoid 门控系数 g<br/>逐位置逐通道"]
+    GATE --> LWEIGHT["g ⊙ LiDAR 特征"]
+    LENC --> LWEIGHT
+    BEVQ --> QFUSED["残差融合<br/>query + g ⊙ lidar"]
+    LWEIGHT --> QFUSED
     IMG --> CROSS["2× BEV→Image<br/>交叉注意力"]
-    BEVQ --> CROSS
+    QFUSED --> CROSS
     PRGB["上一帧三目 RGB"] --> PBEV["上一帧 BEV 骨干末端"]
     TF["previous→current<br/>3×3 刚性变换"] --> PGEOM["变换后实际 cell 坐标<br/>共享几何编码"]
     PBEV --> TCROSS["2× Current BEV→Previous BEV"]
@@ -404,8 +408,18 @@ BEV 每个 cell 的中心 `(x,y)` 扩展为 `z∈[-3,8] m`、步长 `0.1 m` 的 
 `4×4,stride=4` 卷积对齐到 `384×32×32`。
 
 三目图像特征全局池化后，与每个位置的 LiDAR 特征拼接，经 `768→128→384` MLP 和 Sigmoid 生成逐位置、
-逐通道门控，最终按 `query + gate·lidar` 注入。门控 logits 与最终对齐卷积采用零初始化策略，使旧权重加载后
-LiDAR 初始残差严格为零。整帧缺失 LiDAR 时由有效位严格旁路，不会把“传感器缺失”误作“全部空体素”。
+逐通道门控。Sigmoid 只作用于 MLP 输出的门控 logits，LiDAR 特征本身不经过 Sigmoid；先以门控调制
+LiDAR 特征，再残差注入初始查询：
+
+```math
+g=\operatorname{sigmoid}\left(\operatorname{MLP}
+\left[\operatorname{GAP}(F_{\mathrm{image}}),F_{\mathrm{lidar}}\right]\right),
+\qquad
+Q_{\mathrm{fused}}=Q+g\odot F_{\mathrm{lidar}}.
+```
+
+门控 logits 与最终对齐卷积采用零初始化策略，使旧权重加载后 LiDAR 初始残差严格为零。整帧缺失 LiDAR
+时由有效位严格旁路，不会把“传感器缺失”误作“全部空体素”。
 
 #### 5. BEV Encoder：先查询三目 Token，再查询上一帧 BEV
 
@@ -490,24 +504,38 @@ flowchart TB
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
 发布的驾驶检查点与当前模型结构完全对齐，非骨干 state-dict 项 `385/385=100%` 形状兼容，满足默认闭环覆盖率门槛。
-运行时当前帧和历史帧各编码三路图像与一帧 LiDAR（模型只取点云 XYZ 几何统计，不使用语义标签）；BEV 与各解码器计算量保持不变。下表仅保留
-不受三目化影响的感知模型实测口径，驾驶显存应在目标硬件上按实际 batch 重新测量。
+运行时当前帧和历史帧各编码三路图像与一帧 LiDAR（模型只取点云 XYZ 几何统计，不使用语义标签）。
+
+下表按当前默认配置、batch 1 和完整前向重新统计。使用 PyTorch 2.12.1
+`torch.utils.flop_counter.FlopCounterMode` 对同形 `meta` 张量做算子级形状传播，覆盖卷积、矩阵乘和
+缩放点积注意力；约定 1 MAC = 2 FLOPs。归一化、激活、插值、索引和其他逐元素操作不在计数器注册范围内，
+因此这里是主计算算子的统一口径，不等同于硬件实测吞吐或延迟。
 
 | 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `PerceptionModel` | 145.35 GFLOPs | 72.67 GMACs | 134.26 MiB | 38.25 MiB | 172.51 MiB |
+| `DrivingModel` | 857.22 GFLOPs | 428.61 GMACs | 243.71 MiB | 40.94 MiB | 284.65 MiB |
 
 CUDA 静态显存下限只包含 FP32 参数、输入和最终输出，不包含 BF16/FP32 中间激活、CUDA 上下文及算子工作区，
-不能视为实际峰值；实际峰值应在目标 GPU、CUDA 版 PyTorch 和相同输入尺寸下实测。本次统计环境为
-CPU 版 PyTorch 2.12.1，使用 `torch.inference_mode()` 和 14 个 PyTorch CPU 线程；三目驾驶模型须重新实测，
-因此这里只保留不受本次改造影响的感知结果：
+不能视为实际峰值；实际峰值应在目标 GPU、CUDA 版 PyTorch 和相同输入尺寸下用
+`torch.cuda.max_memory_allocated()` 实测。
 
-| 模型 | 模型就绪 RSS | 推理峰值 RSS | 推理 RSS 增量 | 平均延迟 |
-| --- | ---: | ---: | ---: | ---: |
-| `PerceptionModel` | 345.86 MiB | 763.72 MiB | 417.86 MiB | 34.97 s |
+`DrivingModel` 的主计算量分解如下；模块统计相加与 857.22 GFLOPs 总量一致：
 
-RSS 包含 Python/PyTorch 运行时和 CPU 算子临时内存，只用于当前参考环境的容量判断；它与 CUDA 显存不是同一
-指标，也不宜直接用于不同 CPU、线程数或 PyTorch 构建之间的性能比较。
+| 模块 | GFLOPs | 占比 |
+| --- | ---: | ---: |
+| 双帧三目 DINOv3 骨干 | 545.20 | 63.60% |
+| BEV Encoder | 104.68 | 12.21% |
+| 感知 Feature Trunk | 98.43 | 11.48% |
+| BEV Query Embedding | 45.04 | 5.25% |
+| Driving Neck / Frustum | 37.66 | 4.39% |
+| 统一 BEV Decoder | 14.93 | 1.74% |
+| 多层特征融合 | 6.14 | 0.72% |
+| Trajectory Decoder | 2.78 | 0.32% |
+| LiDAR Query Fusion | 2.35 | 0.27% |
+
+计算量不直接等于运行时间；CPU/GPU 内核、精度、编译、显存带宽和硬件型号都会改变延迟。当前仓库不发布跨硬件
+延迟数字，闭环或训练前应在目标设备上独立 warmup 后测量。
 
 混合精度边界不是由训练循环隐式决定，而是模型内部显式划分：
 
@@ -1087,7 +1115,7 @@ python -m train.run --task driving --env fresh_driving --perception-ckpt train/c
 
 | 配置段 | 控制内容 |
 | --- | --- |
-| `carla_collector.worker/ipc/simulation` | 双进程、共享内存、CARLA 地图和步长 |
+| `carla_collector.worker/ipc/simulation` | 双进程、共享内存、按地图配置场景数和仿真步长 |
 | `carla_collector.cameras/lidar` | 传感器模态、分辨率、FOV、外参 |
 | `carla_collector.route/traffic/ego/weather` | 路线、交通流、主车和天气 |
 | `data_vis` | 原始数据浏览样式与图层 |

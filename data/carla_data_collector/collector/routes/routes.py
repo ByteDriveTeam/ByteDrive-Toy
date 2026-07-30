@@ -3,7 +3,7 @@
 模块: collector/routes/routes.py
 依赖: itertools, numpy, collector.routes.checks.routes_checks
 读取配置: 由 build_route_queue 接收 route.min_distance_m/max_distance_m/similarity_threshold_m/
-          queue_seed/max_scenes，自身不读 config
+          queue_seed 及当前地图的场景数限制，自身不读 config
 对外接口:
     - build_route_queue(spawn_points, min_d, max_d, seed, max_scenes, similarity_threshold=None,
                         excluded_pairs=None) -> list[dict]

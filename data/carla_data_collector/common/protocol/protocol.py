@@ -24,8 +24,8 @@ class ProtocolError(RuntimeError):
 
 # 命令（collector -> worker）
 CMD_INIT = "init"                          # 下发配置 + arena 信息，连接 Carla
-CMD_QUERY_SPAWN_POINTS = "query_spawn_points"  # 加载地图并返回全部可达点（用于建路线队列）
-CMD_START_SCENE = "start_scene"            # 重载地图→布景→预热→采集首段（一次行驶的开端）
+CMD_QUERY_SPAWN_POINTS = "query_spawn_points"  # 加载指定地图并返回全部可达点（用于建路线队列）
+CMD_START_SCENE = "start_scene"            # 重载指定地图→布景→预热→采集首段（一次行驶的开端）
 CMD_CONTINUE_SCENE = "continue_scene"      # 复用存活世界续采下一段（arena 已被 collector 读空）
 CMD_SHUTDOWN = "shutdown"                  # 退出 worker 进程
 

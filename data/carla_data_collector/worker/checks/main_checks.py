@@ -13,3 +13,9 @@ def check_init_args(args):
     arena = args.get("arena")
     assert isinstance(arena, dict) and arena.get("name") and isinstance(arena.get("size_bytes"), int), \
         "init 缺少有效 arena（需 name 与整数 size_bytes）"
+
+
+def check_map_name(map_name, allowed_maps):
+    """校验对象: 地图相关命令的 map —— 必须来自 simulation.maps 配置。"""
+    assert isinstance(map_name, str) and map_name in allowed_maps, \
+        "map 必须是 simulation.maps 中已配置的地图"

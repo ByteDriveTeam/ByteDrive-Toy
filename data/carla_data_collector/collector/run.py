@@ -26,7 +26,9 @@ def main():
     parser = argparse.ArgumentParser(description="Carla 合成数据采集")
     parser.add_argument("--config", default=None, help="主配置文件路径（默认 config/default.yaml）")
     parser.add_argument("--env", default=None, help="环境名，叠加 config/<env>.yaml 覆盖")
-    parser.add_argument("--max-scenes", type=int, default=None, help="本次最多采集场景数（覆盖配置）")
+    parser.add_argument(
+        "--max-scenes", type=int, default=None,
+        help="每张地图本次最多采集的场景数（统一覆盖 simulation.maps 中的配置）")
     args = parser.parse_args()
 
     cfg = load_config(args.config, args.env)

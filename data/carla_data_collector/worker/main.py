@@ -31,7 +31,7 @@ from common.protocol.checks.protocol_checks import check_command
 from common.shm import Arena, BumpAllocator
 from worker import actors, collect, session
 from worker.geometry import compute_intrinsics
-from worker.checks.main_checks import check_init_args
+from worker.checks.main_checks import check_init_args, check_map_name
 from worker.sensors import SensorRig
 
 
@@ -51,8 +51,10 @@ def _handle_init(state, args):
 
 
 def _handle_query_spawn_points(state, _args):
-    """加载地图并返回全部可达点（collector 据此建路线队列）。"""
-    return {"spawn_points": session.query_spawn_points(state["client"], state["cc"].simulation.map)}
+    """加载 collector 指定的地图并返回全部可达点（collector 据此建路线队列）。"""
+    map_name = _args.get("map")
+    check_map_name(map_name, state["cc"].simulation.maps)
+    return {"spawn_points": session.query_spawn_points(state["client"], map_name)}
 
 
 def _destroy_actors(client, world, ego, vehicle_ids, crowd, rig):
@@ -94,12 +96,14 @@ def _handle_start_scene(state, args):
     """重载地图→布景→预热→采首段；partial 时保活世界供 continue_scene 续采。"""
     cc = state["cc"]
     client = state["client"]
+    map_name = args.get("map")
+    check_map_name(map_name, cc.simulation.maps)
     seed = int(args["seed"])
     random.seed(seed)
     np.random.seed(seed % (2 ** 32))  # 让蓝图/颜色等随机选择也随 seed 复现
 
     world, tm = session.load_scene_world(
-        client, cc.simulation.map, cc.simulation.fixed_delta_seconds, cc.traffic.tm_port, seed)
+        client, map_name, cc.simulation.fixed_delta_seconds, cc.traffic.tm_port, seed)
     state["world"], state["tm"] = world, tm
     session.apply_weather(world, args["weather"])
 

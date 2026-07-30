@@ -2,7 +2,8 @@
 
 模块: worker/session/session.py
 依赖: carla, worker.geometry, worker.session.checks.session_checks
-读取配置: 由 start_scene 传入标量（simulation.map / fixed_delta_seconds、traffic.tm_port 等），自身不读 config
+读取配置: 由 start_scene 传入标量（simulation.maps 中的当前地图 / fixed_delta_seconds、
+          traffic.tm_port 等），自身不读 config
 对外接口:
     - connect(host, port, timeout_s) -> carla.Client
     - query_spawn_points(client, map_name) -> list[list[6]]   # 加载地图后取全部可达点
