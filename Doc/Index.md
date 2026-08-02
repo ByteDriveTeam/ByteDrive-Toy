@@ -27,6 +27,9 @@
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格中心相对 XYZ 米制均值与总体标准差。
+- [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API。
+- [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — 多帧语义 LiDAR 静态融合、动态对象级重建、场景级断点恢复与批处理。
+- [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — 多帧点云融合 CLI：加载配置并处理单场景或递归数据集。
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -128,6 +131,14 @@ Py37 仿真端 `worker/`
 - [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
 
 ## vis/ — 可视化与日志渲染
+
+### vis/reconstructed_pointcloud_vis/ — 融合重建点云 Open3D 交互可视化
+
+- [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — 融合重建点云 Open3D 可视化包：读取统一 PT、分层着色并交互浏览轨迹。
+- [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — 融合重建点云可视化 CLI：选择 PT 场景并启动 Open3D 交互窗口。
+- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载统一 PT 格式并提供自车位姿、来源与 actor 索引。
+- [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Open3D 重建点云渲染：图层筛选、分层下采样、着色与 actor 轨迹生成。
+- [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Open3D 交互查看器：切换全局/当前帧 BEV、静动态层、轨迹与着色并保存截图。
 
 - [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — 可视化包标识：只读消费采集数据集并渲染
 - [vis/data_vis/run.py](../vis/data_vis/run.py) — 可视化入口 CLI：加载配置、定位场景目录、启动交互窗口

@@ -23,21 +23,21 @@ carla_collector:
   # 仿真世界
   simulation:
     maps:                    # 要采集的 Opt 地图及各自本次运行的场景数；0 表示遍历该地图全部合法路线
-      Town05_Opt: 0
+      Town02_Opt: 200
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
 
   # 路线队列：可达点两两组合，按直线距离过滤后剔除相似路线
   route:
-    min_distance_m: 80.0
+    min_distance_m: 150.0
     max_distance_m: 300.0
     similarity_threshold_m: 20.0  # 两路线起点、终点的平面距离均不超过此值时只保留一条；0 关闭
     queue_seed: 20260617       # 组合随机排序的种子（保证队列可复现）
 
   # 交通流（TrafficManager 控制）
   traffic:
-    num_vehicles: 60
-    num_walkers: 40
+    num_vehicles: 25
+    num_walkers: 20
     vehicle_filter: vehicle.*
     walker_filter: walker.pedestrian.*
     walker_running_pct: 0.1          # 行人奔跑比例
@@ -46,7 +46,7 @@ carla_collector:
 
   # 天气
   weather:
-    randomize: false
+    randomize: true
 
   # 主车（BehaviorAgent 控制）
   ego:
@@ -60,9 +60,9 @@ carla_collector:
     # 各相机模态开关：关闭即不创建对应相机、不落盘。同视角各模态共享 FOV/位姿、像素逐点对齐。
     modalities:
       rgb: true            # RGB 相机 → mp4；关闭则该场景无视频文件
-      depth: true          # 深度相机（BGR 编码）→ 解码为米存 LMDB
-      semantic: true       # 语义分割相机 → 单通道标签存 LMDB
-      optical_flow: false   # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
+      depth: false         # 深度相机（BGR 编码）→ 解码为米存 LMDB
+      semantic: false      # 语义分割相机 → 单通道标签存 LMDB
+      optical_flow: false  # 光流相机 sensor.camera.optical_flow，输出 (H,W,2) float32 运动矢量 → LMDB
     rig:                       # 默认三目；其余视角可选，fov/yaw 为度，x 前向、y 右向、z 上向（米）
       - {name: front,       fov: 90.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
       # - {name: front_far,   fov: 60.0, x: 1.5,  y: 0.0,  z: 1.6, roll: 0.0, pitch: 0.0, yaw: 0.0}
@@ -102,6 +102,51 @@ carla_collector:
     video_codec: libx265       # H.265
     video_crf: 23
     video_fps: 2               # 必须等于 1/(fixed_delta_seconds*capture_every_n_ticks)
+
+# ============================================================
+# multiframe_pointcloud_fusion —— 多帧语义 LiDAR 融合与动态对象重建
+# ============================================================
+multiframe_pointcloud_fusion:
+  input_path: data/carla_data_collector/dataset/test
+  output_dir: data/multiframe_pointcloud_fusion/output
+  device: auto                    # auto / cpu / cuda；auto 优先使用 CUDA
+  frames_per_batch: 4             # 单次张量计算包含的传感器帧数；断点始终以完整场景为单位
+  placement_batch_size: 256       # 动态对象完整模型一次放回的 Box 位姿数
+  voxel_size_m: 0.10              # 0 表示不做体素聚合
+  box_fallback_margin_m: 0.25     # 实例 ID 失配时，有向 Box 各轴外扩容差
+  dynamic_frame_stride: 1         # 完整动态模型每隔多少个传感器帧放置一次
+  moving_tags:
+    pedestrian: [12]              # CARLA 0.9.15 CityObjectLabel.Pedestrians
+    vehicle: [13, 14, 15, 16, 17, 18, 19]  # Rider/Car/Truck/Bus/Train/Motorcycle/Bicycle
+
+# ============================================================
+# reconstructed_pointcloud_vis —— 融合重建点云 Open3D 可视化
+# ============================================================
+reconstructed_pointcloud_vis:
+  pointcloud_dir: data/multiframe_pointcloud_fusion/output  # 融合产物搜索目录
+  file: ''                         # 空=目录内首个 .pt；也可填文件路径、场景名或整数索引
+  window_name: ByteDrive 重建点云可视化
+  width: 1600
+  height: 900
+  max_static_points: 1200000       # 静态层等距下采样后的最大绘制点数
+  max_dynamic_points: 800000       # 动态层等距下采样后的最大绘制点数
+  point_size: 1.5
+  background_rgb: [18, 20, 24]
+  static_rgb: [170, 175, 185]      # source 着色模式下的静态点颜色
+  dynamic_rgb: [255, 125, 30]      # source 着色模式下的动态点颜色
+  coordinate_frame_size_m: 5.0
+  trajectory_line_width: 2.0
+  screenshot_dir: vis/reconstructed_pointcloud_vis/screenshots
+  initial_color_mode: semantic     # semantic / source / actor / height
+  initial_spatial_scope: global    # global=全局；bev=当前帧 model.driving.bev 范围
+  initial_show_static: true
+  initial_show_dynamic: true
+  initial_show_trajectory: true
+  initial_all_dynamic_frames: false
+  camera:
+    front: [0.55, -0.55, 0.62]     # Open3D 观察方向
+    up: [0.0, 0.0, 1.0]            # CARLA 世界坐标 z 轴向上
+    zoom: 0.7
 
 # ============================================================
 # data_vis —— 采集数据集可视化（vis 模块下的数据可视化子模块）

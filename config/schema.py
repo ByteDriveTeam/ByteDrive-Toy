@@ -151,6 +151,57 @@ class CarlaCollectorCfg:
 
 
 @dataclass
+class MovingTagsCfg:
+    pedestrian: List[int]
+    vehicle: List[int]
+
+
+@dataclass
+class MultiframePointcloudFusionCfg:
+    input_path: str
+    output_dir: str
+    device: str
+    frames_per_batch: int
+    placement_batch_size: int
+    voxel_size_m: float
+    box_fallback_margin_m: float
+    dynamic_frame_stride: int
+    moving_tags: MovingTagsCfg
+
+
+@dataclass
+class ReconstructedPointcloudCameraCfg:
+    front: List[float]
+    up: List[float]
+    zoom: float
+
+
+@dataclass
+class ReconstructedPointcloudVisCfg:
+    pointcloud_dir: str
+    file: str
+    window_name: str
+    width: int
+    height: int
+    max_static_points: int
+    max_dynamic_points: int
+    point_size: float
+    background_rgb: List[int]
+    static_rgb: List[int]
+    dynamic_rgb: List[int]
+    coordinate_frame_size_m: float
+    trajectory_line_width: float
+    screenshot_dir: str
+    initial_color_mode: str
+    initial_spatial_scope: str
+    initial_show_static: bool
+    initial_show_dynamic: bool
+    initial_show_trajectory: bool
+    initial_all_dynamic_frames: bool
+    camera: ReconstructedPointcloudCameraCfg
+
+
+@dataclass
 class DataVisDisplayCfg:
     scale: float
     play_fps: int
@@ -666,6 +717,8 @@ class CloneLoopCfg:
 @dataclass
 class Config:
     carla_collector: CarlaCollectorCfg
+    multiframe_pointcloud_fusion: MultiframePointcloudFusionCfg
+    reconstructed_pointcloud_vis: ReconstructedPointcloudVisCfg
     data_vis: DataVisCfg
     model: ModelCfg
     data: DataCfg
@@ -791,6 +844,8 @@ def validate_config(cfg):
     assert math.isclose(cc.output.video_fps, sensor_fps, rel_tol=0.0, abs_tol=1e-6), \
         "output.video_fps 必须与 capture_every_n_ticks 对应的传感器采样率一致"
 
+    _validate_multiframe_pointcloud_fusion(cfg.multiframe_pointcloud_fusion)
+    _validate_reconstructed_pointcloud_vis(cfg.reconstructed_pointcloud_vis)
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
@@ -801,6 +856,75 @@ def validate_config(cfg):
     _validate_clone_loop(
         cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar,
         cc.simulation, cc.collection)
+
+
+def _validate_multiframe_pointcloud_fusion(fusion):
+    """校验对象: cfg.multiframe_pointcloud_fusion —— 路径、批量、体素与运动语义配置。"""
+    assert isinstance(fusion.input_path, str) and fusion.input_path \
+        and isinstance(fusion.output_dir, str) and fusion.output_dir, \
+        "multiframe_pointcloud_fusion 输入与输出路径不得为空"
+    cuda_device = isinstance(fusion.device, str) and (
+        fusion.device == "cuda" or (
+            fusion.device.startswith("cuda:") and fusion.device[5:].isdigit()))
+    assert isinstance(fusion.device, str) \
+        and (fusion.device in ("auto", "cpu") or cuda_device), \
+        "multiframe_pointcloud_fusion.device 仅支持 auto/cpu/cuda[:序号]"
+    batches = (fusion.frames_per_batch, fusion.placement_batch_size,
+               fusion.dynamic_frame_stride)
+    assert all(isinstance(value, int) and not isinstance(value, bool) and value > 0
+               for value in batches), \
+        "multiframe_pointcloud_fusion 批量大小与动态帧步长必须为正整数"
+    spatial = (fusion.voxel_size_m, fusion.box_fallback_margin_m)
+    assert all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               and math.isfinite(value) and value >= 0 for value in spatial), \
+        "multiframe_pointcloud_fusion 体素尺寸与 Box 容差必须 >= 0"
+    pedestrian = fusion.moving_tags.pedestrian
+    vehicle = fusion.moving_tags.vehicle
+    tags = pedestrian + vehicle
+    assert pedestrian and vehicle and len(tags) == len(set(tags)), \
+        "multiframe_pointcloud_fusion 运动语义列表须非空且互不重复"
+    assert all(isinstance(tag, int) and not isinstance(tag, bool) and 0 <= tag <= 255
+               for tag in tags), \
+        "multiframe_pointcloud_fusion 运动语义标签须为 0..255 整数"
+
+
+def _validate_reconstructed_pointcloud_vis(vis):
+    """校验对象: cfg.reconstructed_pointcloud_vis —— 输入、窗口、样式与初始视角。"""
+    assert isinstance(vis.pointcloud_dir, str) and vis.pointcloud_dir \
+        and isinstance(vis.file, str) and isinstance(vis.screenshot_dir, str) \
+        and vis.screenshot_dir, \
+        "reconstructed_pointcloud_vis 点云与截图路径配置非法"
+    assert isinstance(vis.window_name, str) and vis.window_name, \
+        "reconstructed_pointcloud_vis.window_name 不得为空"
+    assert vis.width > 0 and vis.height > 0, \
+        "reconstructed_pointcloud_vis 窗口宽高必须 > 0"
+    assert vis.max_static_points > 0 and vis.max_dynamic_points > 0, \
+        "reconstructed_pointcloud_vis 静态/动态绘制点数上限必须 > 0"
+    assert vis.point_size > 0 and vis.coordinate_frame_size_m > 0 \
+        and vis.trajectory_line_width > 0, \
+        "reconstructed_pointcloud_vis 点径、坐标轴尺寸与轨迹线宽必须 > 0"
+    assert _is_rgb(vis.background_rgb) and _is_rgb(vis.static_rgb) \
+        and _is_rgb(vis.dynamic_rgb), \
+        "reconstructed_pointcloud_vis 颜色须是 0..255 的 RGB 三元组"
+    assert vis.initial_color_mode in ("semantic", "source", "actor", "height"), \
+        "reconstructed_pointcloud_vis.initial_color_mode 取值非法"
+    assert vis.initial_spatial_scope in ("global", "bev"), \
+        "reconstructed_pointcloud_vis.initial_spatial_scope 仅支持 global/bev"
+    assert all(isinstance(value, bool) for value in (
+        vis.initial_show_static, vis.initial_show_dynamic,
+        vis.initial_show_trajectory, vis.initial_all_dynamic_frames)), \
+        "reconstructed_pointcloud_vis 初始显示开关必须为布尔值"
+    camera = vis.camera
+    assert len(camera.front) == 3 and len(camera.up) == 3 \
+        and all(math.isfinite(value) for value in camera.front + camera.up) \
+        and sum(value * value for value in camera.front) > 0 \
+        and sum(value * value for value in camera.up) > 0, \
+        "reconstructed_pointcloud_vis.camera.front/up 须为非零有限三维向量"
+    dot = sum(a * b for a, b in zip(camera.front, camera.up))
+    front_norm = math.sqrt(sum(value * value for value in camera.front))
+    up_norm = math.sqrt(sum(value * value for value in camera.up))
+    assert abs(dot) < front_norm * up_norm * 0.999 and 0 < camera.zoom <= 2, \
+        "reconstructed_pointcloud_vis.camera 方向不得共线且 zoom 须在 (0,2]"
 
 
 def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collection):
@@ -1188,6 +1312,11 @@ def _validate_data_vis(dv):
 
 def _is_bgr(c):
     """是否为合法 BGR 颜色：长度 3、各分量 0..255。"""
+    return len(c) == 3 and all(0 <= v <= 255 for v in c)
+
+
+def _is_rgb(c):
+    """是否为合法 RGB 颜色：长度 3、各分量 0..255。"""
     return len(c) == 3 and all(0 <= v <= 255 for v in c)
 
 
