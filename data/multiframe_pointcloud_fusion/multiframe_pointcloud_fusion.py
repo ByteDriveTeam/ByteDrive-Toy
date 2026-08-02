@@ -5,14 +5,14 @@
       collector.writer.unpack_array, data.multiframe_pointcloud_fusion.checks
 读取配置:
     multiframe_pointcloud_fusion.input_path / output_dir / device / frames_per_batch /
-        placement_batch_size / voxel_size_m / box_fallback_margin_m /
-        dynamic_frame_stride / moving_tags.pedestrian / moving_tags.vehicle
+        voxel_size_m / box_fallback_margin_m / moving_tags.pedestrian / moving_tags.vehicle
 对外接口:
     - discover_scenes(input_path) -> list[Path]
     - fuse_scene(scene_dir, output_dir, cfg) -> Path
     - run_fusion(cfg, input_path=None, output_dir=None) -> dict
 说明: 静态点仅按运动语义全局剔除；动态点优先按 obj_idx 对齐 actor，Box 仅作实例 ID
-      失配回退，规避 CARLA Box 偏小问题。断点以场景为最小单位，场景内中断后整场重算。
+      失配回退，规避 CARLA Box 偏小问题。输出把静态地图、对象局部模型与逐帧位姿规范化
+      分离；断点以场景为最小单位，场景内中断后整场重算。
 """
 
 from __future__ import annotations
@@ -52,11 +52,9 @@ __all__ = ["discover_scenes", "fuse_scene", "run_fusion"]
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_STATIC_SOURCE = 0
-_DYNAMIC_SOURCE = 1
 _VEHICLE_CLASS = 0
 _PEDESTRIAN_CLASS = 1
-_OUTPUT_SCHEMA_VERSION = 2
+_OUTPUT_SCHEMA_VERSION = 3
 _ATOMIC_REPLACE_ATTEMPTS = 5
 _ATOMIC_REPLACE_DELAY_S = 0.05
 
@@ -282,7 +280,9 @@ def _process_batch(frames, start_frame, lidar_extrinsic, fusion, device):
         "poses": _cpu_tree({
             "actor_id": boxes["actor_id"],
             "frame_index": boxes["frame_index"],
+            "class_id": boxes["class_id"],
             "pose": boxes["pose"],
+            "extent": boxes["extent"],
         }),
         "stats": {
             "input_points": int(len(world_xyz)),
@@ -433,43 +433,36 @@ def _finalize_scene(reader, chunks, fingerprint, signature, algorithm, fusion, d
     local_xyz, dynamic_tags, model_actors = _merge_parts(
         [chunk["dynamic"] for chunk in chunks], fusion.voxel_size_m, device, dynamic=True)
     poses = _concat_pose_parts([chunk["poses"] for chunk in chunks])
-    dynamic_xyz, placed_tags, placed_actors, frame_indices = _place_dynamic(
-        local_xyz, dynamic_tags, model_actors, poses, fusion, device)
-    static_count = len(static_xyz)
-    dynamic_count = len(dynamic_xyz)
-    xyz = torch.cat((static_xyz, dynamic_xyz)).to(torch.float32)
-    obj_tag = torch.cat((static_tags, placed_tags)).to(torch.uint8)
-    source = torch.cat((
-        torch.full((static_count,), _STATIC_SOURCE, dtype=torch.uint8),
-        torch.full((dynamic_count,), _DYNAMIC_SOURCE, dtype=torch.uint8),
-    ))
-    actor_id = torch.cat((
-        torch.full((static_count,), -1, dtype=torch.int64), placed_actors.to(torch.int64),
-    ))
-    frame_index = torch.cat((
-        torch.full((static_count,), -1, dtype=torch.int32), frame_indices.to(torch.int32),
-    ))
+    objects, dynamic_poses = _normalize_dynamic(
+        local_xyz, dynamic_tags, model_actors, poses)
     stats = _sum_stats([chunk["stats"] for chunk in chunks])
     stats.update({
-        "output_static_points": static_count,
+        "output_static_points": len(static_xyz),
+        "dynamic_objects": len(objects["actor_id"]),
         "canonical_dynamic_points": len(local_xyz),
-        "output_dynamic_points": dynamic_count,
-        "output_total_points": len(xyz),
+        "dynamic_pose_records": len(dynamic_poses["frame_index"]),
+        "output_total_canonical_points": len(static_xyz) + len(local_xyz),
     })
     return {
-        "xyz": xyz.contiguous(),
-        "obj_tag": obj_tag.contiguous(),
-        "source": source.contiguous(),
-        "actor_id": actor_id.contiguous(),
-        "frame_index": frame_index.contiguous(),
+        "static": {
+            "xyz": static_xyz.to(torch.float32).contiguous(),
+            "obj_tag": static_tags.to(torch.uint8).contiguous(),
+        },
+        "dynamic_objects": objects,
+        "dynamic_poses": dynamic_poses,
         "ego_pose": ego_pose.contiguous(),
         "metadata": {
             "scene_name": reader.scene_dir.name,
-            "coordinate_frame": "carla_world",
+            "coordinate_frames": {
+                "static.xyz": "carla_world",
+                "dynamic_objects.xyz_local": "actor_box_local",
+                "dynamic_poses.transform": "carla_world",
+                "ego_pose": "carla_world",
+            },
             "ego_pose_fields": ["x", "y", "z", "roll", "pitch", "yaw"],
             "ego_pose_indexing": "row_index_equals_frame_index",
             "ego_box_reconstructed": False,
-            "source_codes": {"static": _STATIC_SOURCE, "dynamic": _DYNAMIC_SOURCE},
+            "dynamic_class_names": ["vehicle", "pedestrian"],
             "fingerprint": fingerprint,
             "input_signature": signature,
             "fusion_config": algorithm,
@@ -507,54 +500,44 @@ def _merge_parts(parts, voxel_size, device, dynamic):
     return points, unique[:, 0], None
 
 
-def _place_dynamic(local_xyz, tags, actors, poses, fusion, device):
-    empty_xyz = torch.empty((0, 3), dtype=torch.float32)
-    empty_i64 = torch.empty(0, dtype=torch.int64)
-    if not len(local_xyz) or not len(poses["actor_id"]):
-        return empty_xyz, empty_i64, empty_i64, empty_i64
-    order = torch.argsort(actors)
-    local_xyz = local_xyz[order].to(device)
-    tags = tags[order].to(device)
-    actors = actors[order].to(device)
-    unique_actors, counts = torch.unique_consecutive(actors, return_counts=True)
-    offsets = torch.cumsum(counts, dim=0) - counts
-    pose_keep = poses["frame_index"] % fusion.dynamic_frame_stride == 0
-    pose_actor = poses["actor_id"][pose_keep]
-    pose_frame = poses["frame_index"][pose_keep]
-    pose_values = poses["pose"][pose_keep]
-    xyz_parts, tag_parts, actor_parts, frame_parts = [], [], [], []
-    for start in range(0, len(pose_actor), fusion.placement_batch_size):
-        end = min(start + fusion.placement_batch_size, len(pose_actor))
-        batch_actor = pose_actor[start:end].to(device)
-        positions = torch.searchsorted(unique_actors, batch_actor)
-        safe = positions.clamp_max(len(unique_actors) - 1)
-        valid = (positions < len(unique_actors)) & (unique_actors[safe] == batch_actor)
-        if not bool(valid.any()):
-            continue
-        batch_actor = batch_actor[valid]
-        batch_frame = pose_frame[start:end].to(device)[valid]
-        batch_pose = pose_values[start:end].to(device)[valid]
-        model_positions = safe[valid]
-        batch_counts = counts[model_positions]
-        pose_indices = torch.repeat_interleave(
-            torch.arange(len(batch_actor), device=device), batch_counts)
-        output_offsets = torch.cumsum(batch_counts, dim=0) - batch_counts
-        local_offsets = torch.arange(int(batch_counts.sum().item()), device=device) \
-            - torch.repeat_interleave(output_offsets, batch_counts)
-        model_indices = torch.repeat_interleave(offsets[model_positions], batch_counts) \
-            + local_offsets
-        matrices = _pose_matrices(batch_pose)
-        placed = _transform_indexed(local_xyz[model_indices], matrices, pose_indices)
-        xyz_parts.append(placed.cpu())
-        tag_parts.append(tags[model_indices].cpu())
-        actor_parts.append(batch_actor[pose_indices].cpu())
-        frame_parts.append(batch_frame[pose_indices].cpu())
-    return (
-        _cat_or_empty(xyz_parts, (0, 3), torch.float32),
-        _cat_or_empty(tag_parts, (0,), torch.int64),
-        _cat_or_empty(actor_parts, (0,), torch.int64),
-        _cat_or_empty(frame_parts, (0,), torch.int64),
-    )
+def _normalize_dynamic(local_xyz, tags, model_actors, poses):
+    actor_id = torch.unique(torch.cat((model_actors, poses["actor_id"])), sorted=True)
+    if not len(actor_id):
+        return ({
+            "actor_id": torch.empty(0, dtype=torch.int64),
+            "class_id": torch.empty(0, dtype=torch.uint8),
+            "extent": torch.empty((0, 3), dtype=torch.float32),
+            "point_offsets": torch.zeros(1, dtype=torch.int64),
+            "xyz_local": torch.empty((0, 3), dtype=torch.float32),
+            "obj_tag": torch.empty(0, dtype=torch.uint8),
+        }, {
+            "object_index": torch.empty(0, dtype=torch.int64),
+            "frame_index": torch.empty(0, dtype=torch.int32),
+            "transform": torch.empty((0, 6), dtype=torch.float32),
+        })
+    pose_actor_order = torch.argsort(poses["actor_id"])
+    sorted_pose_actor = poses["actor_id"][pose_actor_order]
+    first_pose = torch.searchsorted(sorted_pose_actor, actor_id)
+    first_pose_indices = pose_actor_order[first_pose]
+    point_object = torch.searchsorted(actor_id, model_actors)
+    point_order = torch.argsort(point_object)
+    point_counts = torch.bincount(point_object, minlength=len(actor_id)).to(torch.int64)
+    point_offsets = torch.cat((torch.zeros(1, dtype=torch.int64), torch.cumsum(point_counts, 0)))
+    pose_object = torch.searchsorted(actor_id, poses["actor_id"])
+    pose_keys = (poses["frame_index"].to(torch.int64) << 32) | pose_object
+    pose_order = torch.argsort(pose_keys)
+    return ({
+        "actor_id": actor_id.to(torch.int64).contiguous(),
+        "class_id": poses["class_id"][first_pose_indices].to(torch.uint8).contiguous(),
+        "extent": poses["extent"][first_pose_indices].to(torch.float32).contiguous(),
+        "point_offsets": point_offsets.contiguous(),
+        "xyz_local": local_xyz[point_order].to(torch.float32).contiguous(),
+        "obj_tag": tags[point_order].to(torch.uint8).contiguous(),
+    }, {
+        "object_index": pose_object[pose_order].to(torch.int64).contiguous(),
+        "frame_index": poses["frame_index"][pose_order].to(torch.int32).contiguous(),
+        "transform": poses["pose"][pose_order].to(torch.float32).contiguous(),
+    })
 
 
 def _concat_pose_parts(parts):
@@ -562,7 +545,9 @@ def _concat_pose_parts(parts):
         "actor_id": _cat_or_empty([part["actor_id"] for part in parts], (0,), torch.int64),
         "frame_index": _cat_or_empty(
             [part["frame_index"] for part in parts], (0,), torch.int64),
+        "class_id": _cat_or_empty([part["class_id"] for part in parts], (0,), torch.int64),
         "pose": _cat_or_empty([part["pose"] for part in parts], (0, 6), torch.float32),
+        "extent": _cat_or_empty([part["extent"] for part in parts], (0, 3), torch.float32),
     }
 
 

@@ -226,10 +226,11 @@ class PointcloudViewer:
             else "BEV x[{:.1f},{:.1f}] y[{:.1f},{:.1f}]m".format(
                 self._bev_cfg.x_min_m, self._bev_cfg.x_max_m,
                 self._bev_cfg.y_min_m, self._bev_cfg.y_max_m)
-        print("[重建点云] 场景={} | 点={:,} (静态 {:,}, 动态 {:,}) | 帧={}/{} | 范围={} | 动态={} | 着色={} | S={} D={} T={}".format(
+        print("[重建点云] 场景={} | 规范点={:,} (静态 {:,}, 对象模型 {:,}) | 对象={} 位姿={:,} | 帧={}/{} | 范围={} | 动态={} | 着色={} | S={} D={} T={}".format(
             self._data.scene_name, self._data.num_points, self._data.num_static,
-            self._data.num_dynamic, self._state.frame_index, self._data.num_frames - 1,
-            scope, dynamic_time, self._state.color_mode,
+            self._data.num_dynamic, self._data.num_objects, self._data.num_poses,
+            self._state.frame_index, self._data.num_frames - 1, scope, dynamic_time,
+            self._state.color_mode,
             "开" if self._state.show_static else "关",
             "开" if self._state.show_dynamic else "关",
             "开" if self._state.show_trajectory else "关"))

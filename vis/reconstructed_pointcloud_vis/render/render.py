@@ -69,49 +69,92 @@ def render_pointcloud(data, state, cfg, bev_cfg):
     静态与动态分别限制点数，避免静态地图吞掉动态对象的显示预算。
     """
     check_render_state(state, data)
-    spatial = None
+    static_indices = np.arange(data.num_static, dtype=np.int64)
     if state.spatial_scope == "bev":
-        spatial = current_bev_mask(data.xyz, data.ego_pose[state.frame_index], bev_cfg)
-    static_mask = data.source == 0
-    dynamic_mask = data.source == 1
-    if spatial is not None:
-        static_mask &= spatial
-        dynamic_mask &= spatial
-    static = np.flatnonzero(static_mask) \
-        if state.show_static else np.empty(0, np.int64)
-    if state.show_dynamic:
-        if not state.all_dynamic_frames:
-            dynamic_mask &= data.frame_index == state.frame_index
-        dynamic = np.flatnonzero(dynamic_mask)
-    else:
-        dynamic = np.empty(0, np.int64)
-    static = _uniform_indices(static, cfg.max_static_points)
-    dynamic = _uniform_indices(dynamic, cfg.max_dynamic_points)
-    indices = np.concatenate((static, dynamic))
+        static_indices = static_indices[current_bev_mask(
+            data.static_xyz, data.ego_pose[state.frame_index], bev_cfg)]
+    static_indices = _uniform_indices(static_indices, cfg.max_static_points) \
+        if state.show_static else np.empty(0, dtype=np.int64)
+    static_xyz = data.static_xyz[static_indices]
+    static_tags = data.static_obj_tag[static_indices]
+    dynamic_xyz, dynamic_tags, dynamic_actors = _placed_dynamic(data, state, cfg)
+    if state.spatial_scope == "bev" and len(dynamic_xyz):
+        keep = current_bev_mask(dynamic_xyz, data.ego_pose[state.frame_index], bev_cfg)
+        dynamic_xyz, dynamic_tags, dynamic_actors = (
+            dynamic_xyz[keep], dynamic_tags[keep], dynamic_actors[keep])
+    points = np.concatenate((static_xyz, dynamic_xyz)).astype(np.float64, copy=False)
+    tags = np.concatenate((static_tags, dynamic_tags))
+    sources = np.concatenate((
+        np.zeros(len(static_xyz), dtype=np.uint8),
+        np.ones(len(dynamic_xyz), dtype=np.uint8),
+    ))
+    actors = np.concatenate((
+        np.full(len(static_xyz), -1, dtype=np.int64), dynamic_actors,
+    ))
     cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(data.xyz[indices].astype(np.float64, copy=False))
-    cloud.colors = o3d.utility.Vector3dVector(_point_colors(data, indices, state.color_mode, cfg))
+    cloud.points = o3d.utility.Vector3dVector(points)
+    cloud.colors = o3d.utility.Vector3dVector(
+        _point_colors(tags, sources, actors, points, data, state.color_mode, cfg))
     return cloud
 
 
 def render_trajectories(data):
-    """以每个 actor 每帧点集中心生成完整世界坐标轨迹线。"""
-    dynamic = data.source == 1
+    """直接由对象逐帧 Box 位姿生成完整世界坐标轨迹线。"""
     cloud = o3d.geometry.LineSet()
-    if not np.any(dynamic):
+    if not data.num_poses:
         return cloud
-    pairs = np.column_stack((data.actor_id[dynamic], data.frame_index[dynamic])).astype(np.int64)
-    unique, inverse, counts = np.unique(pairs, axis=0, return_inverse=True, return_counts=True)
-    centers = np.zeros((len(unique), 3), dtype=np.float64)
-    np.add.at(centers, inverse, data.xyz[dynamic])
-    centers /= counts[:, None]
-    connected = unique[1:, 0] == unique[:-1, 0]
+    keys = (data.pose_object_index.astype(np.int64) << 32) \
+        | data.pose_frame_index.astype(np.int64)
+    order = np.argsort(keys)
+    object_index = data.pose_object_index[order]
+    centers = data.pose_transform[order, :3].astype(np.float64)
+    connected = object_index[1:] == object_index[:-1]
     starts = np.flatnonzero(connected)
     lines = np.column_stack((starts, starts + 1)).astype(np.int32)
     cloud.points = o3d.utility.Vector3dVector(centers)
     cloud.lines = o3d.utility.Vector2iVector(lines)
-    cloud.colors = o3d.utility.Vector3dVector(_actor_colors(unique[starts, 0]))
+    actor_id = data.object_actor_id[object_index[starts]]
+    cloud.colors = o3d.utility.Vector3dVector(_actor_colors(actor_id))
     return cloud
+
+
+def _placed_dynamic(data, state, cfg):
+    if not state.show_dynamic or not data.num_poses or not data.num_dynamic:
+        return (np.empty((0, 3), dtype=np.float32), np.empty(0, dtype=np.uint8),
+                np.empty(0, dtype=np.int64))
+    pose_indices = np.arange(data.num_poses, dtype=np.int64)
+    if not state.all_dynamic_frames:
+        pose_indices = pose_indices[data.pose_frame_index == state.frame_index]
+    object_index = data.pose_object_index[pose_indices]
+    counts = np.diff(data.object_point_offsets)[object_index]
+    total = int(counts.sum())
+    if not total:
+        return (np.empty((0, 3), dtype=np.float32), np.empty(0, dtype=np.uint8),
+                np.empty(0, dtype=np.int64))
+    flat = np.arange(total, dtype=np.int64) if total <= cfg.max_dynamic_points \
+        else np.linspace(0, total - 1, cfg.max_dynamic_points, dtype=np.int64)
+    ends = np.cumsum(counts)
+    selected_pose = np.searchsorted(ends, flat, side="right")
+    starts = ends - counts
+    selected_object = object_index[selected_pose]
+    point_index = data.object_point_offsets[selected_object] \
+        + flat - starts[selected_pose]
+    transforms = data.pose_transform[pose_indices[selected_pose]]
+    xyz = _transform_local(data.dynamic_xyz_local[point_index], transforms)
+    return xyz, data.dynamic_obj_tag[point_index], data.object_actor_id[selected_object]
+
+
+def _transform_local(points, transforms):
+    radians = np.deg2rad(transforms[:, 3:6])
+    cr, cp, cy = np.cos(radians).T
+    sr, sp, sy = np.sin(radians).T
+    rotations = np.empty((len(transforms), 3, 3), dtype=np.float32)
+    rotations[:, 0, :] = np.column_stack((
+        cp * cy, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr))
+    rotations[:, 1, :] = np.column_stack((
+        sy * cp, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr))
+    rotations[:, 2, :] = np.column_stack((sp, -cp * sr, cp * cr))
+    return np.einsum("nij,nj->ni", rotations, points) + transforms[:, :3]
 
 
 def current_bev_mask(points, ego_pose, bev_cfg):
@@ -144,25 +187,25 @@ def _uniform_indices(indices, limit):
     return indices[np.linspace(0, len(indices) - 1, limit, dtype=np.int64)]
 
 
-def _point_colors(data, indices, mode, cfg):
-    if not len(indices):
+def _point_colors(tags, sources, actors, points, data, mode, cfg):
+    if not len(points):
         return np.empty((0, 3), dtype=np.float64)
     if mode == "semantic":
-        tags = data.obj_tag[indices].astype(np.int64)
-        colors = np.full((len(tags), 3), (1.0, 0.0, 1.0), dtype=np.float64)
-        known = tags < len(_SEMANTIC_RGB)
-        colors[known] = _SEMANTIC_RGB[tags[known]]
+        semantic = tags.astype(np.int64)
+        colors = np.full((len(semantic), 3), (1.0, 0.0, 1.0), dtype=np.float64)
+        known = semantic < len(_SEMANTIC_RGB)
+        colors[known] = _SEMANTIC_RGB[semantic[known]]
         return colors
     if mode == "source":
         palette = np.asarray((cfg.static_rgb, cfg.dynamic_rgb), dtype=np.float64) / 255.0
-        return palette[data.source[indices]]
+        return palette[sources]
     if mode == "actor":
-        colors = _actor_colors(data.actor_id[indices])
-        colors[data.actor_id[indices] < 0] = np.asarray(cfg.static_rgb, dtype=np.float64) / 255.0
+        colors = _actor_colors(actors)
+        colors[actors < 0] = np.asarray(cfg.static_rgb, dtype=np.float64) / 255.0
         return colors
     low, high = data.height_range
     scale = max(float(high - low), np.finfo(np.float32).eps)
-    level = np.clip((data.xyz[indices, 2] - low) / scale, 0.0, 1.0)
+    level = np.clip((points[:, 2] - low) / scale, 0.0, 1.0)
     return np.column_stack((level, 1.0 - np.abs(2.0 * level - 1.0), 1.0 - level))
 
 

@@ -93,27 +93,65 @@ def check_run_checkpoint(checkpoint, fingerprint, scene_names):
 
 
 def check_output_payload(payload, fingerprint):
-    """校验对象: 最终 PT —— 指纹、点级字段与逐帧自车位姿必须一致。"""
-    required = {
-        "xyz", "obj_tag", "source", "actor_id", "frame_index", "ego_pose", "metadata"}
+    """校验对象: 最终 PT —— 静态、对象模型、逐帧位姿与自车位姿须规范化且一致。"""
+    required = {"static", "dynamic_objects", "dynamic_poses", "ego_pose", "metadata"}
     if not isinstance(payload, dict) or not required.issubset(payload):
         raise ValueError("最终 PT 缺少必要字段")
     if payload["metadata"].get("fingerprint") != fingerprint:
         raise ValueError("最终 PT 指纹与当前输入或配置不一致")
-    length = len(payload["xyz"])
-    if payload["xyz"].ndim != 2 or payload["xyz"].shape[1] != 3 \
-            or any(len(payload[name]) != length
-                   for name in ("obj_tag", "source", "actor_id", "frame_index")):
-        raise ValueError("最终 PT 点级字段形状不一致")
-    if payload["xyz"].dtype != torch.float32 \
-            or payload["obj_tag"].dtype != torch.uint8 \
-            or payload["source"].dtype != torch.uint8 \
-            or payload["actor_id"].dtype != torch.int64 \
-            or payload["frame_index"].dtype != torch.int32:
-        raise ValueError("最终 PT 点级字段 dtype 不符合接口约定")
     num_frames = payload["metadata"].get("input_signature", {}).get("num_frames")
     ego_pose = payload["ego_pose"]
     if not torch.is_tensor(ego_pose) or ego_pose.dtype != torch.float32 \
             or ego_pose.ndim != 2 or ego_pose.shape != (num_frames, 6) \
             or not bool(torch.isfinite(ego_pose).all()):
         raise ValueError("最终 PT ego_pose 必须为有限 float32[F,6]，且 F 等于场景帧数")
+    static = payload["static"]
+    if not isinstance(static, dict) or not {"xyz", "obj_tag"}.issubset(static) \
+            or static["xyz"].dtype != torch.float32 or static["xyz"].ndim != 2 \
+            or static["xyz"].shape[1] != 3 or static["obj_tag"].dtype != torch.uint8 \
+            or static["obj_tag"].shape != (len(static["xyz"]),) \
+            or not bool(torch.isfinite(static["xyz"]).all()):
+        raise ValueError("最终 PT static 必须包含有限 float32[Ns,3] xyz 与 uint8[Ns] obj_tag")
+    objects = payload["dynamic_objects"]
+    object_fields = {"actor_id", "class_id", "extent", "point_offsets", "xyz_local", "obj_tag"}
+    if not isinstance(objects, dict) or not object_fields.issubset(objects):
+        raise ValueError("最终 PT dynamic_objects 缺少必要字段")
+    actor_id, offsets, local = objects["actor_id"], objects["point_offsets"], objects["xyz_local"]
+    count = len(actor_id)
+    if actor_id.dtype != torch.int64 or actor_id.shape != (count,) \
+            or objects["class_id"].dtype != torch.uint8 \
+            or objects["class_id"].shape != (count,) \
+            or objects["extent"].dtype != torch.float32 \
+            or objects["extent"].shape != (count, 3) \
+            or offsets.dtype != torch.int64 or offsets.shape != (count + 1,) \
+            or local.dtype != torch.float32 or local.ndim != 2 or local.shape[1] != 3 \
+            or objects["obj_tag"].dtype != torch.uint8 \
+            or objects["obj_tag"].shape != (len(local),):
+        raise ValueError("最终 PT dynamic_objects 字段形状或 dtype 非法")
+    if offsets[0].item() != 0 or offsets[-1].item() != len(local) \
+            or not bool((offsets[1:] >= offsets[:-1]).all()) \
+            or not bool(torch.isfinite(local).all()) \
+            or not bool(torch.isfinite(objects["extent"]).all()) \
+            or not bool((objects["extent"] > 0).all()) \
+            or (count and not bool((actor_id[1:] > actor_id[:-1]).all())) \
+            or not bool((objects["class_id"] <= 1).all()):
+        raise ValueError("最终 PT dynamic_objects 偏移、actor 顺序、类别或数值非法")
+    poses = payload["dynamic_poses"]
+    pose_fields = {"object_index", "frame_index", "transform"}
+    if not isinstance(poses, dict) or not pose_fields.issubset(poses):
+        raise ValueError("最终 PT dynamic_poses 缺少必要字段")
+    pose_count = len(poses["object_index"])
+    if poses["object_index"].dtype != torch.int64 \
+            or poses["object_index"].shape != (pose_count,) \
+            or poses["frame_index"].dtype != torch.int32 \
+            or poses["frame_index"].shape != (pose_count,) \
+            or poses["transform"].dtype != torch.float32 \
+            or poses["transform"].shape != (pose_count, 6) \
+            or not bool(torch.isfinite(poses["transform"]).all()):
+        raise ValueError("最终 PT dynamic_poses 字段形状、dtype 或数值非法")
+    if pose_count and (count == 0 \
+            or int(poses["object_index"].min()) < 0 \
+            or int(poses["object_index"].max()) >= count \
+            or int(poses["frame_index"].min()) < 0 \
+            or int(poses["frame_index"].max()) >= num_frames):
+        raise ValueError("最终 PT dynamic_poses 对象或帧索引越界")

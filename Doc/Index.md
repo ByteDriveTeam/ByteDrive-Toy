@@ -136,7 +136,7 @@ Py37 仿真端 `worker/`
 
 - [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — 融合重建点云 Open3D 可视化包：读取统一 PT、分层着色并交互浏览轨迹。
 - [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — 融合重建点云可视化 CLI：选择 PT 场景并启动 Open3D 交互窗口。
-- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载统一 PT 格式并提供自车位姿、来源与 actor 索引。
+- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载分离的静态地图、动态对象模型及逐帧位姿。
 - [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Open3D 重建点云渲染：图层筛选、分层下采样、着色与 actor 轨迹生成。
 - [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Open3D 交互查看器：切换全局/当前帧 BEV、静动态层、轨迹与着色并保存截图。
 

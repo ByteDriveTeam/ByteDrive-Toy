@@ -162,10 +162,8 @@ class MultiframePointcloudFusionCfg:
     output_dir: str
     device: str
     frames_per_batch: int
-    placement_batch_size: int
     voxel_size_m: float
     box_fallback_margin_m: float
-    dynamic_frame_stride: int
     moving_tags: MovingTagsCfg
 
 
@@ -869,11 +867,9 @@ def _validate_multiframe_pointcloud_fusion(fusion):
     assert isinstance(fusion.device, str) \
         and (fusion.device in ("auto", "cpu") or cuda_device), \
         "multiframe_pointcloud_fusion.device 仅支持 auto/cpu/cuda[:序号]"
-    batches = (fusion.frames_per_batch, fusion.placement_batch_size,
-               fusion.dynamic_frame_stride)
-    assert all(isinstance(value, int) and not isinstance(value, bool) and value > 0
-               for value in batches), \
-        "multiframe_pointcloud_fusion 批量大小与动态帧步长必须为正整数"
+    assert isinstance(fusion.frames_per_batch, int) \
+        and not isinstance(fusion.frames_per_batch, bool) and fusion.frames_per_batch > 0, \
+        "multiframe_pointcloud_fusion.frames_per_batch 必须为正整数"
     spatial = (fusion.voxel_size_m, fusion.box_fallback_margin_m)
     assert all(isinstance(value, (int, float)) and not isinstance(value, bool)
                and math.isfinite(value) and value >= 0 for value in spatial), \

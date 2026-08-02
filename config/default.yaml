@@ -111,10 +111,8 @@ multiframe_pointcloud_fusion:
   output_dir: data/multiframe_pointcloud_fusion/output
   device: auto                    # auto / cpu / cuda；auto 优先使用 CUDA
   frames_per_batch: 4             # 单次张量计算包含的传感器帧数；断点始终以完整场景为单位
-  placement_batch_size: 256       # 动态对象完整模型一次放回的 Box 位姿数
   voxel_size_m: 0.10              # 0 表示不做体素聚合
   box_fallback_margin_m: 0.25     # 实例 ID 失配时，有向 Box 各轴外扩容差
-  dynamic_frame_stride: 1         # 完整动态模型每隔多少个传感器帧放置一次
   moving_tags:
     pedestrian: [12]              # CARLA 0.9.15 CityObjectLabel.Pedestrians
     vehicle: [13, 14, 15, 16, 17, 18, 19]  # Rider/Car/Truck/Bus/Train/Motorcycle/Bicycle
