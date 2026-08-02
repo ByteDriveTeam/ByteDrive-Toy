@@ -197,7 +197,24 @@ class MeshRepairCfg:
 
 
 @dataclass
+class SparseUdfLevelCfg:
+    voxel_size_m: float
+    band_width_voxels: int
+    truncation_m: float
+    normal_radius_m: float
+    normal_max_nn: int
+
+
+@dataclass
+class SparseUdfCfg:
+    static: SparseUdfLevelCfg
+    dynamic: SparseUdfLevelCfg
+    max_voxels: int
+
+
+@dataclass
 class MeshReconstructionCfg:
+    output_format: str
     input_path: str
     output_dir: str
     device: str
@@ -207,6 +224,7 @@ class MeshReconstructionCfg:
     static: MeshPoissonCfg
     dynamic: MeshDynamicCfg
     repair: MeshRepairCfg
+    udf: SparseUdfCfg
 
 
 @dataclass
@@ -272,6 +290,38 @@ class ReconstructedMeshVisCfg:
     initial_show_trajectory: bool
     initial_follow_ego: bool
     camera: ReconstructedMeshCameraCfg
+
+
+@dataclass
+class ReconstructedUdfCameraCfg:
+    front: List[float]
+    up: List[float]
+    zoom: float
+
+
+@dataclass
+class ReconstructedUdfVisCfg:
+    udf_dir: str
+    file: str
+    window_name: str
+    width: int
+    height: int
+    max_static_voxels: int
+    max_dynamic_voxels: int
+    point_size: float
+    background_rgb: List[int]
+    static_rgb: List[int]
+    dynamic_rgb: List[int]
+    coordinate_frame_size_m: float
+    trajectory_line_width: float
+    play_fps: float
+    screenshot_dir: str
+    initial_color_mode: str
+    initial_show_static: bool
+    initial_show_dynamic: bool
+    initial_show_trajectory: bool
+    initial_follow_ego: bool
+    camera: ReconstructedUdfCameraCfg
 
 
 @dataclass
@@ -794,6 +844,7 @@ class Config:
     mesh_reconstruction: MeshReconstructionCfg
     reconstructed_pointcloud_vis: ReconstructedPointcloudVisCfg
     reconstructed_mesh_vis: ReconstructedMeshVisCfg
+    reconstructed_udf_vis: ReconstructedUdfVisCfg
     data_vis: DataVisCfg
     model: ModelCfg
     data: DataCfg
@@ -923,6 +974,7 @@ def validate_config(cfg):
     _validate_mesh_reconstruction(cfg.mesh_reconstruction)
     _validate_reconstructed_pointcloud_vis(cfg.reconstructed_pointcloud_vis)
     _validate_reconstructed_mesh_vis(cfg.reconstructed_mesh_vis)
+    _validate_reconstructed_udf_vis(cfg.reconstructed_udf_vis)
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
@@ -965,6 +1017,8 @@ def _validate_multiframe_pointcloud_fusion(fusion):
 
 def _validate_mesh_reconstruction(mesh):
     """校验对象: cfg.mesh_reconstruction —— 路径、设备、Poisson、修复与 donor 参数。"""
+    assert mesh.output_format in ("sparse_udf", "mesh"), \
+        "mesh_reconstruction.output_format 仅支持 sparse_udf/mesh"
     assert isinstance(mesh.input_path, str) and mesh.input_path \
         and isinstance(mesh.output_dir, str) and mesh.output_dir, \
         "mesh_reconstruction 输入与输出路径不得为空"
@@ -1003,6 +1057,18 @@ def _validate_mesh_reconstruction(mesh):
     assert mesh.repair.static_hole_radius_m > 0 \
         and mesh.repair.dynamic_hole_radius_m > 0, \
         "mesh_reconstruction.repair 补洞半径必须 > 0"
+    assert isinstance(mesh.udf.max_voxels, int) and mesh.udf.max_voxels > 0, \
+        "mesh_reconstruction.udf.max_voxels 必须为正整数"
+    for name, udf in (("static", mesh.udf.static), ("dynamic", mesh.udf.dynamic)):
+        assert all(math.isfinite(value) and value > 0 for value in (
+            udf.voxel_size_m, udf.truncation_m, udf.normal_radius_m)), \
+            "mesh_reconstruction.udf.{} 尺度必须为有限正数".format(name)
+        assert isinstance(udf.band_width_voxels, int) \
+            and 0 <= udf.band_width_voxels <= 4 \
+            and isinstance(udf.normal_max_nn, int) and udf.normal_max_nn >= 3, \
+            "mesh_reconstruction.udf.{} 窄带层数或法线邻点数非法".format(name)
+        assert udf.truncation_m >= udf.voxel_size_m * 0.5, \
+            "mesh_reconstruction.udf.{} 截断距离过小".format(name)
 
 
 def _validate_reconstructed_pointcloud_vis(vis):
@@ -1074,6 +1140,39 @@ def _validate_reconstructed_mesh_vis(vis):
     assert front_norm > 0 and up_norm > 0 \
         and abs(dot) < front_norm * up_norm * 0.999 and 0 < camera.zoom <= 2, \
         "reconstructed_mesh_vis.camera 方向不得共线且 zoom 须在 (0,2]"
+
+
+def _validate_reconstructed_udf_vis(vis):
+    """校验对象: cfg.reconstructed_udf_vis —— 稀疏体素窗口、采样与初始状态。"""
+    assert isinstance(vis.udf_dir, str) and vis.udf_dir \
+        and isinstance(vis.file, str) and isinstance(vis.screenshot_dir, str) \
+        and vis.screenshot_dir, "reconstructed_udf_vis 路径配置非法"
+    assert isinstance(vis.window_name, str) and vis.window_name \
+        and vis.width > 0 and vis.height > 0 \
+        and vis.max_static_voxels > 0 and vis.max_dynamic_voxels > 0, \
+        "reconstructed_udf_vis 窗口或体素上限非法"
+    assert vis.point_size > 0 and vis.coordinate_frame_size_m > 0 \
+        and vis.trajectory_line_width > 0 and vis.play_fps > 0, \
+        "reconstructed_udf_vis 尺寸或帧率必须 > 0"
+    assert all(_is_rgb(color) for color in (
+        vis.background_rgb, vis.static_rgb, vis.dynamic_rgb)), \
+        "reconstructed_udf_vis 颜色须为 RGB 三元组"
+    assert vis.initial_color_mode in ("udf", "weight", "semantic", "source", "actor"), \
+        "reconstructed_udf_vis.initial_color_mode 非法"
+    assert all(isinstance(value, bool) for value in (
+        vis.initial_show_static, vis.initial_show_dynamic,
+        vis.initial_show_trajectory, vis.initial_follow_ego)), \
+        "reconstructed_udf_vis 初始开关必须为布尔值"
+    camera = vis.camera
+    assert len(camera.front) == 3 and len(camera.up) == 3 \
+        and all(math.isfinite(value) for value in camera.front + camera.up), \
+        "reconstructed_udf_vis.camera 向量非法"
+    front_norm = math.sqrt(sum(value * value for value in camera.front))
+    up_norm = math.sqrt(sum(value * value for value in camera.up))
+    dot = sum(a * b for a, b in zip(camera.front, camera.up))
+    assert front_norm > 0 and up_norm > 0 \
+        and abs(dot) < front_norm * up_norm * 0.999 and 0 < camera.zoom <= 2, \
+        "reconstructed_udf_vis.camera 方向不得共线且 zoom 须在 (0,2]"
 
 
 def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collection):

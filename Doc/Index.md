@@ -38,6 +38,8 @@
 - [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — 隔离 Poisson 子进程入口：关闭 Windows 崩溃弹窗并返回单次表面重建结果。
 - [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — 动态对象 Poisson、donor 复用与 Box 回退公开 API。
 - [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — 按点覆盖率重建动态对象，并依次执行相同 donor、相似 donor 与 Box 回退。
+- [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — 静态世界与动态局部稀疏 TUDF 重建公开 API。
+- [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — 以 PyTorch 稀疏规则张量构建静态世界与动态局部截断无符号距离场。
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -150,6 +152,17 @@ Py37 仿真端 `worker/`
 - [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D Mesh 渲染：静态/动态 BEV 裁剪、逐帧刚体放置与 actor 轨迹。
 - [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Open3D Mesh 全局/自车 BEV 交互查看器公开 API。
 - [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Open3D Mesh 查看器：逐帧播放、全局/自车 BEV、着色与截图。
+
+### vis/reconstructed_udf_vis/ — 稀疏 TUDF Open3D 逐帧可视化
+
+- [vis/reconstructed_udf_vis/__init__.py](../vis/reconstructed_udf_vis/__init__.py) — 稀疏 TUDF 读取、逐帧组合与 Open3D 可视化包。
+- [vis/reconstructed_udf_vis/run.py](../vis/reconstructed_udf_vis/run.py) — 稀疏 TUDF Open3D 逐帧可视化 CLI。
+- [vis/reconstructed_udf_vis/reader/__init__.py](../vis/reconstructed_udf_vis/reader/__init__.py) — 稀疏 TUDF 读取与定位公开 API。
+- [vis/reconstructed_udf_vis/reader/reader.py](../vis/reconstructed_udf_vis/reader/reader.py) — 统一稀疏 TUDF PT 读取器。
+- [vis/reconstructed_udf_vis/render/__init__.py](../vis/reconstructed_udf_vis/render/__init__.py) — 稀疏 TUDF 体素、轨迹渲染公开 API。
+- [vis/reconstructed_udf_vis/render/render.py](../vis/reconstructed_udf_vis/render/render.py) — 把静态世界和当前帧动态局部 TUDF 渲染为 Open3D 稀疏点体素。
+- [vis/reconstructed_udf_vis/viewer/__init__.py](../vis/reconstructed_udf_vis/viewer/__init__.py) — Open3D 稀疏 TUDF 交互查看器公开 API。
+- [vis/reconstructed_udf_vis/viewer/viewer.py](../vis/reconstructed_udf_vis/viewer/viewer.py) — Open3D 稀疏 TUDF 查看器：逐帧、全局/自车 BEV、着色和截图。
 
 ### vis/reconstructed_pointcloud_vis/ — 融合重建点云 Open3D 交互可视化
 

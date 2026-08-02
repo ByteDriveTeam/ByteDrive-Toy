@@ -49,7 +49,7 @@ def discover_pointclouds(input_path) -> list[Path]:
     check_input_path(source)
     files = [source] if source.is_file() else sorted(
         path.resolve() for path in source.rglob("*.pt")
-        if not path.name.endswith(".mesh.pt"))
+        if not path.name.endswith((".mesh.pt", ".udf.pt")))
     if not files:
         raise ValueError("输入目录下未发现融合 .pt: {}".format(source))
     return files
@@ -205,6 +205,8 @@ def _algorithm_config(cfg):
     values = asdict(cfg)
     values.pop("input_path")
     values.pop("output_dir")
+    values.pop("output_format")
+    values.pop("udf")
     return values
 
 

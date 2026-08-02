@@ -121,6 +121,7 @@ multiframe_pointcloud_fusion:
 # mesh_reconstruction —— 融合点云水密 Mesh 重建
 # ============================================================
 mesh_reconstruction:
+  output_format: sparse_udf            # sparse_udf（默认权威产物）/ mesh（可选 Poisson 导出）
   input_path: data/multiframe_pointcloud_fusion/output
   output_dir: data/mesh_reconstruction/output
   device: auto                       # auto / cpu / cuda[:序号]；仅张量阶段使用
@@ -157,6 +158,20 @@ mesh_reconstruction:
     enabled: false                    # 是否补洞并强制水密；大缺口可能产生失真面片
     static_hole_radius_m: 1000.0
     dynamic_hole_radius_m: 10.0
+  udf:
+    static:
+      voxel_size_m: 0.20
+      band_width_voxels: 1             # 表面体素向外扩展的稀疏窄带层数
+      truncation_m: 0.40
+      normal_radius_m: 0.60
+      normal_max_nn: 48
+    dynamic:
+      voxel_size_m: 0.10
+      band_width_voxels: 1
+      truncation_m: 0.20
+      normal_radius_m: 0.30
+      normal_max_nn: 32
+    max_voxels: 8000000                # 单个静态场或动态对象的安全上限
 
 # ============================================================
 # reconstructed_pointcloud_vis —— 融合重建点云 Open3D 可视化
@@ -212,6 +227,35 @@ reconstructed_mesh_vis:
   initial_show_dynamic: true
   initial_show_trajectory: true
   initial_follow_ego: false           # false=全局；true=当前帧自车 BEV 范围并跟随相机
+  camera:
+    front: [0.55, -0.55, 0.62]
+    up: [0.0, 0.0, 1.0]
+    zoom: 0.7
+
+# ============================================================
+# reconstructed_udf_vis —— 稀疏 TUDF Open3D 逐帧可视化
+# ============================================================
+reconstructed_udf_vis:
+  udf_dir: data/mesh_reconstruction/output
+  file: ''
+  window_name: ByteDrive 稀疏 TUDF 可视化
+  width: 1600
+  height: 900
+  max_static_voxels: 1200000
+  max_dynamic_voxels: 400000
+  point_size: 2.0
+  background_rgb: [18, 20, 24]
+  static_rgb: [170, 175, 185]
+  dynamic_rgb: [255, 125, 30]
+  coordinate_frame_size_m: 5.0
+  trajectory_line_width: 2.0
+  play_fps: 2.0
+  screenshot_dir: vis/reconstructed_udf_vis/screenshots
+  initial_color_mode: udf          # udf / weight / semantic / source / actor
+  initial_show_static: true
+  initial_show_dynamic: true
+  initial_show_trajectory: true
+  initial_follow_ego: true
   camera:
     front: [0.55, -0.55, 0.62]
     up: [0.0, 0.0, 1.0]

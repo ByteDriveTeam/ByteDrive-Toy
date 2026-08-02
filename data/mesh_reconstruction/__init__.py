@@ -14,5 +14,7 @@ from data.mesh_reconstruction.mesh_reconstruction import (
     reconstruct_scene,
     run_reconstruction,
 )
+from data.mesh_reconstruction.udf import reconstruct_udf_scene, run_udf_reconstruction
 
-__all__ = ["discover_pointclouds", "reconstruct_scene", "run_reconstruction"]
+__all__ = ["discover_pointclouds", "reconstruct_scene", "run_reconstruction",
+           "reconstruct_udf_scene", "run_udf_reconstruction"]
