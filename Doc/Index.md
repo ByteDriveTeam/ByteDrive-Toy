@@ -30,6 +30,14 @@
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API。
 - [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — 多帧语义 LiDAR 静态融合、动态对象级重建、场景级断点恢复与批处理。
 - [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — 多帧点云融合 CLI：加载配置并处理单场景或递归数据集。
+- [data/mesh_reconstruction/__init__.py](../data/mesh_reconstruction/__init__.py) — 融合点云 Mesh 重建公开 API，支持可选水密修复。
+- [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — 融合 PT 的静态优先 Mesh 重建、动态 donor 复用、断点恢复与批处理。
+- [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — 融合点云 Mesh 批处理 CLI。
+- [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Poisson 表面重建与可选水密修复公开 API。
+- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — 以 PyTorch 观测支撑裁剪和 Open3D Poisson 生成三角 Mesh，并可选执行水密修复。
+- [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — 隔离 Poisson 子进程入口：关闭 Windows 崩溃弹窗并返回单次表面重建结果。
+- [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — 动态对象 Poisson、donor 复用与 Box 回退公开 API。
+- [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — 按点覆盖率重建动态对象，并依次执行相同 donor、相似 donor 与 Box 回退。
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -131,6 +139,17 @@ Py37 仿真端 `worker/`
 - [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
 
 ## vis/ — 可视化与日志渲染
+
+### vis/reconstructed_mesh_vis/ — 水密 Mesh Open3D 逐帧可视化
+
+- [vis/reconstructed_mesh_vis/__init__.py](../vis/reconstructed_mesh_vis/__init__.py) — 水密 Mesh Open3D 可视化包：读取统一 PT 并按逐帧位姿组合静动态几何。
+- [vis/reconstructed_mesh_vis/run.py](../vis/reconstructed_mesh_vis/run.py) — 水密 Mesh 可视化 CLI：选择统一 PT 并启动 Open3D 逐帧查看器。
+- [vis/reconstructed_mesh_vis/reader/__init__.py](../vis/reconstructed_mesh_vis/reader/__init__.py) — 重建 Mesh PT 读取与定位公开 API。
+- [vis/reconstructed_mesh_vis/reader/reader.py](../vis/reconstructed_mesh_vis/reader/reader.py) — 统一 Mesh PT 读取器：加载静态表面、动态局部模型与逐帧位姿。
+- [vis/reconstructed_mesh_vis/render/__init__.py](../vis/reconstructed_mesh_vis/render/__init__.py) — 重建 Mesh 的静态、动态与轨迹渲染公开 API。
+- [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D Mesh 渲染：静态/动态 BEV 裁剪、逐帧刚体放置与 actor 轨迹。
+- [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Open3D Mesh 全局/自车 BEV 交互查看器公开 API。
+- [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Open3D Mesh 查看器：逐帧播放、全局/自车 BEV、着色与截图。
 
 ### vis/reconstructed_pointcloud_vis/ — 融合重建点云 Open3D 交互可视化
 

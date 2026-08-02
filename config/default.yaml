@@ -118,6 +118,47 @@ multiframe_pointcloud_fusion:
     vehicle: [13, 14, 15, 16, 17, 18, 19]  # Rider/Car/Truck/Bus/Train/Motorcycle/Bicycle
 
 # ============================================================
+# mesh_reconstruction —— 融合点云水密 Mesh 重建
+# ============================================================
+mesh_reconstruction:
+  input_path: data/multiframe_pointcloud_fusion/output
+  output_dir: data/mesh_reconstruction/output
+  device: auto                       # auto / cpu / cuda[:序号]；仅张量阶段使用
+  tensor_batch_size: 65536           # 最近位姿与标签迁移的张量分批大小
+  tag_candidate_budget: 2000000      # 单批语义标签空间哈希候选总数上限
+  poisson_threads: -1                # -1=Open3D 自动选择线程数
+  static:
+    voxel_size_m: 0.20
+    normal_radius_m: 0.60
+    normal_max_nn: 48
+    depth: 10
+    scale: 1.10
+    max_triangles: 4000000
+    tag_radius_m: 0.40
+    prune_unsupported_surfaces: true  # 删除附近没有输入点支撑的 Poisson 外推表面
+    support_radius_m: 0.60            # 静态表面观测支撑半径
+    timeout_s: 3600.0                 # 隔离 Poisson 子进程单次上限
+  dynamic:
+    voxel_size_m: 0.10
+    normal_radius_m: 0.30
+    normal_max_nn: 32
+    depth: 7
+    scale: 1.15
+    max_triangles: 50000
+    tag_radius_m: 0.30
+    prune_unsupported_surfaces: false
+    support_radius_m: 0.30
+    timeout_s: 300.0
+    min_points: 64
+    min_surface_coverage: 0.05
+    exact_extent_tolerance_m: 0.001
+    similar_extent_relative_tolerance: 0.15
+  repair:
+    enabled: false                    # 是否补洞并强制水密；大缺口可能产生失真面片
+    static_hole_radius_m: 1000.0
+    dynamic_hole_radius_m: 10.0
+
+# ============================================================
 # reconstructed_pointcloud_vis —— 融合重建点云 Open3D 可视化
 # ============================================================
 reconstructed_pointcloud_vis:
@@ -144,6 +185,36 @@ reconstructed_pointcloud_vis:
   camera:
     front: [0.55, -0.55, 0.62]     # Open3D 观察方向
     up: [0.0, 0.0, 1.0]            # CARLA 世界坐标 z 轴向上
+    zoom: 0.7
+
+# ============================================================
+# reconstructed_mesh_vis —— 水密 Mesh Open3D 逐帧可视化
+# ============================================================
+reconstructed_mesh_vis:
+  mesh_dir: data/mesh_reconstruction/output
+  file: ''
+  window_name: ByteDrive 水密 Mesh 可视化
+  width: 1600
+  height: 900
+  background_rgb: [18, 20, 24]
+  static_rgb: [170, 175, 185]
+  dynamic_rgb: [255, 125, 30]
+  unknown_rgb: [255, 0, 255]
+  poisson_rgb: [70, 180, 255]
+  reuse_rgb: [255, 190, 0]
+  box_rgb: [220, 70, 70]
+  coordinate_frame_size_m: 5.0
+  trajectory_line_width: 2.0
+  play_fps: 2.0
+  screenshot_dir: vis/reconstructed_mesh_vis/screenshots
+  initial_color_mode: source        # semantic / source / actor / method
+  initial_show_static: true
+  initial_show_dynamic: true
+  initial_show_trajectory: true
+  initial_follow_ego: false           # false=全局；true=当前帧自车 BEV 范围并跟随相机
+  camera:
+    front: [0.55, -0.55, 0.62]
+    up: [0.0, 0.0, 1.0]
     zoom: 0.7
 
 # ============================================================

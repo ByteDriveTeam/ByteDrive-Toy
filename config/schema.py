@@ -168,6 +168,48 @@ class MultiframePointcloudFusionCfg:
 
 
 @dataclass
+class MeshPoissonCfg:
+    voxel_size_m: float
+    normal_radius_m: float
+    normal_max_nn: int
+    depth: int
+    scale: float
+    max_triangles: int
+    tag_radius_m: float
+    prune_unsupported_surfaces: bool
+    support_radius_m: float
+    timeout_s: float
+
+
+@dataclass
+class MeshDynamicCfg(MeshPoissonCfg):
+    min_points: int
+    min_surface_coverage: float
+    exact_extent_tolerance_m: float
+    similar_extent_relative_tolerance: float
+
+
+@dataclass
+class MeshRepairCfg:
+    enabled: bool
+    static_hole_radius_m: float
+    dynamic_hole_radius_m: float
+
+
+@dataclass
+class MeshReconstructionCfg:
+    input_path: str
+    output_dir: str
+    device: str
+    tensor_batch_size: int
+    tag_candidate_budget: int
+    poisson_threads: int
+    static: MeshPoissonCfg
+    dynamic: MeshDynamicCfg
+    repair: MeshRepairCfg
+
+
+@dataclass
 class ReconstructedPointcloudCameraCfg:
     front: List[float]
     up: List[float]
@@ -197,6 +239,39 @@ class ReconstructedPointcloudVisCfg:
     initial_show_trajectory: bool
     initial_all_dynamic_frames: bool
     camera: ReconstructedPointcloudCameraCfg
+
+
+@dataclass
+class ReconstructedMeshCameraCfg:
+    front: List[float]
+    up: List[float]
+    zoom: float
+
+
+@dataclass
+class ReconstructedMeshVisCfg:
+    mesh_dir: str
+    file: str
+    window_name: str
+    width: int
+    height: int
+    background_rgb: List[int]
+    static_rgb: List[int]
+    dynamic_rgb: List[int]
+    unknown_rgb: List[int]
+    poisson_rgb: List[int]
+    reuse_rgb: List[int]
+    box_rgb: List[int]
+    coordinate_frame_size_m: float
+    trajectory_line_width: float
+    play_fps: float
+    screenshot_dir: str
+    initial_color_mode: str
+    initial_show_static: bool
+    initial_show_dynamic: bool
+    initial_show_trajectory: bool
+    initial_follow_ego: bool
+    camera: ReconstructedMeshCameraCfg
 
 
 @dataclass
@@ -716,7 +791,9 @@ class CloneLoopCfg:
 class Config:
     carla_collector: CarlaCollectorCfg
     multiframe_pointcloud_fusion: MultiframePointcloudFusionCfg
+    mesh_reconstruction: MeshReconstructionCfg
     reconstructed_pointcloud_vis: ReconstructedPointcloudVisCfg
+    reconstructed_mesh_vis: ReconstructedMeshVisCfg
     data_vis: DataVisCfg
     model: ModelCfg
     data: DataCfg
@@ -843,7 +920,9 @@ def validate_config(cfg):
         "output.video_fps 必须与 capture_every_n_ticks 对应的传感器采样率一致"
 
     _validate_multiframe_pointcloud_fusion(cfg.multiframe_pointcloud_fusion)
+    _validate_mesh_reconstruction(cfg.mesh_reconstruction)
     _validate_reconstructed_pointcloud_vis(cfg.reconstructed_pointcloud_vis)
+    _validate_reconstructed_mesh_vis(cfg.reconstructed_mesh_vis)
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
@@ -884,6 +963,48 @@ def _validate_multiframe_pointcloud_fusion(fusion):
         "multiframe_pointcloud_fusion 运动语义标签须为 0..255 整数"
 
 
+def _validate_mesh_reconstruction(mesh):
+    """校验对象: cfg.mesh_reconstruction —— 路径、设备、Poisson、修复与 donor 参数。"""
+    assert isinstance(mesh.input_path, str) and mesh.input_path \
+        and isinstance(mesh.output_dir, str) and mesh.output_dir, \
+        "mesh_reconstruction 输入与输出路径不得为空"
+    cuda_device = isinstance(mesh.device, str) and (
+        mesh.device == "cuda" or (
+            mesh.device.startswith("cuda:") and mesh.device[5:].isdigit()))
+    assert isinstance(mesh.device, str) \
+        and (mesh.device in ("auto", "cpu") or cuda_device), \
+        "mesh_reconstruction.device 仅支持 auto/cpu/cuda[:序号]"
+    assert isinstance(mesh.tensor_batch_size, int) and mesh.tensor_batch_size > 0 \
+        and isinstance(mesh.tag_candidate_budget, int) and mesh.tag_candidate_budget > 0 \
+        and isinstance(mesh.poisson_threads, int) and mesh.poisson_threads != 0 \
+        and mesh.poisson_threads >= -1, \
+        "mesh_reconstruction 批大小/候选预算须为正，poisson_threads 仅支持 -1 或正整数"
+    for name, poisson in (("static", mesh.static), ("dynamic", mesh.dynamic)):
+        assert all(math.isfinite(value) and value > 0 for value in (
+            poisson.voxel_size_m, poisson.normal_radius_m,
+            poisson.scale, poisson.tag_radius_m, poisson.support_radius_m,
+            poisson.timeout_s)), \
+            "mesh_reconstruction.{} 空间尺度必须为有限正数".format(name)
+        assert isinstance(poisson.prune_unsupported_surfaces, bool), \
+            "mesh_reconstruction.{}.prune_unsupported_surfaces 必须为布尔值".format(name)
+        assert poisson.normal_max_nn >= 3 and poisson.depth >= 3 \
+            and poisson.max_triangles >= 4, \
+            "mesh_reconstruction.{} 邻点、深度或三角形上限非法".format(name)
+        assert poisson.scale > 1, \
+            "mesh_reconstruction.{}.scale 必须 > 1".format(name)
+    dynamic = mesh.dynamic
+    assert dynamic.min_points >= 4 \
+        and 0 < dynamic.min_surface_coverage <= 1 \
+        and dynamic.exact_extent_tolerance_m >= 0 \
+        and 0 <= dynamic.similar_extent_relative_tolerance < 1, \
+        "mesh_reconstruction.dynamic 稀疏判定或 donor 容差非法"
+    assert isinstance(mesh.repair.enabled, bool), \
+        "mesh_reconstruction.repair.enabled 必须为布尔值"
+    assert mesh.repair.static_hole_radius_m > 0 \
+        and mesh.repair.dynamic_hole_radius_m > 0, \
+        "mesh_reconstruction.repair 补洞半径必须 > 0"
+
+
 def _validate_reconstructed_pointcloud_vis(vis):
     """校验对象: cfg.reconstructed_pointcloud_vis —— 输入、窗口、样式与初始视角。"""
     assert isinstance(vis.pointcloud_dir, str) and vis.pointcloud_dir \
@@ -921,6 +1042,38 @@ def _validate_reconstructed_pointcloud_vis(vis):
     up_norm = math.sqrt(sum(value * value for value in camera.up))
     assert abs(dot) < front_norm * up_norm * 0.999 and 0 < camera.zoom <= 2, \
         "reconstructed_pointcloud_vis.camera 方向不得共线且 zoom 须在 (0,2]"
+
+
+def _validate_reconstructed_mesh_vis(vis):
+    """校验对象: cfg.reconstructed_mesh_vis —— 输入、交互、样式与初始视角。"""
+    assert isinstance(vis.mesh_dir, str) and vis.mesh_dir \
+        and isinstance(vis.file, str) and isinstance(vis.screenshot_dir, str) \
+        and vis.screenshot_dir, "reconstructed_mesh_vis Mesh 与截图路径配置非法"
+    assert isinstance(vis.window_name, str) and vis.window_name \
+        and vis.width > 0 and vis.height > 0, \
+        "reconstructed_mesh_vis 窗口名与尺寸非法"
+    colors = (vis.background_rgb, vis.static_rgb, vis.dynamic_rgb, vis.unknown_rgb,
+              vis.poisson_rgb, vis.reuse_rgb, vis.box_rgb)
+    assert all(_is_rgb(color) for color in colors), \
+        "reconstructed_mesh_vis 颜色须是 0..255 的 RGB 三元组"
+    assert vis.coordinate_frame_size_m > 0 and vis.trajectory_line_width > 0 \
+        and vis.play_fps > 0, "reconstructed_mesh_vis 尺寸、线宽与播放帧率必须 > 0"
+    assert vis.initial_color_mode in ("semantic", "source", "actor", "method"), \
+        "reconstructed_mesh_vis.initial_color_mode 取值非法"
+    assert all(isinstance(value, bool) for value in (
+        vis.initial_show_static, vis.initial_show_dynamic,
+        vis.initial_show_trajectory, vis.initial_follow_ego)), \
+        "reconstructed_mesh_vis 初始显示开关必须为布尔值"
+    camera = vis.camera
+    assert len(camera.front) == 3 and len(camera.up) == 3 \
+        and all(math.isfinite(value) for value in camera.front + camera.up), \
+        "reconstructed_mesh_vis.camera.front/up 须为有限三维向量"
+    front_norm = math.sqrt(sum(value * value for value in camera.front))
+    up_norm = math.sqrt(sum(value * value for value in camera.up))
+    dot = sum(a * b for a, b in zip(camera.front, camera.up))
+    assert front_norm > 0 and up_norm > 0 \
+        and abs(dot) < front_norm * up_norm * 0.999 and 0 < camera.zoom <= 2, \
+        "reconstructed_mesh_vis.camera 方向不得共线且 zoom 须在 (0,2]"
 
 
 def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collection):
