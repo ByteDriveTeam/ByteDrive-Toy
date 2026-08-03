@@ -420,7 +420,7 @@ model:
     # 8 扇区多模态轨迹解码
     trajectory:
       num_modes: 8               # 8 个可学习 Mode Token，对应 8 条候选轨迹
-      num_waypoints: 10          # 每条轨迹航点数 T_wp（10Hz、0.1s/点 → 4s）
+      num_waypoints: 20          # 每条轨迹航点数 T_wp（10Hz、0.1s/点 → 4s）
       waypoint_dt_s: 0.1         # 相邻输出轨迹点的时间间隔
       planning_dim: 384          # 规划分支工作维；第 3/6 层分别归一后拼接再经 1×1 CNN 降到此维
       condition_mlp_hidden: 256  # 目标点+ego 速度条件编码 MLP 隐藏维

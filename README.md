@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的三目+LiDAR、双帧时序、开闭环端到端驾驶研究原型</strong><br/>
-  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环驾驶
+  <strong>面向 CARLA 合成数据的三目+LiDAR、双帧时序行为克隆驾驶研究原型</strong><br/>
+  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环评测
 </p>
 
 <p align="center">
@@ -20,6 +20,13 @@
 > ByteDrive-Toy 当前已经覆盖 CARLA 数据采集、感知预训练、BEV 驾驶训练、离线预测与可视化以及
 > **CARLA 0.9.15 行为克隆闭环驾驶**。`clone_loop/` 可在同步仿真中完成双帧推理、候选轨迹安全重排、
 > 车辆控制、episode 评测与录像。它仍是仿真研究原型，不是可直接部署到真实车辆的完整自动驾驶系统。
+
+> [!WARNING]
+> 当前驾驶模型是用 CARLA `BehaviorAgent` 专家轨迹做监督学习的**行为克隆（Behavior Cloning）模型**。
+> 仓库没有实现基于环境奖励的闭环强化学习，也不会用闭环 episode 自动回传梯度或在线改进策略；这里的“闭环”仅指
+> 模型输出经规则重排和低层控制器作用于 CARLA 后，再读取下一帧继续推理。现有数据分布也较单一：当前训练/演示数据
+> 集中在 `Town02_Opt`、单一专家行为风格和固定采集配方。行为克隆在闭环中容易遭遇分布偏移与误差累积，因此当前权重
+> 出现停车、偏航、碰撞、路线完成率低或泛化性能不佳属于现阶段的正常预期，不代表本项目已经达到可用驾驶性能。
 
 > [!IMPORTANT]
 > 此README在GitHub上渲染异常，建议下载到本地用专业MarkDown阅读器阅读。
@@ -42,6 +49,7 @@
 - [预训练权重下载](#预训练权重下载)
 - [环境安装](#环境安装)
 - [快速开始](#快速开始)
+- [使用方法：从零跑通基本链路](#使用方法从零跑通基本链路)
 - [配置系统](#配置系统)
 - [可视化工具](#可视化工具)
 - [代码调用示例](#代码调用示例)
@@ -69,14 +77,16 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 
 | 能力 | 当前实现 |
 | --- | --- |
+| 学习范式 | CARLA `BehaviorAgent` 专家数据上的监督行为克隆；无在线采样更新、无奖励函数、无闭环强化学习 |
 | 视觉输入 | 当前帧 + 同场景上一帧 `front/front_left/front_right` RGB，每路默认 `768×384`；首帧用 identity + 无效位 |
 | 视觉骨干 | 本地 DINOv3 ViT-S+/16，参数永久冻结，提取第 3/6/12 层完整 Token 序列 |
 | 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
 | 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
 | BEV | 前向 `64 m × 64 m`，工作网格 `32×32`，场输出 `256×256` |
-| 驾驶输出 | 三场；道路线与方向；相关停止线与灯色；8 模态 × 40 个 10Hz 航点；8 类行为 |
+| 驾驶输出 | 三场；道路线与方向；相关停止线与灯色；8 模态 × 20 个 10Hz 航点；8 类行为 |
 | 训练 | AdamW；BF16 主干 + FP32 末端/损失；感知模块差分小学习率 |
 | 数据 | CARLA 0.9.15；RGB/H.265 + 非 RGB/LMDB；传感器 2Hz、运动学 10Hz 异频采集 |
+| 场景重建 | 语义 LiDAR 多帧融合；静态世界/动态对象分离；稀疏 TUDF 默认输出，可选 Poisson Mesh |
 | 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照 |
 | 闭环驾驶 | CARLA 同步仿真；双帧在线推理；轨迹安全重排；纯追踪横向控制 + 速度 PID；episode 评测与录像 |
 | 检查点 | 自动续训；检查点排除可重新加载的冻结 DINOv3 骨干 |
@@ -87,13 +97,18 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 flowchart LR
     A["CARLA 数据采集<br/>已实现"] --> B["数据浏览与质检<br/>已实现"]
     B --> C["感知预训练<br/>已实现"]
+    B --> R1["语义 LiDAR 多帧融合<br/>已实现"]
+    R1 --> R2["稀疏 TUDF / 可选 Mesh<br/>已实现"]
     C --> D["BEV 驾驶训练<br/>已实现"]
     D --> E["离线预测可视化<br/>已实现"]
-    D --> F["行为克隆闭环 clone_loop<br/>已实现"]
-    F --> G["CARLA 接管/episode 评测<br/>已实现"]
+    D --> F["行为克隆闭环执行 clone_loop<br/>已实现"]
+    F --> G["CARLA 接管/episode 评测<br/>已实现，不参与训练"]
+    G -.->|"无奖励优化/无策略更新"| H["闭环强化学习<br/>未实现"]
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class A,B,C,D,E,F,G done;
+    classDef absent fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+    class A,B,C,D,E,F,G,R1,R2 done;
+    class H absent;
 ```
 
 ---
@@ -157,6 +172,15 @@ flowchart TB
         COL --> DB
     end
 
+    subgraph RECON["语义 LiDAR 场景重建"]
+        FUSE["多帧点云融合<br/>静态世界 + 动态对象局部模型"]
+        TUDF["稀疏 TUDF<br/>默认权威产物"]
+        MESH["Poisson Mesh<br/>可选导出"]
+        RVIS["Open3D 点云/Mesh/TUDF 查看器"]
+        FUSE --> TUDF --> RVIS
+        FUSE --> MESH --> RVIS
+    end
+
     subgraph LEARN["训练数据与模型"]
         DS1["PerceptionDataset"]
         DS2["DrivingDataset<br/>双帧三目+LiDAR/轨迹/行为/三场/道路线图/HDMap"]
@@ -190,6 +214,7 @@ flowchart TB
     DB --> DS1
     MP4 --> DS2
     DB --> DS2
+    DB --> FUSE
     DB --> V1
     P --> V2
     D --> V3
@@ -227,8 +252,8 @@ flowchart TB
 | 道路线方向 | `lane_direction` | `[B,2,256,256]` | 独立解码器，有向切向量原始输出 |
 | 相关停止线 | `stop_line_logits` | `[B,1,256,256]` | 复用道路线高分辨率特征的二值 logits |
 | 停止线灯色 | `traffic_light_state_logits` | `[B,3,256,256]` | red/yellow/green，仅在相关停止线区域监督 |
-| 轨迹残差 | `trajectory_residuals` | `[B,8,40,2]` | 新 MLP 轨迹头对 8 扇区中线基线的物理残差（米），末层零初始化时为 0 |
-| 多模态轨迹 | `trajectories` | `[B,8,40,2]` | 8 扇区中线米制基线 + 物理残差，直接为 ego 系 10Hz 米制航点 |
+| 轨迹残差 | `trajectory_residuals` | `[B,8,20,2]` | MLP 轨迹头对 8 扇区中线基线的物理残差（米），末层零初始化时为 0 |
+| 多模态轨迹 | `trajectories` | `[B,8,20,2]` | 8 扇区中线米制基线 + 物理残差，直接为 ego 系 10Hz 米制航点 |
 | 模态置信度 | `confidence` | `[B,8]` | 未归一化 logits |
 | 行为输出 | `behavior_logits` | `[B,8]` | 8 类独立多标签 logits |
 
@@ -361,7 +386,7 @@ flowchart TB
     CTB2 --> PTB["4× Token Self-Attn"]
     PTB --> RES["物理轨迹残差（米）"]
     BASE["8 扇区中线米制基线"] --> RES
-    RES --> TRAJ["基线 + 残差<br/>8×40×2、10Hz 米制轨迹"]
+    RES --> TRAJ["基线 + 残差<br/>8×20×2、10Hz 米制轨迹"]
     PTB --> CONF["8 模态置信度"]
     PTB --> ACT["池化 → 8 类行为 logits"]
 ```
@@ -467,7 +492,7 @@ road_boundary / other_marking`。当前 Town02 HD Map 的映射为 `Center / Bro
 Token 自注意力协调 8 个 Mode：
 
 - 每个 Mode 只回归其扇区中线米制基线的物理残差（米）；残差头零初始化，初始输出严格等于基线；
-- 每个 Mode 输出未来 4 秒的 40 个 10Hz 航点和 1 个置信度，供推理时排序；
+- 每个 Mode 输出未来 2 秒的 20 个 10Hz 航点和 1 个置信度，供推理时排序；
 - 8 个 Mode 特征均值输出 8 个独立行为 logits；
 - 行为顺序为：障碍停车、红灯停车、加速、直行、左转、右转、减速、静止；其中红灯停车在相关停止线为红灯时
   提前激活，不再等车辆完全静止。
@@ -497,13 +522,14 @@ flowchart TB
 | 模型 | 总参数 | 默认可训练参数 | 冻结参数 |
 | --- | ---: | ---: | ---: |
 | `PerceptionModel` | 35,195,167 | 6,502,303 | 28,692,864 |
-| `DrivingModel` | 63,886,455 | 35,193,591 | 28,692,864 |
+| `DrivingModel` | 63,871,055 | 35,178,191 | 28,692,864 |
 
-默认 `model.driving.freeze_perception=false`，因此驾驶模型的 35.19M 非冻结参数包含视觉 fusion/trunk、
+默认 `model.driving.freeze_perception=false`，因此驾驶模型的 35.18M 非冻结参数包含视觉 fusion/trunk、
 时序 BEV 与各驾驶解码器；语义/深度头未被构造。DINOv3 的 28.69M 参数始终冻结。
 若设为 `true`，视觉 fusion/trunk 也会完全冻结。
 
-发布的驾驶检查点与当前模型结构完全对齐，非骨干 state-dict 项 `385/385=100%` 形状兼容，满足默认闭环覆盖率门槛。
+当前发布的驾驶检查点为 `driving20260803.pt`，用于当前 20 航点配置。仓库工作树中的旧 `driving.pt` 不再是
+推荐权重；请从 Release 下载新文件，并以加载器实际报告的形状兼容覆盖率为准。
 运行时当前帧和历史帧各编码三路图像与一帧 LiDAR（模型只取点云 XYZ 几何统计，不使用语义标签）。
 
 下表按当前默认配置、batch 1 和完整前向重新统计。使用 PyTorch 2.12.1
@@ -514,7 +540,7 @@ flowchart TB
 | 模型 | 推理计算量 | 约合 MACs | FP32 参数内存 | 输入+输出张量 | CUDA 静态显存下限 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `PerceptionModel` | 145.35 GFLOPs | 72.67 GMACs | 134.26 MiB | 38.25 MiB | 172.51 MiB |
-| `DrivingModel` | 857.22 GFLOPs | 428.61 GMACs | 243.71 MiB | 40.94 MiB | 284.65 MiB |
+| `DrivingModel` | 857.22 GFLOPs | 428.61 GMACs | 243.65 MiB | 40.94 MiB | 284.59 MiB |
 
 CUDA 静态显存下限只包含 FP32 参数、输入和最终输出，不包含 BF16/FP32 中间激活、CUDA 上下文及算子工作区，
 不能视为实际峰值；实际峰值应在目标 GPU、CUDA 版 PyTorch 和相同输入尺寸下用
@@ -657,8 +683,8 @@ LMDB，内存上限不随数据集场景总数增长。训练 batch 优先由同
 | 红灯越线监督 | `stop_point/stop_direction/red_stop_valid` | 停止区中心、路线切向与红灯有效位 |
 | 可行驶约束 | `offroad_distance` | 可行驶处为 0，道路外或可见 box 占用内为米制距离 |
 
-未来轨迹优先读取独立 10Hz 运动学时间轴，按 0.1 秒间隔生成 40 个 ego 系航点，覆盖 4 秒；旧数据缺少
-该时间轴时从原 2Hz 帧状态插值兼容。场景末尾不足 40 点时补零，并由 `traj_valid` 排除无效位置。
+未来轨迹优先读取独立 10Hz 运动学时间轴，按 0.1 秒间隔生成 20 个 ego 系航点，覆盖 2 秒；旧数据缺少
+该时间轴时从原 2Hz 帧状态插值兼容。场景末尾不足 20 点时补零，并由 `traj_valid` 排除无效位置。
 
 ### 场与道路线图监督如何生成
 
@@ -678,9 +704,41 @@ flowchart LR
     FUT["未来 ego 位姿"] --> WP["当前 ego 系航点"] --> GAUSS["逐航点高斯软化并取 max"] --> DIST["Distribution"]
 ```
 
+### 多帧点云融合与场景重建
+
+仓库还包含一条独立于驾驶训练的语义 LiDAR 重建链路。它读取采集场景的 LMDB，不读取 RGB：静态点变换到
+CARLA 世界坐标后跨帧融合；车辆和行人优先按 `obj_idx` 聚合为对象局部模型，并保存逐帧位姿。融合结果随后可生成
+稀疏截断无符号距离场（TUDF，当前默认）或可选的 Poisson Mesh。该链路用于数据检查和场景表达实验，**没有接入
+`DrivingModel` 前向，也不会给行为克隆模型提供闭环奖励或强化学习更新**。
+
+```powershell
+# 1. 递归融合配置输入目录中的场景，输出 *.pt 与 fusion_report.json
+python -m data.multiframe_pointcloud_fusion.run
+
+# 2a. 默认生成 *.udf.pt 与 udf_report.json
+python -m data.mesh_reconstruction.run
+
+# 2b. 可选生成 *.mesh.pt 与 mesh_report.json
+python -m data.mesh_reconstruction.run --mesh
+
+# 3. 交互查看；可先加 --list 列出可用场景
+python -m vis.reconstructed_pointcloud_vis.run --input 0
+python -m vis.reconstructed_udf_vis.run --input 0
+python -m vis.reconstructed_mesh_vis.run --input 0
+```
+
+融合和重建都以完整场景为断点单位，并在输出目录写入检查点与汇总报告。默认路径分别位于
+`data/multiframe_pointcloud_fusion/output/` 和 `data/mesh_reconstruction/output/`；输入、输出、体素尺寸、截断带、
+Poisson 参数及查看器样式均由对应配置段控制。Mesh 的水密修复默认关闭，Poisson 表面也可能受观测稀疏、遮挡和
+法线质量影响，因此可选 Mesh 不应被理解为无缺口、无伪面的真实场景真值。
+
 ---
 
 ## 训练策略与训练方法
+
+本节两阶段训练均为固定数据集上的监督学习。阶段 2 通过专家未来轨迹、行为标签、HDMap 与 CARLA 真值构造的场监督
+优化多任务损失；`clone_loop/` 只消费训练后的检查点做闭环推理和评测，episode 的碰撞、进度和终态不会被转换成
+reward，也不会触发反向传播、经验回放、策略梯度或在线微调。
 
 ### 推荐的两阶段训练顺序
 
@@ -820,7 +878,7 @@ train/ckpt/
 若仍保持默认 10，恢复成功后训练区间为空，程序不会再执行任何 epoch。
 
 模型结构新增或替换输出头时，resume 会按键名与形状复用旧模型参数；新增参数保留构造期初始化。因此旧 8 点
-`residual_head` 会被跳过，新的 40 点 `trajectory_head` 自动初始化。优化器状态按参数名迁移，
+`residual_head` 或仓库检查点中的 40 点末层会被跳过，当前 20 点 `trajectory_head` 末层自动初始化。优化器状态按参数名迁移，
 旧版检查点未保存参数名时按“过滤新增参数后的稳定顺序”迁移，因此停止线头加入前的 driving checkpoint 可直接自动恢复；
 新头的 AdamW 动量在第一次 `step` 时自动建立。AdamW 本身按需创建状态：参数从未得到梯度时只有参数组条目、没有
 `exp_avg/exp_avg_sq`；恢复日志会把这种“旧档未建状态”与真正的“新增无旧状态”分开报告。
@@ -846,10 +904,14 @@ train/ckpt/
 - 下载地址：[ByteDrive-Toy 预训练权重](https://pan.baidu.com/s/1Fc8xh40ODsYug3Sc2GMBjQ?pwd=v5pw)
 - 提取码：`v5pw`
 
+> [!IMPORTANT]
+> 百度网盘中的旧驾驶权重不适用于当前版本。当前驾驶模型文件为 **`driving20260803.pt`**，请从
+> [ByteDrive-Toy Releases](https://github.com/ByteDriveTeam/ByteDrive-Toy/releases) 下载并放到
+> `train/ckpt/driving/`。本地若仍有 `driving.pt`，请勿将它误认为当前发布权重。
+
 > [!NOTE]
-> 百度网盘页面无法通过本项目代码自动校验登录态或下载状态。请在浏览器/客户端中下载，并只加载你信任来源的
-> `.pt` 文件；PyTorch 检查点本质上是可序列化对象，不应加载来源不明的文件。
-> 不适用于当前版本，请移步Release
+> 项目代码无法自动校验网盘或 Release 的登录、下载与文件完整性。请只加载可信来源的 `.pt` 文件；PyTorch
+> 检查点本质上是可序列化对象，不应加载来源不明的文件。
 
 ### 期望目录布局
 
@@ -866,7 +928,7 @@ ByteDrive-Toy/
 │       ├── perception/
 │       │   └── perception.pt
 │       └── driving/
-│           └── driving.pt
+│           └── driving20260803.pt
 └── data/
     └── map/
         ├── Town02_HD_map.npz
@@ -879,16 +941,16 @@ ByteDrive-Toy/
 | --- | ---: | --- | --- |
 | `model.safetensors` | 109.5 MiB | DINOv3 ViT-S+/16 冻结骨干 | 构造任一模型时自动本地加载 |
 | `perception.pt` | 74.6 MiB | 感知 epoch 40；模型+优化器 | 感知推理/续训；初始化驾驶感知模块 |
-| `driving.pt` | 403.2 MiB | 驾驶 epoch 80；模型+优化器 | 驾驶推理/续训 |
+| `driving20260803.pt` | 以 Release 为准 | 2026-08-03 更新的当前驾驶模型；适配 20 航点配置 | 驾驶推理、可视化与 CARLA 闭环 |
 | `Town02_HD_map.npz` | 3.2 MiB | Town02 车道折线 HDMap | 生成可行驶场和越界距离场 |
-| `Town05_HD_map.npz` | 31.1 MiB | Town05 车道折线 HDMap | 当前默认 `Town05_Opt` 采集数据的驾驶监督 |
+| `Town05_HD_map.npz` | 31.1 MiB | Town05 车道折线 HDMap | 使用 Town05 数据时的驾驶监督；当前仓库默认采集地图为 `Town02_Opt` |
 
 快速检查权重能否被当前代码识别：
 
 ```powershell
 python -c "from config import load_config; from model.perception_model import PerceptionModel; PerceptionModel(load_config()); print('DINOv3 OK')"
 python -c "import torch; print(torch.load('train/ckpt/perception/perception.pt', map_location='cpu', weights_only=False)['epoch'])"
-python -c "import torch; print(torch.load('train/ckpt/driving/driving.pt', map_location='cpu', weights_only=False)['epoch'])"
+python -c "import torch; p=torch.load('train/ckpt/driving/driving20260803.pt', map_location='cpu', weights_only=True, mmap=True); print(p.get('epoch', '?'), len(p.get('model', p)))"
 ```
 
 ---
@@ -899,11 +961,12 @@ python -c "import torch; print(torch.load('train/ckpt/driving/driving.pt', map_l
 
 | 环境 | 用途 | 关键依赖 |
 | --- | --- | --- |
-| Python 3.12 主环境 | 数据编码/读取、训练、推理、可视化 | PyTorch、Transformers、PyYAML、NumPy、OpenCV、LMDB、msgpack、PyAV |
+| Python 3.12 主环境 | 数据编码/读取、训练、推理、重建、可视化 | PyTorch、Transformers、PyYAML、NumPy、OpenCV、LMDB、msgpack、PyAV、Open3D |
 | Python 3.7 worker 环境 | 连接 CARLA 0.9.15 并采集 | `carla`、NumPy、Shapely、NetworkX |
 
 仓库当前开发环境可成功加载的参考版本为 Python 3.12.9、PyTorch 2.12.1、Transformers 5.13.0、
 PyYAML 6.0.3、NumPy 2.4.6、OpenCV 4.13.0、LMDB 2.2.1、msgpack 1.2.1、PyAV 17.1.0。
+当前重建查看器使用 Open3D 0.19.0。
 这些是参考环境而不是严格锁定；仓库目前没有 `requirements.txt`/`pyproject.toml`，尤其是 GPU 版 PyTorch
 应按本机驱动和 CUDA 版本选择。
 
@@ -919,7 +982,7 @@ python -m pip install --upgrade pip
 
 # 按 https://pytorch.org/get-started/locally/ 选择匹配本机 CUDA 的 torch 安装命令。
 # 下行只列出项目直接使用的其余依赖：
-pip install transformers pyyaml numpy opencv-python lmdb msgpack av
+pip install transformers pyyaml numpy opencv-python lmdb msgpack av open3d
 ```
 
 若只安装了 CPU 版 PyTorch，配置中的 `device: cuda` 会在训练入口回退到 CPU；但 DINOv3 和高分辨率场解码
@@ -948,22 +1011,93 @@ carla_collector:
 ### CARLA 与编码器前置条件
 
 - 启动 CARLA 0.9.15 服务端，并确保 `127.0.0.1:2000` 可连接；
-- 项目采集器只接受 `*_Opt` 地图，当前默认 `Town05_Opt`；
+- 项目采集器只接受 `*_Opt` 地图，当前默认 `Town02_Opt`；
+- 当前默认采集模态是三目 RGB + 语义 LiDAR，`depth/semantic/optical_flow` 相机默认关闭；若要从新采集的数据训练
+  感知或生成依赖真值深度/语义的驾驶监督，必须在采集前启用所需相机模态；
 - PyAV 构建需要可用的 `libx265` 编码器才能写 H.265；若编码失败，先检查 `av.codec.Codec('libx265','w')`；
 - 驾驶数据集需要匹配地图的 `data/map/{Town}_HD_map.npz`；默认配置因此需要
-  `data/map/Town05_HD_map.npz`。
+  `data/map/Town02_HD_map.npz`。
 
 ---
 
 ## 快速开始
 
-以下命令均从仓库根目录执行，并假设 Python 3.12 主环境已经激活。
+如果环境和 CARLA worker 已按上文安装完成，并且已经下载当前权重
+`train/ckpt/driving/driving20260803.pt`，先创建 `config/release20260803.yaml`。离线预测可视化还需要本地已有
+兼容的采集场景；若没有数据集，可跳过离线检查，直接运行 CARLA 闭环：
+
+```yaml
+driving_vis:
+  checkpoint: train/ckpt/driving/driving20260803.pt
+
+clone_loop:
+  inference:
+    checkpoint: train/ckpt/driving/driving20260803.pt
+```
+
+离线检查驾驶预测：
+
+```powershell
+python -m vis.driving_vis.run --env release20260803 `
+  --checkpoint train/ckpt/driving/driving20260803.pt
+```
+
+启动 CARLA 0.9.15 服务端后运行一个闭环 episode：
+
+```powershell
+.\.venv\Scripts\python.exe clone_loop\run.py --env release20260803 --max-episodes 1
+```
+
+这条快捷路径直接使用 2026-08-03 更新的驾驶权重，不进行重新训练。权重下载位置和文件说明见
+[预训练权重下载](#预训练权重下载)。
+
+---
+
+## 使用方法：从零跑通基本链路
+
+本节就是跑通“CARLA 数据采集 → 数据检查 → 感知训练 → 驾驶训练 → 离线可视化 → CARLA 闭环驾驶”的
+基本链路。多帧点云融合和场景重建是独立的未来扩展方向，不属于这条基本链路，也不是运行驾驶模型的前置条件。
+
+“从零”指从自行采集数据开始训练一套新的感知/驾驶检查点；开始前仍需按上文安装主环境与 CARLA 0.9.15 worker，
+并准备本地 DINOv3 骨干和 `Town02_HD_map.npz`。这条路径不依赖下载的 `driving20260803.pt`。
+
+以下命令均从仓库根目录执行，并假设 Python 3.12 主环境已经激活。首次只做 smoke test 时，先创建
+`config/basic_chain.yaml`：
+
+```yaml
+carla_collector:
+  cameras:
+    modalities:
+      rgb: true
+      depth: true
+      semantic: true
+      optical_flow: false
+
+train:
+  epochs: 1
+  batch_size: 1
+  num_workers: 0
+  resume: false
+
+pred_vis:
+  checkpoint: train/ckpt/perception/epoch_001.pt
+
+driving_vis:
+  checkpoint: train/ckpt/driving/epoch_001.pt
+
+clone_loop:
+  inference:
+    checkpoint: train/ckpt/driving/epoch_001.pt
+```
+
+该覆盖启用训练监督需要的 RGB、深度和语义相机，并用 1 epoch、batch 1 验证端到端可运行性；它不用于获得
+有效驾驶性能。正式训练应扩大数据量、epoch 和 batch，并建立独立的数据划分与评测。
 
 ### 1. 配置与骨干自检
 
 ```powershell
-python -c "from config import load_config; c=load_config(); print(c.train.device, c.model.driving.work_dim)"
-python -c "from model.perception_model import PerceptionModel; from config import load_config; m=PerceptionModel(load_config()); print(sum(p.numel() for p in m.parameters()))"
+python -c "from config import load_config; c=load_config(env='basic_chain'); print(c.train.device, c.model.driving.work_dim)"
+python -c "from model.perception_model import PerceptionModel; from config import load_config; m=PerceptionModel(load_config(env='basic_chain')); print(sum(p.numel() for p in m.parameters()))"
 ```
 
 预期第二条命令能从本地 `model/dinov3-vits16plus-pretrain-lvd1689m/` 加载权重，并输出 `35195167`。
@@ -973,21 +1107,24 @@ python -c "from model.perception_model import PerceptionModel; from config impor
 先启动 CARLA 服务端，再运行：
 
 ```powershell
-python data/carla_data_collector/collector/run.py --config config/default.yaml --max-scenes 2
+python data/carla_data_collector/collector/run.py --env basic_chain --max-scenes 2
 ```
 
 采集器会自动派生 Python 3.7 worker，无需手动启动 worker。首次验证建议：
 
 - `--max-scenes 1` 或 2；
 - 减少交通参与者；
-- 仅启用 `front` 相机；
-- 暂时关闭 Optical Flow，LiDAR 保持开启以验证驾驶多模态数据链路；
+- 使用上面的 `basic_chain.yaml` 保留三目并启用 depth/semantic，LiDAR 继承默认开启；
+- Optical Flow 可以保持关闭；
 - 确认 H.265/LMDB 都能写入后再扩大规模。
+
+`--max-scenes 2` 仅用于验证链路。要训练具有实际意义的模型，应去掉该限制或显著增加场景数，并扩展地图、路线、
+交通状态和专家行为分布。
 
 ### 3. 浏览原始场景
 
 ```powershell
-python -m vis.data_vis.run --scene 0
+python -m vis.data_vis.run --env basic_chain --scene 0
 ```
 
 `--scene` 可以是整数索引、`scene_000000` 场景名或完整目录路径。
@@ -997,74 +1134,52 @@ HUD 会单列当前相关信号灯的来源、actor id、灯态与沿路线距�
 ### 4. 训练感知模型
 
 ```powershell
-python -m train.run --task perception
+python -m train.run --task perception --env basic_chain
 ```
 
 训练结果保存到：
 
 ```text
 train/ckpt/perception/epoch_001.pt
-...
-```
-
-从下载的 epoch 40 检查点续训：
-
-```yaml
-# config/continue_perception.yaml
-train:
-  epochs: 50
-```
-
-```powershell
-python -m train.run --task perception --env continue_perception --resume train/ckpt/perception/perception.pt
 ```
 
 ### 5. 用感知权重初始化并训练驾驶模型
 
-全新阶段 2 实验应先在环境覆盖中设置 `train.resume: false`，然后：
+使用刚训练出的感知检查点初始化驾驶模型：
 
 ```powershell
-python -m train.run --task driving --env fresh_driving --perception-ckpt train/ckpt/perception/perception.pt
+python -m train.run --task driving --env basic_chain `
+  --perception-ckpt train/ckpt/perception/epoch_001.pt
 ```
 
-从下载的驾驶检查点恢复：
+训练完成后应得到 `train/ckpt/driving/epoch_001.pt`。`basic_chain.yaml` 已设置 `resume: false`，因此不会被目录中的
+旧驾驶检查点自动覆盖。
 
-```yaml
-# config/continue_driving.yaml
-train:
-  epochs: 90
-```
+### 6. 离线检查本次训练结果
+
+感知预测与真值：
 
 ```powershell
-python -m train.run --task driving --env continue_driving --resume train/ckpt/driving/driving.pt
+python -m vis.pred_vis.run --env basic_chain `
+  --checkpoint train/ckpt/perception/epoch_001.pt
 ```
 
-### 6. 直接可视化下载的权重
-
-感知：
+驾驶三场、道路线、交通控制和轨迹：
 
 ```powershell
-python -m vis.pred_vis.run --checkpoint train/ckpt/perception/perception.pt
+python -m vis.driving_vis.run --env basic_chain `
+  --checkpoint train/ckpt/driving/epoch_001.pt
 ```
 
-驾驶：
-
-```powershell
-python -m vis.driving_vis.run --checkpoint train/ckpt/driving/driving.pt
-```
-
-> [!NOTE]
-> 默认可视化配置分别指向 `train/ckpt/perception/epoch_010.pt` 和
-> `train/ckpt/driving/epoch_010.pt`，与训练器的默认输出目录一致。下载权重使用
-> `perception.pt` / `driving.pt` 文件名，因此直接使用下载权重时请像上面一样显式传 `--checkpoint`。
+先检查数据读取、形状、损失和渲染是否正常，再增加训练规模。只训练 1 epoch、只采集少量场景时，输出质量差是预期结果。
 
 ### 7. 运行 CARLA 闭环驾驶
 
 先启动 CARLA 0.9.15 服务端，确认 Python 3.7 worker 环境与
-`train/ckpt/driving/driving.pt` 已就绪，然后从仓库根目录执行：
+`train/ckpt/driving/epoch_001.pt` 已就绪，然后从仓库根目录执行：
 
 ```powershell
-.\.venv\Scripts\python.exe clone_loop\run.py --max-episodes 1
+.\.venv\Scripts\python.exe clone_loop\run.py --env basic_chain --max-episodes 1
 ```
 
 闭环会自动派生 CARLA worker，并循环执行同步观测、双帧推理、候选轨迹重排、车辆控制和下一次
@@ -1079,6 +1194,9 @@ python -m vis.driving_vis.run --checkpoint train/ckpt/driving/driving.pt
 闭环默认要求检查点中形状兼容的非 DINO 权重覆盖率不低于 `0.95`；检查点缺失或覆盖率不足会直接失败，
 避免随机或不兼容模型接管车辆。完整架构、评分公式与调参说明见
 [`clone_loop/README.md`](clone_loop/README.md)。
+
+至此，数据、感知模型、驾驶模型、离线检查和闭环执行都来自同一套 `basic_chain` 配置，基本链路完成。这里的闭环仍然
+只是行为克隆模型的推理与评测，不会把 episode 结果用于强化学习更新。
 
 ---
 
@@ -1127,6 +1245,9 @@ python -m train.run --task driving --env fresh_driving --perception-ckpt train/c
 | `model.driving.attention/bev_encoder` | 三目图像 Token/上一帧 BEV 注意力和 BEV 空间提炼 |
 | `model.driving.bev_decoder/lane_map/traffic_control/trajectory/behavior` | 统一空间解码、道路线类别、停止线灯色、轨迹和行为输出 |
 | `data.dataset/data.driving` | 场景根、归一化、HDMap 与标签阈值 |
+| `multiframe_pointcloud_fusion` | 语义 LiDAR 多帧融合、动态类别、体素与场景级输出 |
+| `mesh_reconstruction` | 稀疏 TUDF/可选 Poisson Mesh、截断带、表面与动态对象参数 |
+| `reconstructed_pointcloud_vis/reconstructed_mesh_vis/reconstructed_udf_vis` | 三类 Open3D 查看器的输入、配色、相机与绘制上限 |
 | `train` | 设备、批量、优化器、续训和损失权重 |
 | `pred_vis/driving_vis` | 权重、场景、帧数、保存目录和配色 |
 | `clone_loop.worker/ipc/simulation/route/traffic` | 闭环 worker、共享帧、同步仿真、路线和交通流 |
@@ -1182,7 +1303,7 @@ python -m vis.pred_vis.run `
 
 ```powershell
 python -m vis.driving_vis.run `
-  --checkpoint train/ckpt/driving/driving.pt
+  --checkpoint train/ckpt/driving/driving20260803.pt
 ```
 
 三场 logits 在显示前经过 sigmoid；道路线类别 logits 使用 argmax，并按配置中的类别色板着色；方向向量沿通道
@@ -1194,6 +1315,25 @@ python -m vis.driving_vis.run `
 修改具体场景、最大帧数、是否显示 GT、色图、道路线配色/箭头样式、交通控制配色/阈值/叠加强度和缩放比例，
 请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖；原始数据 BEV 的相关停止线颜色、线宽和停止点半径位于
 `data_vis.traffic_lights`。
+
+### 重建结果可视化
+
+三套 Open3D 查看器分别读取多帧融合点云、可选 Mesh 和默认 TUDF 产物：
+
+```powershell
+python -m vis.reconstructed_pointcloud_vis.run --list
+python -m vis.reconstructed_pointcloud_vis.run --input 0
+
+python -m vis.reconstructed_udf_vis.run --list
+python -m vis.reconstructed_udf_vis.run --input 0
+
+python -m vis.reconstructed_mesh_vis.run --list
+python -m vis.reconstructed_mesh_vis.run --input 0
+```
+
+点云查看器支持按语义、静态/动态来源、actor 和高度着色；Mesh 查看器支持逐帧显示动态对象及其重建方法；
+TUDF 查看器可按距离、权重、语义、来源或 actor 着色。三者均可在全局场景与跟随 ego 的当前 BEV 范围之间切换，
+具体默认状态和绘制上限见各自配置段。
 
 ---
 
@@ -1244,7 +1384,7 @@ cfg = load_config()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = DrivingModel(cfg).to(device).eval()
-ckpt = torch.load("train/ckpt/driving/driving.pt", map_location="cpu", weights_only=True, mmap=True)
+ckpt = torch.load("train/ckpt/driving/driving20260803.pt", map_location="cpu", weights_only=True, mmap=True)
 current = model.state_dict()
 compatible = {name: value for name, value in ckpt["model"].items()
               if name in current and value.shape == current[name].shape}
@@ -1280,7 +1420,7 @@ print(output["lane_class_logits"].shape)  # [1, 5, 256, 256]
 print(output["lane_direction"].shape)     # [1, 2, 256, 256]
 print(output["stop_line_logits"].shape)   # [1, 1, 256, 256]
 print(output["traffic_light_state_logits"].shape)  # [1, 3, 256, 256]
-print(output["trajectories"].shape)     # [1, 8, 40, 2]
+print(output["trajectories"].shape)     # [1, 8, 20, 2]
 print(output["behavior_logits"].shape)  # [1, 8]
 ```
 
@@ -1308,6 +1448,8 @@ ByteDrive-Toy/
 │   ├── hd_map/                       # HDMap 栅格化与道路外距离场
 │   ├── target_encoding/              # Symlog 物理量监督
 │   ├── scene_batch_sampler/          # 同场景连续帧成批、batch 粒度打乱的采样器
+│   ├── multiframe_pointcloud_fusion/ # 语义 LiDAR 静态/动态多帧融合与场景级断点恢复
+│   ├── mesh_reconstruction/          # 稀疏 TUDF 默认重建与可选 Poisson Mesh
 │   └── map/                          # TownXX_HD_map.npz（下载/本地文件）
 ├── model/
 │   ├── dinov3_backbone/              # 冻结本地 DINOv3 多层完整 Token 序列
@@ -1335,7 +1477,10 @@ ByteDrive-Toy/
 ├── vis/
 │   ├── data_vis/                     # 原始数据交互浏览器
 │   ├── pred_vis/                     # 感知预测/GT 对照
-│   └── driving_vis/                  # 三场/道路线/交通控制/轨迹预测与 GT 对照
+│   ├── driving_vis/                  # 三场/道路线/交通控制/轨迹预测与 GT 对照
+│   ├── reconstructed_pointcloud_vis/ # 融合点云 Open3D 查看器
+│   ├── reconstructed_mesh_vis/       # Mesh 逐帧 Open3D 查看器
+│   └── reconstructed_udf_vis/        # 稀疏 TUDF 逐帧 Open3D 查看器
 ├── assets/
 │   └── visualizations/               # README 展示用的可视化结果图
 ├── clone_loop/                       # CARLA 0.9.15 行为克隆闭环
@@ -1373,6 +1518,11 @@ ByteDrive-Toy/
 
 ### 研究边界
 
+- 当前驾驶训练是离线监督行为克隆，不包含 reward、环境交互采样、经验回放、策略梯度或任何闭环强化学习；
+  `clone_loop` 是推理/控制/评测闭环，不是训练闭环；
+- 当前数据和已发布权重集中于 `Town02_Opt`、一个 `BehaviorAgent` 专家风格及相近的交通/传感器采集配方。
+  即使天气被随机化，地图、路线、专家动作和交互状态覆盖仍然有限；闭环分布偏移与误差累积会使实际表现明显差于
+  离线拟合，因此停车、偏航、碰撞、成功率低和跨地图泛化差在当前阶段是正常预期；
 - 当前模型是双帧时序、三目+LiDAR 架构，只融合一帧历史 BEV，不包含长时序记忆；闭环运行器按训练时距
   维护历史 RGB、LiDAR 体素与位姿，并在 CARLA 中接入轨迹选择和车辆控制；
 - 当前闭环仅面向 CARLA 0.9.15 同步仿真，使用纯追踪横向控制和纵向 PID，不等同于真实车辆部署能力；
@@ -1407,8 +1557,8 @@ model/dinov3-vits16plus-pretrain-lvd1689m/model.safetensors
 <details>
 <summary><strong>3. 驾驶数据集提示缺少 HDMap</strong></summary>
 
-场景元数据中的地图名会去掉 `_Opt` 后解析，例如当前默认 `Town05_Opt` 对应
-`data/map/Town05_HD_map.npz`，`Town02_Opt` 对应 `data/map/Town02_HD_map.npz`。为使用其他地图，
+场景元数据中的地图名会去掉 `_Opt` 后解析，例如当前默认 `Town02_Opt` 对应
+`data/map/Town02_HD_map.npz`，`Town05_Opt` 对应 `data/map/Town05_HD_map.npz`。为使用其他地图，
 请提供同格式 `TownXX_HD_map.npz`，或覆盖 `data.driving.map_dir/map_name_template`。
 </details>
 
@@ -1433,7 +1583,7 @@ python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 <summary><strong>6. 使用 --perception-ckpt 后似乎仍加载了旧驾驶模型</strong></summary>
 
 默认 `train.resume=true`。若驾驶检查点目录已有文件，自动恢复会在感知初始化之后覆盖模型。新实验请设置
-`resume:false`；旧实验续训则直接用 `--resume <driving.pt>`，不要同时依赖两种语义。
+`resume:false`；旧实验续训则直接用 `--resume <driving-checkpoint.pt>`，不要同时依赖两种语义。
 </details>
 
 <details>
@@ -1441,6 +1591,15 @@ python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 
 确认当前 PyAV/FFmpeg 构建包含 `libx265`，并检查 `carla_collector.output.video_codec`。采集器默认使用 H.265，
 不是所有精简 FFmpeg 构建都带 x265 编码能力。
+</details>
+
+<details>
+<summary><strong>8. 闭环中模型经常停车、偏航或碰撞，是否说明安装失败？</strong></summary>
+
+不一定。当前检查点来自分布较单一的离线专家数据，训练目标是行为克隆损失，而不是 CARLA 闭环奖励；模型一旦进入
+专家数据较少覆盖的状态，误差可能逐步累积。先确认检查点覆盖率、输入模态、相机顺序、历史帧时距和标定均与训练一致，
+再结合 `episode_XXXX.jsonl` 与推理录像排除管线问题。若这些检查正常，仍出现低成功率或跨地图退化属于当前原型的预期
+性能边界；改善通常需要扩充并重平衡数据、加入扰动恢复样本/DAgger 类数据聚合、建立独立评测集，或另行实现闭环优化。
 </details>
 
 ---
