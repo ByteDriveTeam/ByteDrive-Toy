@@ -39,8 +39,8 @@ jobs:
           cp assets/visualizations/driving_poster.jpg _site/assets/visualizations/
           cp assets/visualizations/perception.png _site/assets/visualizations/
           cp assets/visualizations/traffic_control_gt.png _site/assets/visualizations/
-          cp assets/visualizations/driving_video_1.mp4 _site/assets/visualizations/
-          cp assets/visualizations/driving_video_2.mp4 _site/assets/visualizations/
+          cp assets/visualizations/driving_video_1_web.mp4 _site/assets/visualizations/
+          cp assets/visualizations/driving_video_2_web.mp4 _site/assets/visualizations/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

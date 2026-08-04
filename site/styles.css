@@ -100,7 +100,7 @@ img, video { max-width: 100%; display: block; }
 .hero-visual::before, .hero-visual::after { content: ""; position: absolute; width: 24px; height: 24px; z-index: 3; border-color: var(--cyan); }
 .hero-visual::before { left: -6px; top: -6px; border-left: 1px solid; border-top: 1px solid; }
 .hero-visual::after { right: -6px; bottom: -6px; border-right: 1px solid; border-bottom: 1px solid; }
-.hero-visual video { width: 100%; aspect-ratio: 1; object-fit: contain; opacity: .86; filter: saturate(.92) contrast(1.05); }
+.hero-visual video { width: 100%; height: auto; object-fit: contain; opacity: .86; filter: saturate(.92) contrast(1.05); }
 .telemetry-bar, .telemetry-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 11px 14px; color: #79909b; font: 9px var(--mono); letter-spacing: .12em; }
 .telemetry-line { height: 1px; background: var(--line); flex: 1; }
 .telemetry-footer span:first-child { color: #b7c2c5; }
@@ -173,7 +173,7 @@ img, video { max-width: 100%; display: block; }
 .zoom-label { position: absolute; right: 14px; bottom: 14px; padding: 7px 9px; color: var(--ink); background: var(--lime); font: 9px var(--mono); }
 .result-wide .media-button { max-height: 510px; }.result-wide img { height: 100%; object-fit: cover; }
 .crop-driving { height: 420px; }.crop-driving img { width: 100%; height: auto; object-fit: cover; object-position: top; }
-.result-video video { width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; background: black; }
+.result-video video { width: 100%; height: auto; object-fit: contain; background: black; }
 .result-card figcaption { min-height: 80px; display: flex; align-items: center; gap: 17px; padding: 17px 20px; }
 .result-card figcaption > span { color: var(--cyan); font: 10px var(--mono); }
 .result-card figcaption div { display: flex; flex-direction: column; gap: 5px; }
