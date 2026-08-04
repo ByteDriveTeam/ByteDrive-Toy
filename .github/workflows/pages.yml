@@ -1,0 +1,58 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "assets/logo*.png"
+      - "assets/visualizations/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Assemble static site
+        shell: bash
+        run: |
+          mkdir -p _site/assets/visualizations
+          cp -R site/. _site/
+          cp assets/logo_icon.png _site/assets/
+          cp assets/visualizations/driving.png _site/assets/visualizations/
+          cp assets/visualizations/perception.png _site/assets/visualizations/
+          cp assets/visualizations/traffic_control_gt.png _site/assets/visualizations/
+          cp assets/visualizations/driving_video_1.mp4 _site/assets/visualizations/
+          cp assets/visualizations/driving_video_2.mp4 _site/assets/visualizations/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
