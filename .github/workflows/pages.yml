@@ -36,6 +36,7 @@ jobs:
           cp -R site/. _site/
           cp assets/logo_icon.png _site/assets/
           cp assets/visualizations/driving.png _site/assets/visualizations/
+          cp assets/visualizations/driving_poster.jpg _site/assets/visualizations/
           cp assets/visualizations/perception.png _site/assets/visualizations/
           cp assets/visualizations/traffic_control_gt.png _site/assets/visualizations/
           cp assets/visualizations/driving_video_1.mp4 _site/assets/visualizations/
