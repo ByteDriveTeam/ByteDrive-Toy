@@ -2046,3 +2046,14 @@ python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 `Doc/Index.md`，输入检查放在模块邻近的 `checks/` 目录。
 
 本项目采用 [Apache License 2.0](LICENSE)。
+
+---
+
+## 致谢
+
+感谢以下开源项目及其贡献者为本项目提供的启发与支持：
+
+- [PETR](https://github.com/megvii-research/PETR)
+- [CARLA](https://github.com/carla-simulator/carla)
+- [BEVFormer](https://github.com/fundamentalvision/BEVFormer)
+- [BEVFusion](https://github.com/mit-han-lab/bevfusion)
