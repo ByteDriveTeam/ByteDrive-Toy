@@ -48,8 +48,9 @@ carla_collector:
   weather:
     randomize: true
 
-  # 主车（BehaviorAgent 控制）
+  # 主车控制器（专家 / 模型闭环二选一）
   ego:
+    controller: behavior_agent    # behavior_agent / model；默认保持专家采集兼容
     behavior: normal           # cautious / normal / aggressive
     vehicle_filter: vehicle.lincoln.mkz_2020
 
@@ -90,6 +91,36 @@ carla_collector:
     max_frames_per_scene: 2048   # 整次行驶的总帧上限（跨多段累计）；达到即结束行驶。单段大小由 ipc.arena_size_mb 决定
     capture_every_n_ticks: 5     # 图像/Lidar/标注每多少个仿真步存一帧（默认 2Hz）
     kinematics_every_n_ticks: 1  # 运动学独立时间轴的采样间隔（默认每 tick，即 10Hz）
+    model_every_n_ticks: 1       # 模型推理与预测轨迹时间轴（默认 10Hz）
+    world_state_every_n_ticks: 1 # GT Box/灯态/路线状态时间轴（默认 10Hz）
+
+  # 模型闭环失败保留与终止状态机；仅 ego.controller=model 时使用
+  model_collection:
+    collision_followup_steps: 100       # 碰撞后允许恢复的额外仿真步
+    recovery_clear_steps: 10            # 恢复前连续无新碰撞步数
+    recovery_progress_m: 5.0            # 相对碰撞点至少恢复的路线进度
+    stuck_speed_mps: 0.2                # 低于此速度视作静止
+    stuck_steps: 100                    # 连续无原因静止终止步数
+    stop_obstacle_distance_m: 10.0      # 可解释停车的前方动态障碍 Box 净距
+    stop_obstacle_half_angle_deg: 90.0  # 前方扇区半角（90°即总角度180°）
+    stop_red_light_distance_m: 16.0     # 可解释停车的路线前方红灯停止线距离
+
+  # 闭环离线 GT 代价；只保存原始非负项，不裁剪、不归一化、不加权
+  cost:
+    safety:
+      safe_clearance_m: 4.0
+    compliance:
+      route_margin_m: 0.5
+      wrong_way_tolerance_deg: 60.0
+      speed_tolerance_mps: 1.0
+    interaction:
+      min_gap_m: 2.0
+      reaction_time_s: 1.0
+      lateral_margin_m: 0.5
+    efficiency:
+      max_reference_speed_mps: 12.0
+    comfort_control:
+      stationary_speed_mps: 0.2
 
   # 碰撞重试
   collision:
@@ -658,8 +689,6 @@ clone_loop:
     max_throttle: 0.75
     max_brake: 1.0
     brake_deadband_mps: 0.35
-    behavior_stop_threshold: 0.65
-    behavior_stop_indices: [0, 1]     # 仅处方式标签：障碍停车、红灯停车；静止是状态描述，不作控制门控
 
   safety:
     max_route_deviation_m: 8.0

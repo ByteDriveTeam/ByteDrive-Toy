@@ -137,6 +137,7 @@ class ClosedLoopPolicy:
         self._history.append((current_rgb.detach(), current_lidar, current_pose.copy()))
         return {
             "trajectory": outputs["trajectories"][0, selected].float().cpu().numpy(),
+            "trajectories": outputs["trajectories"][0].float().cpu().numpy(),
             "behavior_probabilities": behavior.float().cpu().numpy(),
             "mode": int(selected),
             "mode_scores": scores.float().cpu().numpy(),

@@ -4,6 +4,7 @@
 依赖: random, carla, agents.navigation.behavior_agent, worker.geometry, worker.actors.checks.actors_checks
 读取配置: 由各函数接收标量（ego.behavior/vehicle_filter、traffic.*），自身不读 config
 对外接口:
+    - spawn_ego_vehicle(world, vehicle_filter, start_pose6) -> ego
     - spawn_ego(world, vehicle_filter, behavior, start_pose6) -> (ego, agent)
     - spawn_traffic_vehicles(client, world, tm, num, vehicle_filter) -> list[int]
     - spawn_walkers(client, world, num, walker_filter, running_pct, arrival_radius) -> WalkerCrowd
@@ -29,8 +30,8 @@ _FutureActor = carla.command.FutureActor
 _DestroyActor = carla.command.DestroyActor
 
 
-def spawn_ego(world, vehicle_filter, behavior, start_pose6):
-    """在起点生成主车并挂 BehaviorAgent。返回 (ego, agent)。"""
+def spawn_ego_vehicle(world, vehicle_filter, start_pose6):
+    """在起点生成主车但不绑定控制器，供模型闭环使用。"""
     blueprints = world.get_blueprint_library().filter(vehicle_filter)
     check_blueprints(blueprints, vehicle_filter)
     bp = blueprints[0]
@@ -38,6 +39,12 @@ def spawn_ego(world, vehicle_filter, behavior, start_pose6):
         bp.set_attribute("role_name", "hero")
     ego = world.spawn_actor(bp, make_transform(start_pose6))
     world.tick()  # 等主车落位后再交给 agent，避免初始位姿未就绪
+    return ego
+
+
+def spawn_ego(world, vehicle_filter, behavior, start_pose6):
+    """在起点生成主车并挂 BehaviorAgent。返回 (ego, agent)。"""
+    ego = spawn_ego_vehicle(world, vehicle_filter, start_pose6)
     return ego, BehaviorAgent(ego, behavior=behavior)
 
 

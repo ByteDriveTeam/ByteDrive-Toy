@@ -5,7 +5,7 @@
 读取配置: —
 对外接口:
     - Arena(name, size_bytes)   # 匿名共享内存区
-    - BumpAllocator(arena)      # 顺序分配器（写满抛 ArenaFull）
+    - BumpAllocator(arena)      # 顺序分配器（支持帧级容量预检，写满抛 ArenaFull）
     - ArenaFull(Exception)      # 容量不足信号
 说明: 跨模块统一 `from common.shm import ...`；实现见 shm.py，入参校验见 checks/。
 """

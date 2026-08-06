@@ -1,20 +1,23 @@
-"""采集主循环：建队列→逐路线驱动 worker→分段落盘→从共享内存读帧→编码+写 LMDB。
+"""专家/模型双模式采集主循环：闭环推进、分段落盘与完整 GT 代价回填。
 
 模块: collector/orchestrator/orchestrator.py
-依赖: os, dataclasses, pathlib, numpy, common.*, collector.*
-读取配置: carla_collector 全树（ipc/worker/route/weather/cameras/output/collision/simulation 等）
+依赖: math, os, dataclasses, pathlib, numpy, clone_loop.*, common.*, collector.*
+读取配置: carla_collector 全树、clone_loop.ipc/control、data.driving.cameras
 对外接口:
     - run(cfg, max_scenes_override=None) -> int     # 执行采集，返回成功落盘的场景段数
-说明: 父进程创建共享内存 arena 并持有，worker 子进程写入。一次行驶随 arena 反复写满被切成多个连续段，
+说明: behavior_agent 保持原专家采集语义；model 模式只用 Winner 轨迹产生控制，行为概率仅存档。
+      父进程创建共享内存 arena 并持有，worker 子进程写入。一次行驶随 arena 反复写满被切成多个连续段，
       每段落一个自包含场景目录（共享 drive_id、segment_idx 递增），worker 在多次 RPC 间保活世界续采，
-      直到到达终点或达整次行驶总帧上限。碰撞丢弃当前未落盘段、保留已落段、结束行驶；本次行驶 0 段产出
+      直到到达终点或达整次行驶总帧上限。专家碰撞沿用原重试；模型碰撞进入恢复窗口且失败数据也保留。本次行驶 0 段产出
       才换种子重试（Design ④）。读帧时用生成器惰性消费 arena，使内存只驻留一帧（深度解码、lidar 还原
       均在此 Py312 侧做）。RGB→mp4、其余→LMDB（Design ⑧）；具体落哪些模态由 cameras.modalities 与
       lidar.enabled 开关决定（关闭即不读盘、不落盘，RGB 关则无 mp4），光流与深度同法逐相机入 LMDB。
       worker 生成的 CARLA 原生路线相关交通控制点随低频帧元数据落盘；10Hz 运动学写入独立 LMDB 时间轴，
-      以 frame_id/sim_time 与传感器帧关联。字段缺失不补默认值，使下游能识别旧数据。
+      以 frame_id/sim_time 与传感器帧关联。模型预测与完整未来 10Hz GT 在行驶结束后生成逐候选逐点原始代价；
+      不裁剪、不归一化、不加权也不保存总分。字段缺失不补默认值，使下游能识别旧数据。
 """
 
+import math
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -23,11 +26,17 @@ import numpy as np
 
 from common import protocol as P
 from common.shm import Arena
+from clone_loop.control import TrajectoryController
+from clone_loop.inference import ClosedLoopPolicy
+from clone_loop.shared_frame import SharedFrame
 from collector import scenarios
+from collector.costs import COST_TERMS, evaluate_drive_costs
 from collector.encode import encode_camera
 from collector.routes import build_route_queue
 from collector.worker_proc import WorkerProcess
-from collector.writer import LmdbWriter, compact_lmdb, read_scene_map_route
+from collector.writer import (
+    LmdbWriter, append_model_data, compact_lmdb, read_scene_identity,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _LIDAR_DTYPE = np.dtype(P.SEMANTIC_LIDAR_DTYPE)
@@ -37,6 +46,15 @@ _DEPTH_MAX_M = 1000.0  # carla 深度相机编码的最大量程（米）
 def _resolve(path):
     p = Path(path)
     return p if p.is_absolute() else _REPO_ROOT / p
+
+
+def _resolve_output(path):
+    """解析写入根并拒绝项目目录外目标。"""
+    output = _resolve(path).resolve()
+    if os.path.commonpath((str(_REPO_ROOT.resolve()), str(output))) \
+            != str(_REPO_ROOT.resolve()):
+        raise ValueError("carla_collector.output.root 必须位于项目目录内")
+    return output
 
 
 def _blob_array(arena, blob):
@@ -99,7 +117,8 @@ def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on):
 
 
 def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, status, static_meta,
-             drive_id, segment_idx, cc, arena, output_root, cam_names):
+             drive_id, segment_idx, cc, arena, output_root, cam_names,
+             controller="behavior_agent", complete=True, compact=True):
     """把一段落盘：RGB→mp4，其他传感器/标注与独立运动学时间轴→LMDB。
 
     同一次行驶切出的多段共享 drive_id、segment_idx 递增，下游据此可拼回完整路线。
@@ -126,6 +145,7 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
         "kinematics_dt_s": (
             cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks),
         "drive_id": drive_id, "segment_idx": segment_idx,
+        "controller": controller, "complete": bool(complete),
         "route": {k: route[k] for k in ("start_idx", "end_idx", "start", "end")},
         "intrinsics": static_meta["intrinsics"], "extrinsics": static_meta["extrinsics"],
         "lidar_extrinsic": static_meta["lidar_extrinsic"], "static_bboxes": static_meta["static_bboxes"],
@@ -141,7 +161,9 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
             kinematics=kinematics, est_bytes=est)
     finally:
         writer.close()
-    compact_lmdb(scene_dir / "lmdb", verify=True)
+    if compact:
+        compact_lmdb(scene_dir / "lmdb", verify=True)
+    return scene_dir
 
 
 def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_names, rng,
@@ -216,8 +238,185 @@ def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_n
         return segs_total  # 有产出 / 到终点 / 重试耗尽 → 本路线完成
 
 
+def _live_frame_array(shared, views, height, width):
+    """复制当前模型 RGB 共享帧，避免下一条 worker 命令覆盖。"""
+    return np.frombuffer(shared.read(), dtype=np.uint8).reshape(
+        views, height, width, 3).copy()
+
+
+def _live_lidar_array(shared, count):
+    """按 worker 回传点数复制当前模型 XYZ LiDAR。"""
+    size = int(count) * 3 * np.dtype(np.float32).itemsize
+    return np.frombuffer(shared.read_prefix(size), dtype=np.float32).reshape(
+        int(count), 3).copy()
+
+
+def _model_step(decision, command, current_state, next_state, waypoint_dt_s,
+                world_index):
+    """构造可落盘模型记录；行为概率仅记录，不进入控制。"""
+    return {
+        "input_frame_id": int(current_state["frame_id"]),
+        "next_frame_id": int(next_state["frame_id"]),
+        "world_index": int(world_index),
+        "winner_mode": int(decision["mode"]),
+        "history_valid": bool(decision["history_valid"]),
+        "waypoint_dt_s": float(waypoint_dt_s),
+        "control_source": "winner_trajectory_only",
+        "control": {key: float(value) for key, value in command.items()},
+        "confidence": np.asarray(decision["confidence"]).tolist(),
+        "mode_scores": np.asarray(decision["mode_scores"]).tolist(),
+        "behavior_probabilities": np.asarray(
+            decision["behavior_probabilities"]).tolist(),
+        "trajectories": np.asarray(decision["trajectories"], dtype=np.float32),
+    }
+
+
+def _persist_model_segment(saved, record_index, map_name, route, seed, weather,
+                           status, static_meta, drive_id, cc, arena, output_root,
+                           cam_names, segment):
+    """落一个尚未代价回填的模型段，并返回待最终化记录。"""
+    scene_id = "scene_{:06d}".format(saved + record_index)
+    kinematics = [{"frame_id": state["frame_id"], "sim_time": state["sim_time"],
+                   "ego": state["ego"]} for state in segment["world_states"]]
+    scene_dir = _persist(
+        scene_id, map_name, route, seed, weather, segment["frames"], kinematics,
+        status, static_meta, drive_id, record_index, cc, arena, output_root,
+        cam_names, controller="model", complete=False, compact=False)
+    return {
+        "scene_dir": scene_dir,
+        "world_states": list(segment["world_states"]),
+        "model_steps": list(segment["model_steps"]),
+    }
+
+
+def _finalize_model_segments(records, terminal_status, route_geometry, all_world,
+                             all_steps, cc):
+    """用完整未来 GT 统一计算代价，再按段回填和安全压实。"""
+    if all_steps:
+        evaluate_drive_costs(
+            all_world, all_steps, route_geometry, cc.cost, cc.model_collection)
+    cost_meta = {
+        "complete": True,
+        "drive_status": terminal_status,
+        "world_state_dt_s": (
+            cc.simulation.fixed_delta_seconds
+            * cc.collection.world_state_every_n_ticks),
+        "model_dt_s": (
+            cc.simulation.fixed_delta_seconds
+            * cc.collection.model_every_n_ticks),
+        "cost_terms": list(COST_TERMS),
+        "cost_scopes": {
+            "current": "prediction_time_actual_ego_state",
+            "candidate": "all_candidates_per_waypoint",
+            "next": "actual_state_after_winner_control_one_tick",
+            "historical": "raw_per_term_sum_of_actual_next_states",
+        },
+        "cost_semantics": {
+            "direction": "lower_is_better",
+            "minimum": 0.0,
+            "maximum": None,
+            "clipped": False,
+            "normalized": False,
+            "weighted": False,
+            "aggregate_total_stored": False,
+            "candidate_environment": "future_10hz_ground_truth_actor_boxes",
+            "candidate_light_state": "held_at_prediction_time",
+        },
+    }
+    for index, record in enumerate(records):
+        segment_meta = dict(cost_meta)
+        segment_meta.update({
+            "num_segments": len(records),
+            "drive_terminal_segment": index == len(records) - 1,
+        })
+        append_model_data(
+            record["scene_dir"] / "lmdb", cc.output.lmdb_map_size_gb,
+            segment_meta, record["world_states"], record["model_steps"])
+        compact_lmdb(record["scene_dir"] / "lmdb", verify=True)
+
+
+def _collect_model_route(worker, shared, shared_lidar, policy, controller, map_name,
+                         route, saved, cc, arena, output_root, cam_names, rng,
+                         weather_presets, cfg):
+    """采集一条模型闭环路线，所有失败状态均保留并完成离线代价回填。"""
+    seed = scenarios.random_seed(rng)
+    weather = scenarios.random_weather(
+        rng, cc.weather.randomize, weather_presets)
+    drive_id = "scene_{:06d}".format(saved)
+    print("[collector] {} 模型闭环 map={} 路线 {}->{} seed={}".format(
+        drive_id, map_name, route["start_idx"], route["end_idx"], seed))
+    policy.reset()
+    controller.reset()
+    response = worker.start_model_scene(
+        map_name, seed, weather,
+        {"start": route["start"], "end": route["end"]})
+    if response["status"] == P.STATUS_UNREACHABLE:
+        print("[collector] 模型闭环路线 {}->{} 不可达，跳过".format(
+            route["start_idx"], route["end_idx"]))
+        return 0
+    static_meta = response["static_meta"]
+    route_geometry = response["route_geometry"]
+    observation = response["observation"]
+    current_state = response["world_state"]
+    all_world = [current_state]
+    all_steps = []
+    segment = {
+        "frames": [response["sensor_frame"]],
+        "world_states": [current_state],
+        "model_steps": [],
+    }
+    records = []
+    status = response["status"]
+    views = len(cfg.data.driving.cameras)
+    while status == P.STATUS_RUNNING:
+        frame = _live_frame_array(
+            shared, views, cc.cameras.height, cc.cameras.width)
+        lidar = _live_lidar_array(shared_lidar, observation["lidar_count"])
+        decision = policy.infer(frame, lidar, observation)
+        # 唯一控制来源：Winner 轨迹。behavior_probabilities 只进入上面的记录字段。
+        command = controller.command(decision["trajectory"], observation["speed_mps"])
+        result = worker.model_step(command)
+        next_state = result["world_state"]
+        step = _model_step(
+            decision, command, current_state, next_state,
+            cfg.clone_loop.control.waypoint_dt_s, len(all_world) - 1)
+        all_steps.append(step)
+        segment["model_steps"].append(step)
+        all_world.append(next_state)
+        status = result["status"]
+
+        if result["pending_capture"]:
+            # 边界状态既是上一预测的 next，也承载下一段首个 2Hz 帧；两段各存一份以保持自包含。
+            segment["world_states"].append(next_state)
+            records.append(_persist_model_segment(
+                saved, len(records), map_name, route, seed, weather,
+                P.STATUS_PARTIAL, static_meta, drive_id, cc, arena, output_root,
+                cam_names, segment))
+            flushed = worker.flush_model_segment()
+            segment = {
+                "frames": [flushed["sensor_frame"]],
+                "world_states": [next_state],
+                "model_steps": [],
+            }
+        else:
+            segment["world_states"].append(next_state)
+            if result["sensor_frame"] is not None:
+                segment["frames"].append(result["sensor_frame"])
+        observation, current_state = result["observation"], next_state
+
+    if segment["frames"]:
+        records.append(_persist_model_segment(
+            saved, len(records), map_name, route, seed, weather, status,
+            static_meta, drive_id, cc, arena, output_root, cam_names, segment))
+    _finalize_model_segments(
+        records, status, route_geometry, all_world, all_steps, cc)
+    print("[collector] {} 模型闭环完成 status={}，落盘 {} 段".format(
+        drive_id, status, len(records)))
+    return len(records)
+
+
 def _scan_existing(output_root):
-    """断点续采：扫描已存在场景目录，返回 (按地图分组的已采路线, 下一个场景编号)。
+    """断点续采：按地图和控制器扫描已采路线，返回下一个场景编号。
 
     路线按 meta.map 分组，组内键为 (start_idx, end_idx)；据此只从同一地图的队列剔除已采路线
     （无论该次行驶是否跑完，只要落过盘就排除）。编号取已存在 scene_XXXXXX 的最大序号 +1，
@@ -235,10 +434,11 @@ def _scan_existing(output_root):
             max_idx = max(max_idx, int(d.name.split("_")[1]))
         except (IndexError, ValueError):
             pass  # 命名不符的目录不参与编号推进
-        identity = read_scene_map_route(d / "lmdb")
+        identity = read_scene_identity(d / "lmdb")
         if identity is not None:
-            map_name, start_idx, end_idx = identity
-            done_routes_by_map.setdefault(map_name, set()).add((start_idx, end_idx))
+            map_name, controller, start_idx, end_idx = identity
+            done_routes_by_map.setdefault((map_name, controller), set()).add(
+                (start_idx, end_idx))
     return done_routes_by_map, max_idx + 1
 
 
@@ -251,7 +451,7 @@ def run(cfg, max_scenes_override=None):
     if max_scenes_override is not None and max_scenes_override < 0:
         raise ValueError("max_scenes_override 必须 >= 0（0 表示遍历每张地图的全部路线）")
     cc = cfg.carla_collector
-    output_root = _resolve(cc.output.root)
+    output_root = _resolve_output(cc.output.root)
     output_root.mkdir(parents=True, exist_ok=True)
     cam_names = [c.name for c in cc.cameras.rig]
     # 断点续采：识别已采路线与续写起始编号（输出目录非空时生效）
@@ -262,10 +462,37 @@ def run(cfg, max_scenes_override=None):
     arena = Arena(arena_name, arena_size, create=True)  # 父进程创建并持有，保证区域存活
     worker = WorkerProcess(_resolve(cc.worker.python_exe))
     master_rng = np.random.RandomState()  # 不固定：场景种子真随机，但逐场景记录
+    shared = None
+    shared_lidar = None
+    live = None
+    policy = None
+    controller = None
+    if cc.ego.controller == "model":
+        views = len(cfg.data.driving.cameras)
+        frame_size = views * cc.cameras.width * cc.cameras.height * 3
+        lidar_capacity = max(int(math.ceil(
+            cc.lidar.points_per_second * cc.simulation.fixed_delta_seconds)), 1)
+        lidar_size = lidar_capacity * 3 * np.dtype(np.float32).itemsize
+        live_name = "{}_collector_{}".format(cfg.clone_loop.ipc.frame_name, os.getpid())
+        lidar_name = live_name + "_lidar"
+        frame_path = output_root / (live_name + ".bin")
+        lidar_path = output_root / (lidar_name + ".bin")
+        shared = SharedFrame(live_name, frame_size, frame_path, create=True)
+        shared_lidar = SharedFrame(
+            lidar_name, lidar_size, lidar_path, create=True)
+        live = {
+            "frame": {"name": live_name, "size_bytes": frame_size,
+                      "backing_path": str(frame_path)},
+            "lidar": {"name": lidar_name, "size_bytes": lidar_size,
+                      "backing_path": str(lidar_path)},
+        }
+        policy = ClosedLoopPolicy(cfg)
+        controller = TrajectoryController(
+            cfg.clone_loop.control, cc.simulation.fixed_delta_seconds)
 
     saved = start_index  # 续写编号从已存在场景之后开始，不覆盖既有数据
     try:
-        info = worker.init(asdict(cfg), arena_name, arena_size)
+        info = worker.init(asdict(cfg), arena_name, arena_size, live=live)
         print("[collector] worker 就绪:", info)
         weather_presets = info["weather_presets"]  # 随机天气从 worker 实际拥有的内置预设中选
         if start_index:
@@ -277,7 +504,8 @@ def run(cfg, max_scenes_override=None):
                 if max_scenes_override is not None
                 else configured_scenes
             )
-            done_routes = done_routes_by_map.get(map_name, set())
+            done_routes = done_routes_by_map.get(
+                (map_name, cc.ego.controller), set())
             spawn_points = worker.query_spawn_points(map_name)
             # 已采路线作为优先代表参与相似过滤，避免同地图旧数据中的相邻路线在续采时
             # 换一个端点组合再次入队。场景数最后裁剪，表示「本次在该地图再采多少条新路线」。
@@ -296,11 +524,21 @@ def run(cfg, max_scenes_override=None):
 
             for route in queue:
                 # 一条路线（一次行驶）可能切成多段落盘，saved 据返回段数推进
-                saved += _collect_route(
-                    worker, map_name, route, saved, cc, arena, output_root, cam_names,
-                    master_rng, weather_presets)
+                if cc.ego.controller == "model":
+                    saved += _collect_model_route(
+                        worker, shared, shared_lidar, policy, controller,
+                        map_name, route, saved, cc, arena, output_root, cam_names,
+                        master_rng, weather_presets, cfg)
+                else:
+                    saved += _collect_route(
+                        worker, map_name, route, saved, cc, arena, output_root,
+                        cam_names, master_rng, weather_presets)
         print("[collector] 完成，成功落盘场景段数:", saved)
     finally:
         worker.shutdown()
         arena.close()
+        if shared is not None:
+            shared.close()
+        if shared_lidar is not None:
+            shared_lidar.close()
     return saved

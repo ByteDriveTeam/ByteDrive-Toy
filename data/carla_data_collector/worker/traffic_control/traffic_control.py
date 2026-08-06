@@ -7,6 +7,7 @@
     - traffic_light_metadata(traffic_lights) -> list[dict]  # 场景级灯、受控车道与停止点
     - traffic_light_states(traffic_lights) -> list[dict]    # 逐帧全部灯状态
     - relevant_traffic_control(ego, agent, metadata, states) -> dict  # 当前路线下一控制点
+    - relevant_traffic_control_route(route_geometry, route_progress_m, metadata, states) -> dict
 说明: actor id 只负责同一 episode 内逐帧状态关联，OpenDRIVE id 供跨 episode 稳定识别。CARLA 的
       affected_lane_waypoints 位于灯控路口内部，stop_waypoints 位于进入路口的道路，两者的 road_id
       通常不同，不能互相作等值过滤。相关性直接把每盏灯的停止点投影到 Agent 规划的同一车道上，并排除
@@ -180,5 +181,38 @@ def relevant_traffic_control(ego, agent, metadata, states):
             )
             if candidate is not None
         )
+    return min(candidates, key=lambda item: item["route_distance"]) \
+        if candidates else {"valid": False, "source": _SOURCE}
+
+
+def relevant_traffic_control_route(route_geometry, route_progress_m, metadata, states):
+    """按模型闭环的全局路线选择前方最近交通灯停止点。"""
+    route_xy = np.asarray(route_geometry["points"], dtype=np.float64)[:, :2]
+    lane_keys = [tuple(item) for item in route_geometry["lane_keys"]]
+    vectors = np.diff(route_xy, axis=0)
+    lengths = np.linalg.norm(vectors, axis=1)
+    cumulative = np.asarray(route_geometry["arc_m"], dtype=np.float64)
+    route = (route_xy, lane_keys, vectors, lengths, cumulative)
+    state_by_id = {item["id"]: item for item in states}
+    candidates = []
+    for light in metadata:
+        state = state_by_id[light["id"]]
+        for stop_index, stop in enumerate(light["stop_waypoints"]):
+            absolute = _project_stop(stop, *route)
+            if absolute is None or absolute <= route_progress_m:
+                continue
+            candidates.append({
+                "valid": True,
+                "source": _SOURCE,
+                "id": light["id"],
+                "opendrive_id": light["opendrive_id"],
+                "stop_waypoint_index": stop_index,
+                "stop_location": stop["transform"][:3],
+                "stop_yaw": stop["transform"][5],
+                "lane_width": stop["lane_width"],
+                "route_distance": float(absolute - route_progress_m),
+                "state": state["state"],
+                "state_code": state["state_code"],
+            })
     return min(candidates, key=lambda item: item["route_distance"]) \
         if candidates else {"valid": False, "source": _SOURCE}

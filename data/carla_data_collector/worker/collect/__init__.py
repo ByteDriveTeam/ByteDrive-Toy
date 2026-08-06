@@ -6,9 +6,10 @@
 对外接口:
     - prepare_drive(...)   # 规划路线并预热世界
     - collect_chunk(...)   # 采集一段直到 arena 写满/结束，返回两条时间轴
+    - store_sensor_frame(...) / ego_state(...)
 说明: 跨模块统一 `from worker import collect`（或 `from worker.collect import ...`）；实现见 collect.py，入参校验见 checks/。
 """
 
-from worker.collect.collect import collect_chunk, prepare_drive
+from worker.collect.collect import collect_chunk, ego_state, prepare_drive, store_sensor_frame
 
-__all__ = ["prepare_drive", "collect_chunk"]
+__all__ = ["prepare_drive", "collect_chunk", "store_sensor_frame", "ego_state"]

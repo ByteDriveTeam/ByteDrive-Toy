@@ -12,6 +12,7 @@
 
 from worker.traffic_control.traffic_control import (
     relevant_traffic_control,
+    relevant_traffic_control_route,
     traffic_light_metadata,
     traffic_light_states,
 )
@@ -19,5 +20,5 @@ from worker.traffic_control.traffic_control import (
 __all__ = [
     "traffic_light_metadata",
     "traffic_light_states",
-    "relevant_traffic_control",
+    "relevant_traffic_control", "relevant_traffic_control_route",
 ]

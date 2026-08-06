@@ -1,12 +1,13 @@
 """Py37 worker 子进程入口：经 stdin/stdout JSON 行协议受 collector 驱动采集。
 
 模块: worker/main.py
-依赖: carla, numpy, config.schema, common.protocol, common.shm, worker.*
+依赖: carla, numpy, config.schema, common.protocol, common.shm, clone_loop.shared_frame, worker.*
 读取配置: 不读 config 文件；配置由 collector 经 init 命令下发（遵守「config 单一来源」）
 对外接口:
-    - main() -> None     # 进程入口；循环处理 init / query_spawn_points / start_scene / continue_scene / shutdown
+    - main() -> None     # 进程入口；处理专家分段命令、模型闭环逐步命令与 shutdown
 说明: 只在 py37_venv 下运行。stdout 仅承载协议消息，故启动即把 print 重定向到 stderr，
-      避免 carla/agents 的零散打印污染消息流。大块帧数据写入共享内存 arena，仅帧索引经协议回传。
+      避免 carla/agents 的零散打印污染消息流。落盘帧写 arena，模型 10Hz 输入写固定共享区，
+      JSON 协议只回传索引、真值与控制状态。
 """
 
 import os
@@ -29,22 +30,36 @@ from common import protocol as P
 from common.protocol import read_message, write_message, make_response
 from common.protocol.checks.protocol_checks import check_command
 from common.shm import Arena, BumpAllocator
+from clone_loop.shared_frame import SharedFrame
 from worker import actors, collect, session
 from worker.geometry import compute_intrinsics
 from worker.checks.main_checks import check_init_args, check_map_name
 from worker.sensors import SensorRig
+from worker.model_runtime import ModelCollectionRuntime
 
 
 def _handle_init(state, args):
     """连接 Carla、打开共享内存 arena、暂存配置。"""
     check_init_args(args)
     cfg = build_config(args["config"])
+    state["cfg"] = cfg
     cc = cfg.carla_collector
     state["cc"] = cc
     state["client"] = session.connect(cc.worker.carla_host, cc.worker.carla_port,
                                        cc.worker.startup_timeout_s)
     arena = Arena(args["arena"]["name"], args["arena"]["size_bytes"], create=False)
     state["allocator"] = BumpAllocator(arena)
+    live = args.get("live")
+    if live is not None:
+        state["model_frame"] = SharedFrame(
+            live["frame"]["name"], live["frame"]["size_bytes"],
+            live["frame"]["backing_path"], create=False)
+        state["model_lidar"] = SharedFrame(
+            live["lidar"]["name"], live["lidar"]["size_bytes"],
+            live["lidar"]["backing_path"], create=False)
+        state["model_runtime"] = ModelCollectionRuntime(
+            state["client"], cfg, state["allocator"],
+            state["model_frame"], state["model_lidar"])
     # 回传内置天气预设清单：随机决策在 collector 侧，但可选项以本机 CARLA 实际拥有的为准
     return {"carla_version": state["client"].get_server_version(),
             "weather_presets": session.list_weather_presets()}
@@ -169,6 +184,42 @@ def _handle_continue_scene(state, _args):
             "used_bytes": state["allocator"].used}
 
 
+def _handle_start_model_scene(state, args):
+    """初始化模型闭环场景；控制器仅在父进程消费 Winner 轨迹。"""
+    assert state.get("model_runtime") is not None, "init 未下发模型共享帧描述"
+    _cleanup_drive(state)
+    map_name = args.get("map")
+    check_map_name(map_name, state["cc"].simulation.maps)
+    result = state["model_runtime"].start(
+        map_name, int(args["seed"]), args.get("weather"), args["route"])
+    result["used_bytes"] = state["allocator"].used
+    return result
+
+
+def _handle_model_step(state, args):
+    """应用父进程由 Winner 轨迹计算的控制并返回下一 10Hz 真值。"""
+    result = state["model_runtime"].step(args["control"])
+    result["used_bytes"] = state["allocator"].used
+    return result
+
+
+def _handle_flush_model_segment(state, _args):
+    """上一 arena 段已消费后写入暂存的完整 2Hz 传感器帧。"""
+    return state["model_runtime"].flush_pending()
+
+
+def _cleanup_model(state):
+    runtime = state.pop("model_runtime", None)
+    if runtime is not None:
+        runtime.close()
+    frame = state.pop("model_frame", None)
+    if frame is not None:
+        frame.close()
+    lidar = state.pop("model_lidar", None)
+    if lidar is not None:
+        lidar.close()
+
+
 def _restore_async(state):
     """退出前把世界与 TM 恢复异步，避免把 Carla 服务端留在同步等待态。"""
     world = state.get("world")
@@ -186,6 +237,9 @@ _HANDLERS = {
     P.CMD_QUERY_SPAWN_POINTS: _handle_query_spawn_points,
     P.CMD_START_SCENE: _handle_start_scene,
     P.CMD_CONTINUE_SCENE: _handle_continue_scene,
+    P.CMD_START_MODEL_SCENE: _handle_start_model_scene,
+    P.CMD_MODEL_STEP: _handle_model_step,
+    P.CMD_FLUSH_MODEL_SEGMENT: _handle_flush_model_segment,
 }
 
 
@@ -209,6 +263,7 @@ def main():
             cmd = msg["cmd"]
             if cmd == P.CMD_SHUTDOWN:
                 _cleanup_drive(state)  # collector 在 partial 中途退出时兜底销毁残留 actor
+                _cleanup_model(state)
                 _restore_async(state)
                 write_message(out, make_response(True))
                 break

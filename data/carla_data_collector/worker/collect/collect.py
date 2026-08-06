@@ -10,6 +10,8 @@
         -> (reachable, static_bboxes, traffic_lights, traffic_light_metadata)
     - collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
                     allocator, collection_cfg, timeout_s, counters) -> (status, frames, kinematics)
+    - store_sensor_frame(allocator, sample) -> dict
+    - ego_state(ego) -> dict
 说明: 大块张量（RGB/Depth/语义图/光流/语义Lidar）按 capture_every_n_ticks 写入 arena；小元数据（包围框/
       交通灯状态/当前路线相关控制点）绑定同一低频帧。运动学按 kinematics_every_n_ticks 写入独立时间轴，
       包含位姿、线速度、线加速度、角速度与控制量；两条时间轴用 frame_id/sim_time 对齐。RGB 与 Depth 均存 BGR 三通道
@@ -70,13 +72,20 @@ def _encode_sensor(key, data):
 
 def _store_frame(allocator, sample):
     """把一帧全部传感器写入 arena，返回 {key: blob 描述}。"""
+    encoded = {key: _encode_sensor(key, data) for key, data in sample.items()}
+    if not allocator.can_fit(len(item[0]) for item in encoded.values()):
+        raise ArenaFull("arena 剩余容量不足以完整写入当前传感器帧")
     blobs = {}
-    for key, data in sample.items():
-        raw, shape, dtype = _encode_sensor(key, data)
+    for key, (raw, shape, dtype) in encoded.items():
         offset, size = allocator.put(raw)  # 越界抛 ArenaFull，由上层捕获
         blobs[key] = {P.BLOB_OFFSET: offset, P.BLOB_SIZE: size,
                       P.BLOB_SHAPE: shape, P.BLOB_DTYPE: dtype}
     return blobs
+
+
+def store_sensor_frame(allocator, sample):
+    """以帧为事务把全部传感器写入 arena；容量不足时保证零写入。"""
+    return _store_frame(allocator, sample)
 
 
 def _ego_state(ego):
@@ -96,6 +105,11 @@ def _ego_state(ego):
                     "reverse": control.reverse, "manual_gear_shift": control.manual_gear_shift,
                     "gear": control.gear},
     }
+
+
+def ego_state(ego):
+    """返回可跨解释器传输的完整自车运动学状态。"""
+    return _ego_state(ego)
 
 
 def prepare_drive(world, agent, sim_cfg, destination):

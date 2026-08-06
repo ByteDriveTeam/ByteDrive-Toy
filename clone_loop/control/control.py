@@ -8,13 +8,13 @@
         steer_smoothing
     clone_loop.control.longitudinal_kp / longitudinal_ki / longitudinal_kd / integral_limit
     clone_loop.control.max_throttle / max_brake / brake_deadband_mps
-    clone_loop.control.behavior_stop_threshold / behavior_stop_indices
     clone_loop.simulation.fixed_delta_seconds（由构造参数传入）
 对外接口:
     - TrajectoryController(cfg_control, fixed_delta_seconds)
         .reset() -> None
-        .command(trajectory, speed_mps, behavior_probabilities) -> dict
-说明: 横向采用纯追踪几何，纵向采用带积分限幅的 PID；停车行为只将目标速度门控为零，不绕过模型轨迹。
+        .command(trajectory, speed_mps) -> dict
+说明: 横向采用纯追踪几何，纵向采用带积分限幅的 PID；目标速度只从 Winner 轨迹推导，
+      行为标签不得参与控制，模型停车意图必须由近零位移轨迹表达。
 """
 
 import math
@@ -41,19 +41,16 @@ class TrajectoryController:
         self._previous_error = 0.0
         self._previous_steer = 0.0
 
-    def command(self, trajectory, speed_mps, behavior_probabilities):
-        """根据候选轨迹、当前速度与行为概率生成 CARLA VehicleControl 标量字典。"""
+    def command(self, trajectory, speed_mps):
+        """只根据 Winner 轨迹与当前速度生成 CARLA VehicleControl 标量字典。"""
         path = np.asarray(trajectory, dtype=np.float64)
-        behaviors = np.asarray(behavior_probabilities, dtype=np.float64)
-        check_control_inputs(path, speed_mps, behaviors, self._cfg.behavior_stop_indices)
-        stop_requested = bool(np.any(
-            behaviors[self._cfg.behavior_stop_indices] >= self._cfg.behavior_stop_threshold))
-        target_speed = 0.0 if stop_requested else self._target_speed(path)
+        check_control_inputs(path, speed_mps)
+        target_speed = self._target_speed(path)
         steer = self._steer(path)
         throttle, brake = self._longitudinal(target_speed, float(speed_mps))
         return {
             "throttle": throttle, "steer": steer, "brake": brake,
-            "target_speed_mps": target_speed, "stop_requested": stop_requested,
+            "target_speed_mps": target_speed,
         }
 
     def _target_speed(self, path):

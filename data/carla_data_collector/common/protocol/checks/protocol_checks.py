@@ -1,6 +1,9 @@
 # 本文件为 common/protocol/protocol.py 的校验伴随文件（规范 §7.1，免文件头）。
 
-_ALLOWED_CMDS = {"init", "query_spawn_points", "start_scene", "continue_scene", "shutdown"}
+_ALLOWED_CMDS = {
+    "init", "query_spawn_points", "start_scene", "continue_scene",
+    "start_model_scene", "model_step", "flush_model_segment", "shutdown",
+}
 
 
 def check_command(msg):

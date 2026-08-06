@@ -102,9 +102,7 @@ def _episode(worker, shared, shared_lidar, policy, controller, recorder, logger,
         frame = _frame_array(shared, views, camera_cfg.height, camera_cfg.width)
         lidar = _lidar_array(shared_lidar, observation["lidar_count"])
         decision = policy.infer(frame, lidar, observation)
-        command = controller.command(
-            decision["trajectory"], observation["speed_mps"],
-            decision["behavior_probabilities"])
+        command = controller.command(decision["trajectory"], observation["speed_mps"])
         recorder.write(frame, decision, observation, command)
         observation = worker.step(command)
         logger.write_step(observation, command, decision)

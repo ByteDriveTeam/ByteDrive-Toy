@@ -5,8 +5,8 @@
 读取配置: 由 SensorRig 接收 cameras_cfg(width/height/modalities/rig，其中 rig 含各相机 fov) 与 lidar_cfg(enabled,...)；自身不读 config
 对外接口:
     - SensorRig(world, ego, cameras_cfg, lidar_cfg)
-        .gather(frame_id, timeout_s) -> dict[str, carla 传感器数据]  # 严格收齐本帧
-        .collided -> bool
+        .gather(frame_id, timeout_s, keys=None) -> dict[str, carla 传感器数据]
+        .collided / .collision_events / .lane_invasions
         .extrinsics -> dict[str, list[6]]    # 各相机相对 ego 外参
         .lidar_extrinsic -> list[3]
         .sync_keys -> list[str]
@@ -35,6 +35,8 @@ class SensorRig:
         self._actors = []
         self._queues = {}          # key -> Queue：参与同步 gather 的传感器
         self._collided = False
+        self._collision_events = 0
+        self._lane_invasions = 0
         self._extrinsics = {}
         self._lidar_extrinsic = [lidar_cfg.x, lidar_cfg.y, lidar_cfg.z]
         self._build()
@@ -80,7 +82,10 @@ class SensorRig:
         col_bp = bl.find("sensor.other.collision")
         collision = self._world.spawn_actor(col_bp, carla.Transform(), attach_to=self._ego)
         collision.listen(self._on_collision)
-        self._actors.append(collision)  # 不入 _queues：碰撞是事件型，不参与同步收齐
+        lane = self._world.spawn_actor(
+            bl.find("sensor.other.lane_invasion"), carla.Transform(), attach_to=self._ego)
+        lane.listen(self._on_lane_invasion)
+        self._actors.extend((collision, lane))  # 事件型传感器不参与同步收齐
 
     def _build_lidar(self, bl):
         ld = self._lidar_cfg
@@ -95,13 +100,18 @@ class SensorRig:
 
     def _on_collision(self, _event):
         self._collided = True
+        self._collision_events += 1
+
+    def _on_lane_invasion(self, _event):
+        self._lane_invasions += 1
 
     # ---------- 采集 ----------
 
-    def gather(self, frame_id, timeout_s):
-        """阻塞收齐 frame_id 这一帧的全部同步传感器数据，返回 {key: 数据}。"""
-        return {key: self._pull_matching(q, frame_id, timeout_s)
-                for key, q in self._queues.items()}
+    def gather(self, frame_id, timeout_s, keys=None):
+        """阻塞收齐 frame_id 的指定传感器；keys 为空时收齐全部启用模态。"""
+        selected = self._queues.keys() if keys is None else keys
+        return {key: self._pull_matching(self._queues[key], frame_id, timeout_s)
+                for key in selected}
 
     def _pull_matching(self, q, frame_id, timeout_s):
         """从单个传感器队列取出 frame==frame_id 的那帧；陈旧帧丢弃，超前帧视为时序错乱。"""
@@ -115,6 +125,14 @@ class SensorRig:
     @property
     def collided(self):
         return self._collided
+
+    @property
+    def collision_events(self):
+        return self._collision_events
+
+    @property
+    def lane_invasions(self):
+        return self._lane_invasions
 
     @property
     def extrinsics(self):

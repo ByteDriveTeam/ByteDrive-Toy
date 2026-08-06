@@ -9,6 +9,7 @@
 对外接口:
     - RouteNavigator(world_map, start, end, cfg_route)
         .observe(ego_transform) -> dict
+        .geometry -> dict
 说明: 全局规划只在 episode 开始执行一次；每步仅在当前进度前方的有限窗口内向量化找最近点，避免回跳。
 """
 
@@ -34,10 +35,19 @@ class RouteNavigator:
         trace = GlobalRoutePlanner(
             world_map, cfg_route.sampling_resolution_m).trace_route(origin, self._end)
         check_route_trace(trace)
+        waypoints = [item[0] for item in trace]
         self._points = np.asarray([
             [item[0].transform.location.x, item[0].transform.location.y,
              item[0].transform.location.z] for item in trace
         ], dtype=np.float64)
+        self._yaw = np.asarray([
+            waypoint.transform.rotation.yaw for waypoint in waypoints], dtype=np.float64)
+        self._lane_width = np.asarray([
+            waypoint.lane_width for waypoint in waypoints], dtype=np.float64)
+        self._lane_keys = [
+            [int(waypoint.road_id), int(waypoint.section_id), int(waypoint.lane_id)]
+            for waypoint in waypoints
+        ]
         segments = np.linalg.norm(np.diff(self._points[:, :2], axis=0), axis=1)
         self._arc = np.r_[0.0, np.cumsum(segments)]
         self._progress = 0
@@ -62,8 +72,21 @@ class RouteNavigator:
             "target_point": target_local.tolist(),
             "route_deviation_m": deviation,
             "route_completion": completion,
+            "route_progress_m": float(self._arc[self._progress]),
+            "route_index": int(self._progress),
             "end_distance_m": float(end_distance),
             "reached": bool(end_distance <= self._cfg.completion_distance_m),
+        }
+
+    @property
+    def geometry(self):
+        """返回离线代价与交通灯关联所需的完整路线几何。"""
+        return {
+            "points": self._points.tolist(),
+            "arc_m": self._arc.tolist(),
+            "yaw_deg": self._yaw.tolist(),
+            "lane_width_m": self._lane_width.tolist(),
+            "lane_keys": self._lane_keys,
         }
 
 

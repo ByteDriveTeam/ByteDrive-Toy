@@ -67,6 +67,7 @@ class WeatherCfg:
 
 @dataclass
 class EgoCfg:
+    controller: str
     behavior: str
     vehicle_filter: str
 
@@ -118,6 +119,58 @@ class CollectionCfg:
     max_frames_per_scene: int
     capture_every_n_ticks: int
     kinematics_every_n_ticks: int
+    model_every_n_ticks: int
+    world_state_every_n_ticks: int
+
+
+@dataclass
+class ModelCollectionCfg:
+    collision_followup_steps: int
+    recovery_clear_steps: int
+    recovery_progress_m: float
+    stuck_speed_mps: float
+    stuck_steps: int
+    stop_obstacle_distance_m: float
+    stop_obstacle_half_angle_deg: float
+    stop_red_light_distance_m: float
+
+
+@dataclass
+class SafetyCostCfg:
+    safe_clearance_m: float
+
+
+@dataclass
+class ComplianceCostCfg:
+    route_margin_m: float
+    wrong_way_tolerance_deg: float
+    speed_tolerance_mps: float
+
+
+@dataclass
+class InteractionCostCfg:
+    min_gap_m: float
+    reaction_time_s: float
+    lateral_margin_m: float
+
+
+@dataclass
+class EfficiencyCostCfg:
+    max_reference_speed_mps: float
+
+
+@dataclass
+class ComfortControlCostCfg:
+    stationary_speed_mps: float
+
+
+@dataclass
+class CostCfg:
+    safety: SafetyCostCfg
+    compliance: ComplianceCostCfg
+    interaction: InteractionCostCfg
+    efficiency: EfficiencyCostCfg
+    comfort_control: ComfortControlCostCfg
 
 
 @dataclass
@@ -146,6 +199,8 @@ class CarlaCollectorCfg:
     cameras: CamerasCfg
     lidar: LidarCfg
     collection: CollectionCfg
+    model_collection: ModelCollectionCfg
+    cost: CostCfg
     collision: CollisionCfg
     output: OutputCfg
 
@@ -799,8 +854,6 @@ class CloneControlCfg:
     max_throttle: float
     max_brake: float
     brake_deadband_mps: float
-    behavior_stop_threshold: float
-    behavior_stop_indices: List[int]
 
 
 @dataclass
@@ -924,7 +977,9 @@ def validate_config(cfg):
     # 校验对象: traffic.walker_arrival_radius_m —— 到达判定半径必须为正
     assert cc.traffic.walker_arrival_radius_m > 0, "traffic.walker_arrival_radius_m 必须 > 0"
 
-    # 校验对象: ego.behavior —— 取值受 BehaviorAgent 支持集合限制
+    # 校验对象: ego.controller / behavior —— 双控制模式及专家风格枚举
+    assert cc.ego.controller in ("behavior_agent", "model"), \
+        "ego.controller 仅支持 behavior_agent/model"
     assert cc.ego.behavior in ("cautious", "normal", "aggressive"), \
         "ego.behavior 仅支持 cautious/normal/aggressive"
 
@@ -946,17 +1001,22 @@ def validate_config(cfg):
     assert cc.lidar.range_m > 0, "lidar.range_m 必须 > 0"
     assert cc.lidar.upper_fov > cc.lidar.lower_fov, "lidar.upper_fov 必须 > lower_fov"
 
-    # 校验对象: collection —— 帧数上限与两条异频时间轴的采样间隔为正
+    # 校验对象: collection —— 帧数上限与各异频时间轴的采样间隔为正
     assert cc.collection.max_frames_per_scene > 0, "collection.max_frames_per_scene 必须 > 0"
     assert cc.collection.capture_every_n_ticks >= 1, "collection.capture_every_n_ticks 必须 >= 1"
     assert cc.collection.kinematics_every_n_ticks >= 1, \
         "collection.kinematics_every_n_ticks 必须 >= 1"
+    assert cc.collection.model_every_n_ticks >= 1, \
+        "collection.model_every_n_ticks 必须 >= 1"
+    assert cc.collection.world_state_every_n_ticks >= 1, \
+        "collection.world_state_every_n_ticks 必须 >= 1"
     kinematics_dt = (
         cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks)
     trajectory_dt = cfg.model.driving.trajectory.waypoint_dt_s
     ratio = trajectory_dt / kinematics_dt
     assert ratio >= 1 and abs(ratio - round(ratio)) < 1e-6, \
         "运动学采样间隔必须等于模型轨迹点间隔或是其整数分之一"
+    _validate_model_collection(cc, cfg)
 
     # 校验对象: collision.max_retries_per_route
     assert cc.collision.max_retries_per_route >= 0, "collision.max_retries_per_route 必须 >= 0"
@@ -1232,11 +1292,6 @@ def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collec
     assert 0 <= control.steer_smoothing < 1 and control.integral_limit >= 0 \
         and 0 < control.max_throttle <= 1 and 0 < control.max_brake <= 1 \
         and control.brake_deadband_mps >= 0, "clone_loop.control PID/执行器参数取值非法"
-    assert 0 < control.behavior_stop_threshold < 1 \
-        and control.behavior_stop_indices \
-        and all(0 <= index < model.driving.behavior.num_classes
-                for index in control.behavior_stop_indices), \
-        "clone_loop.control 停车行为阈值/索引取值非法"
     safety = cl.safety
     assert safety.max_route_deviation_m > 0, \
         "clone_loop.safety.max_route_deviation_m 必须 > 0"
@@ -1249,6 +1304,60 @@ def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collec
     assert cl.output.log_every > 0, "clone_loop.output.log_every 必须 > 0"
     assert len(data.dataset.dino_mean) == 3 and len(data.dataset.dino_std) == 3, \
         "闭环 RGB 归一化要求 data.dataset.dino_mean/std 为三通道"
+
+
+def _validate_model_collection(cc, cfg):
+    """校验对象: cfg.carla_collector.model_collection/cost —— 模型采集终止与原始代价参数。"""
+    model = cc.model_collection
+    assert model.collision_followup_steps > 0 and model.recovery_clear_steps > 0 \
+        and model.stuck_steps > 0, \
+        "model_collection 碰撞跟踪/恢复/静止步数必须 > 0"
+    assert model.recovery_clear_steps <= model.collision_followup_steps, \
+        "model_collection.recovery_clear_steps 不得超过 collision_followup_steps"
+    assert model.recovery_progress_m >= 0 and model.stuck_speed_mps >= 0 \
+        and model.stop_obstacle_distance_m >= 0 \
+        and model.stop_red_light_distance_m >= 0, \
+        "model_collection 距离、进度与速度阈值必须 >= 0"
+    assert 0 < model.stop_obstacle_half_angle_deg <= 180, \
+        "model_collection.stop_obstacle_half_angle_deg 必须在 (0,180]"
+
+    cost = cc.cost
+    nonnegative = (
+        cost.safety.safe_clearance_m,
+        cost.compliance.route_margin_m,
+        cost.compliance.wrong_way_tolerance_deg,
+        cost.compliance.speed_tolerance_mps,
+        cost.interaction.min_gap_m,
+        cost.interaction.reaction_time_s,
+        cost.interaction.lateral_margin_m,
+        cost.comfort_control.stationary_speed_mps,
+    )
+    assert all(math.isfinite(value) and value >= 0 for value in nonnegative), \
+        "carla_collector.cost 的距离、时间、角度与速度阈值必须为有限非负数"
+    assert math.isfinite(cost.efficiency.max_reference_speed_mps) \
+        and cost.efficiency.max_reference_speed_mps > 0, \
+        "cost.efficiency.max_reference_speed_mps 必须为有限正数"
+
+    if cc.ego.controller != "model":
+        return
+    sim = cc.simulation.fixed_delta_seconds
+    collection = cc.collection
+    assert math.isclose(sim, 0.1, rel_tol=0.0, abs_tol=1e-9), \
+        "模型采集要求 simulation.fixed_delta_seconds=0.1（10Hz）"
+    assert collection.capture_every_n_ticks == 5, \
+        "模型采集要求 capture_every_n_ticks=5（RGB/LiDAR 2Hz）"
+    assert collection.kinematics_every_n_ticks == 1 \
+        and collection.model_every_n_ticks == 1 \
+        and collection.world_state_every_n_ticks == 1, \
+        "模型采集要求运动学/模型/GT 世界状态均为每 tick（10Hz）"
+    assert cc.cameras.modalities.rgb and cc.lidar.enabled, \
+        "模型采集必须启用 RGB 与语义 LiDAR"
+    rig_names = {camera.name for camera in cc.cameras.rig}
+    assert all(name in rig_names for name in cfg.data.driving.cameras), \
+        "模型采集要求 data.driving.cameras 全部存在于 cameras.rig"
+    assert math.isclose(
+        cfg.clone_loop.control.waypoint_dt_s, sim, rel_tol=0.0, abs_tol=1e-9), \
+        "模型采集要求轨迹点间隔与仿真步长一致"
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------

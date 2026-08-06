@@ -4,8 +4,8 @@
 依赖: json
 读取配置: —（仅定义消息格式，不读 config 键）
 对外接口:
-    - 命令常量: CMD_INIT / CMD_QUERY_SPAWN_POINTS / CMD_START_SCENE / CMD_CONTINUE_SCENE / CMD_SHUTDOWN
-    - 状态常量: STATUS_OK / STATUS_MAX_FRAMES / STATUS_PARTIAL / STATUS_COLLISION / STATUS_UNREACHABLE
+    - 命令常量: 专家分段采集命令 + CMD_START_MODEL_SCENE / CMD_MODEL_STEP / CMD_FLUSH_MODEL_SEGMENT
+    - 状态常量: 专家状态 + 模型 running/success/off_route/collision_unrecovered/unjustified_stall
     - make_command(cmd, **args) -> dict
     - make_response(ok, result=None, error=None) -> dict
     - write_message(stream, obj) -> None     # 向二进制流写一行 JSON 并 flush
@@ -27,6 +27,9 @@ CMD_INIT = "init"                          # 下发配置 + arena 信息，连�
 CMD_QUERY_SPAWN_POINTS = "query_spawn_points"  # 加载指定地图并返回全部可达点（用于建路线队列）
 CMD_START_SCENE = "start_scene"            # 重载指定地图→布景→预热→采集首段（一次行驶的开端）
 CMD_CONTINUE_SCENE = "continue_scene"      # 复用存活世界续采下一段（arena 已被 collector 读空）
+CMD_START_MODEL_SCENE = "start_model_scene"  # 初始化模型闭环并返回首帧观测
+CMD_MODEL_STEP = "model_step"              # 应用一次纯轨迹控制并返回下一帧
+CMD_FLUSH_MODEL_SEGMENT = "flush_model_segment"  # arena 清空后写入溢出的待处理传感器帧
 CMD_SHUTDOWN = "shutdown"                  # 退出 worker 进程
 
 # 语义 Lidar 点的结构化 dtype（两端用 numpy.dtype(...) 还原，避免重复定义）。
@@ -48,6 +51,11 @@ STATUS_MAX_FRAMES = "max_frames"           # 达整次行驶总帧上限：本�
 STATUS_PARTIAL = "partial"                 # arena 写满但未结束：本段已满，行驶继续（续采下一段）
 STATUS_COLLISION = "collision"             # 主车碰撞：当前未落盘段丢弃，行驶结束
 STATUS_UNREACHABLE = "route_unreachable"   # 规划不出到目标点的路线（仅 start_scene）
+STATUS_RUNNING = "running"
+STATUS_SUCCESS = "success"
+STATUS_OFF_ROUTE = "off_route"
+STATUS_COLLISION_UNRECOVERED = "collision_unrecovered"
+STATUS_UNJUSTIFIED_STALL = "unjustified_stall"
 
 
 def make_command(cmd, **args):

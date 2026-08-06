@@ -24,6 +24,8 @@
 | ⑫ | 采集带语义的包围框 | `worker/annotations.py`：动态 actor（逐帧）+ 静态环境物体 level bbs（每场景一次），均带语义标签 |
 | ⑬ | 采集交通灯状态与路线相关控制点 | `worker/traffic_control.py`：缓存原生受控车道/停止 waypoint；逐帧按 BehaviorAgent 当前规划选择下一控制点并记录灯色 |
 | ⑭ | 运动学与高带宽传感器异频存储 | `collection.kinematics_every_n_ticks` 独立于 `capture_every_n_ticks`；默认运动学 10Hz、图像/Lidar/标注 2Hz，以 `frame_id/sim_time` 对齐 |
+| ⑮ | 模型闭环泛化数据 | `ego.controller=model` 时 10Hz 推理并保存全部候选轨迹；控制器只消费 Winner 轨迹，行为概率仅存档；RGB/语义 LiDAR 仍按 2Hz 落盘 |
+| ⑯ | 模型原始代价 | 行驶结束后使用未来 10Hz 真实 actor Box 回填当前位置、下一实际状态、全部候选逐航点和历史累计代价；所有分量非负、无上限、不裁剪、不归一化、不加权 |
 
 ---
 
@@ -123,6 +125,21 @@ data/carla_data_collector/
 | `num_kinematics` | 独立运动学时间轴的记录数 |
 | `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量 |
 
+模型模式额外包含：
+
+| 键 | 内容 |
+| --- | --- |
+| `num_world_states` / `world/{t}` | 10Hz 完整 GT：自车运动、动态 actor 世界系 OBB/速度、全部灯态、路线相关停止线、路线进度、碰撞与压线事件 |
+| `num_model_steps` / `model/{t}/meta` | 10Hz 推理元数据：输入/下一帧 ID、Winner、置信度、mode score、行为概率（仅存档）、由 Winner 轨迹得到的控制量 |
+| `model/{t}/trajectories` | 全部候选轨迹 `[M,T,2]`，不是只有 Winner |
+| `model/{t}/candidate_cost_terms` | 每条候选每个航点的原始代价 `[M,T,K]`；未来环境来自实际执行后采得的 10Hz GT actor Box，灯色保持预测时刻状态 |
+| `model/{t}/current_cost_terms` / `next_cost_terms` | 当前所在位置与 Winner 执行一个 tick 后实际状态的原始代价 `[K]` |
+| `model/{t}/historical_cost_terms` | 从场景开始逐项累加的实际原始代价 `[K]` |
+| 对应 `*_valid` | 逐项有效位；候选无法定义的执行器变化/真实碰撞事件不伪造为监督 |
+
+`meta.cost_terms` 固定记录 K 维名称、类别与单位，覆盖安全性、合规性、交互与博弈能力、通行效率、舒适性与控制质量。
+`meta.cost_semantics` 明确声明 lower-is-better、最小 0、最大无上限，以及不裁剪/不归一化/不加权/不保存总分。
+
 > 各模态由 `config` 的 `cameras.modalities`（rgb/depth/semantic/optical_flow）与 `lidar.enabled` 单独开关；
 > 关闭即不创建该传感器、不落盘。RGB 关闭则该场景无 mp4（`video_files` 为空）。
 > `meta.sensor_dt_s` 与 `meta.kinematics_dt_s` 明确记录两条时间轴的采样间隔；下游通过
@@ -149,6 +166,9 @@ data/carla_data_collector/
   `v1` 忽略已知损坏的原生关联并启用旧 HD Map 几何回退，`v2` 信任该字段及其 `valid=false` 结论。
 - **可复现**：`tm.set_random_device_seed(seed)` + Python/np 随机种子，seed 随场景元数据落盘。
 - **碰撞**：碰撞传感器置标志；命中即丢弃整场景缓冲、换新 seed 重跑同一路线，队列不前进，超重试上限则跳过该路线。
+- **模型失败保留**：模型碰撞不会立即退出；在 `model_collection.collision_followup_steps` 固定窗口内继续正常闭环，
+  达到连续无碰撞、回到路线阈值内且相对碰撞点取得规定进度才恢复，否则以 `collision_unrecovered` 保存并终止。
+  无合理障碍/红灯原因的低速持续到配置步数时，以 `unjustified_stall` 保存。所有阈值均在默认 YAML 配置。
 - **多地图计划**：`carla_collector.simulation.maps` 是“地图名 → 本次场景数”的有序映射。采集器按配置顺序切换地图，
   分别建立路线队列；值为 `0` 时遍历该地图全部合法路线。`--max-scenes N` 仅用于临时调试，会统一覆盖每张地图的数量。
   落盘 `meta.map` 记录实际地图，断点续采也按地图分别维护已采路线。
@@ -173,6 +193,14 @@ data/carla_data_collector/
 ```
 
 参数可调项全部在 `config/default.yaml`；环境差异用 `config/<env>.yaml` 覆盖（`--env <name>`）。
+
+专家采集保持默认。启用模型泛化采集只需覆盖：
+
+```yaml
+carla_collector:
+  ego:
+    controller: model
+```
 
 例如只在 Town01 跑 3 个场景、Town05 跑 8 个场景：
 

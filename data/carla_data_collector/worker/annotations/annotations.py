@@ -4,7 +4,7 @@
 依赖: carla, worker.geometry
 读取配置: —（输入为 carla world/actor，自身不读 config）
 对外接口:
-    - dynamic_bboxes(world, ego_id) -> list[dict]   # 车辆/行人/主车的世界系包围框（逐帧）
+    - dynamic_bboxes(world, ego_id) -> list[dict]   # 车辆/行人/主车的世界系包围框与运动真值（逐帧）
     - static_bboxes(world) -> list[dict]            # 交通标志/信号灯/杆/静态物等环境包围框（每场景）
 说明: Design ⑫ 要求包围框带语义。动态物每帧抽取（会移动）；静态环境物只在场景开始抽一次（不动），
       由 collect.collect_chunk/prepare_drive 分别放入帧索引与场景级元数据，避免重复计算。
@@ -38,7 +38,15 @@ def _actor_bbox(actor, semantic):
     tf.transform(center)  # 原地变换到世界坐标
     world_bb = carla.BoundingBox(center, bb.extent)
     world_bb.rotation = tf.rotation
-    return bbox_to_dict(world_bb, semantic, "actor", actor.id)
+    payload = bbox_to_dict(world_bb, semantic, "actor", actor.id)
+    velocity = actor.get_velocity()
+    angular_velocity = actor.get_angular_velocity()
+    payload.update({
+        "velocity": [velocity.x, velocity.y, velocity.z],
+        "angular_velocity": [
+            angular_velocity.x, angular_velocity.y, angular_velocity.z],
+    })
+    return payload
 
 
 def dynamic_bboxes(world, ego_id):

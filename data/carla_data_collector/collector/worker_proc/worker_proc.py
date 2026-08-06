@@ -5,10 +5,12 @@
 读取配置: —（python_exe 等由 orchestrator 解析后传入）
 对外接口:
     - WorkerProcess(python_exe)
-        .init(config_dict, arena_name, arena_size_bytes) -> dict
+        .init(config_dict, arena_name, arena_size_bytes, live=None) -> dict
         .query_spawn_points(map_name) -> list[list[6]]
         .start_scene(map_name, seed, weather, route) -> dict  # 一次行驶首段（含内外参/静态框）
         .continue_scene() -> dict                       # 复用存活世界续采下一段
+        .start_model_scene(map_name, seed, weather, route) -> dict
+        .model_step(control) / .flush_model_segment() -> dict
         .shutdown() -> None
         .close() -> None
 说明: 用 py37_venv 解释器以子进程方式拉起 worker/main.py，控制走二进制 stdin/stdout 的 JSON 行协议，
@@ -52,9 +54,12 @@ class WorkerProcess:
             raise RuntimeError("worker 执行 {} 失败: {}".format(cmd, resp["error"]))
         return resp["result"]
 
-    def init(self, config_dict, arena_name, arena_size_bytes):
-        return self._request(P.CMD_INIT, config=config_dict,
-                             arena={"name": arena_name, "size_bytes": arena_size_bytes})
+    def init(self, config_dict, arena_name, arena_size_bytes, live=None):
+        args = {"config": config_dict,
+                "arena": {"name": arena_name, "size_bytes": arena_size_bytes}}
+        if live is not None:
+            args["live"] = live
+        return self._request(P.CMD_INIT, **args)
 
     def query_spawn_points(self, map_name):
         return self._request(P.CMD_QUERY_SPAWN_POINTS, map=map_name)["spawn_points"]
@@ -65,6 +70,20 @@ class WorkerProcess:
 
     def continue_scene(self):
         return self._request(P.CMD_CONTINUE_SCENE)
+
+    def start_model_scene(self, map_name, seed, weather, route):
+        """创建模型闭环场景并取得首个模型观测与采集帧。"""
+        return self._request(
+            P.CMD_START_MODEL_SCENE, map=map_name, seed=seed,
+            weather=weather, route=route)
+
+    def model_step(self, control):
+        """应用由 Winner 轨迹生成的控制，推进一个 10Hz tick。"""
+        return self._request(P.CMD_MODEL_STEP, control=control)
+
+    def flush_model_segment(self):
+        """通知 worker 重置 arena 并写入暂存的完整溢出帧。"""
+        return self._request(P.CMD_FLUSH_MODEL_SEGMENT)
 
     def shutdown(self):
         """请求 worker 自行收尾退出；失败则不阻塞，交给 close() 兜底。"""

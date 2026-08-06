@@ -8,7 +8,7 @@
     - Arena(name, size_bytes, create=False)      # 打开/创建共享内存区
         .write(offset, data) / .read(offset, size) / .size / .close()
     - BumpAllocator(arena)                        # writer 侧顺序分配器
-        .put(data) -> (offset, size) / .reset() / .used
+        .put(data) -> (offset, size) / .can_fit(sizes) / .reset() / .used
 说明: Windows 用 mmap(-1, size, tagname=name) 走分页文件支撑的命名匿名共享内存；
       只要任一端持有句柄区域即存活，故由 collector(父进程)先创建并持有、worker(子进程)再打开。
       生产(worker 写)与消费(collector 读)不并发——场景内只写、场景结束后只读，故无需跨进程锁。
@@ -89,6 +89,13 @@ class BumpAllocator:
         self._arena.write(offset, data)  # 越界由 Arena.write 抛 ArenaFull
         self._cursor = _align_up(offset + len(data))
         return offset, len(data)
+
+    def can_fit(self, sizes):
+        """判断一组块能否按当前对齐规则完整写入，供帧级事务预检。"""
+        cursor = self._cursor
+        for size in sizes:
+            cursor = _align_up(cursor + int(size))
+        return cursor <= self._arena.size
 
     def reset(self):
         """场景结束后复位游标，供下一场景复用同一 arena。"""

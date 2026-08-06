@@ -8,6 +8,8 @@
         .write_scene(scene_meta, frames, kinematics=(), est_bytes=0) -> int
         .close() -> None
     - compact_lmdb(path, verify=True) -> (before_bytes, after_bytes)
+    - append_model_data(path, map_size_gb, meta_updates, world_states, model_steps) -> None
+    - read_scene_identity(path) -> tuple | None
     - pack_array(arr) -> bytes / unpack_array(blob) -> np.ndarray   # 数组打包/还原（含结构化 dtype）
 说明: Design ⑧——RGB 之外的信息进 LMDB。每个场景一个独立 DB（co-located 于该场景目录），故键不带 scene_id
       前缀：直接 meta / num_frames / "{帧序号}/meta" / "{帧序号}/{模态}"；
@@ -93,6 +95,41 @@ def read_scene_map_route(lmdb_path):
         return (str(map_name), int(route["start_idx"]), int(route["end_idx"]))
     finally:
         env.close()
+
+
+def read_scene_identity(lmdb_path):
+    """读取 ``(map, controller, start_idx, end_idx)``，旧数据默认专家控制。"""
+    try:
+        env = lmdb.open(str(lmdb_path), readonly=True, subdir=True, lock=False)
+    except lmdb.Error:
+        return None
+    try:
+        with env.begin() as txn:
+            blob = txn.get(_key("meta"))
+        if blob is None:
+            return None
+        meta = msgpack.unpackb(blob, raw=False)
+        route = meta.get("route") or {}
+        if not meta.get("map") or "start_idx" not in route or "end_idx" not in route:
+            return None
+        controller = str(meta.get("controller", "behavior_agent"))
+        if not meta.get("complete", True):
+            return None
+        if controller == "model" and not meta.get("drive_terminal_segment", False):
+            return None
+        return (str(meta["map"]), controller,
+                int(route["start_idx"]), int(route["end_idx"]))
+    finally:
+        env.close()
+
+
+def append_model_data(path, map_size_gb, meta_updates, world_states, model_steps):
+    """原子回填一个模型段的 10Hz 世界、预测和离线原始代价时间轴。"""
+    writer = LmdbWriter(path, map_size_gb)
+    try:
+        writer.append_model_data(meta_updates, world_states, model_steps)
+    finally:
+        writer.close()
 
 
 def _verify_lmdb_equal(source_path, compact_path):
@@ -215,8 +252,10 @@ _INITIAL_MAP_BYTES = 64 * 1024 * 1024
 class LmdbWriter:
     def __init__(self, path, map_size_gb):
         self._max_bytes = int(map_size_gb * 1024 ** 3)
-        self._env = lmdb.open(str(path), map_size=min(_INITIAL_MAP_BYTES, self._max_bytes),
-                              subdir=True)
+        data_path = Path(path) / "data.mdb"
+        existing = data_path.stat().st_size if data_path.is_file() else 0
+        initial = min(self._max_bytes, max(_INITIAL_MAP_BYTES, existing * 2))
+        self._env = lmdb.open(str(path), map_size=initial, subdir=True)
 
     def _ensure_capacity(self, extra_bytes):
         """确保映射上限能再容下 extra_bytes；不足则扩容（封顶 max_bytes）。"""
@@ -254,6 +293,40 @@ class LmdbWriter:
                 kinematics_count = idx + 1
             txn.put(_key("num_kinematics"), msgpack.packb(kinematics_count))
         return count
+
+    def append_model_data(self, meta_updates, world_states, model_steps):
+        """给已存在场景追加模型 10Hz 时间轴及逐候选、逐点原始代价数组。"""
+        array_names = (
+            "trajectories", "candidate_cost_terms", "candidate_cost_valid",
+            "current_cost_terms", "current_cost_valid", "next_cost_terms",
+            "next_cost_valid", "historical_cost_terms", "historical_cost_valid",
+        )
+        step_metadata = [{key: value for key, value in step.items()
+                          if key not in array_names} for step in model_steps]
+        estimated = (
+            sum(np.asarray(step[name]).nbytes
+                for step in model_steps for name in array_names if name in step)
+            + sum(len(msgpack.packb(state, use_bin_type=True)) for state in world_states)
+            + sum(len(msgpack.packb(state, use_bin_type=True)) for state in step_metadata))
+        self._ensure_capacity(int(estimated * 1.3) + 32 * 1024 * 1024)
+        with self._env.begin(write=True) as txn:
+            meta_blob = txn.get(_key("meta"))
+            if meta_blob is None:
+                raise RuntimeError("模型回填目标 LMDB 缺少 meta")
+            meta = msgpack.unpackb(meta_blob, raw=False)
+            meta.update(meta_updates)
+            txn.put(_key("meta"), msgpack.packb(meta, use_bin_type=True))
+            for index, state in enumerate(world_states):
+                txn.put(_key("world", index), msgpack.packb(state, use_bin_type=True))
+            txn.put(_key("num_world_states"), msgpack.packb(len(world_states)))
+            for index, (step, step_meta) in enumerate(zip(model_steps, step_metadata)):
+                txn.put(_key("model", index, "meta"),
+                        msgpack.packb(step_meta, use_bin_type=True))
+                for name in array_names:
+                    if name in step:
+                        txn.put(_key("model", index, name),
+                                pack_array(np.asarray(step[name])))
+            txn.put(_key("num_model_steps"), msgpack.packb(len(model_steps)))
 
     def close(self):
         self._env.close()

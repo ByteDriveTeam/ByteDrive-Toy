@@ -60,6 +60,7 @@ Py37 采集端 `worker/`（仅 py37_venv 运行）
 - [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — 带语义的包围框抽取：动态 actor（逐帧）与静态环境物体（每场景）
 - [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — CARLA 原生交通灯车道拓扑与 Agent 当前规划关联，生成可落盘交通控制真值。
 - [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — 单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引。
+- [worker/model_runtime/model_runtime.py](../data/carla_data_collector/worker/model_runtime/model_runtime.py) — 在 CARLA 中执行纯轨迹模型控制并同步采集 10Hz 真值与 2Hz 传感器
 - [worker/geometry/geometry.py](../data/carla_data_collector/worker/geometry/geometry.py) — carla 几何对象与纯数值的转换，及相机内参推导
 
 Py312 编排处理端 `collector/`（根 .venv 运行）
@@ -68,8 +69,9 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — 由可达点构建路线队列：距离过滤、随机排序，并剔除起终点邻近的相似路线
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — 逐场景随机：种子与天气预设（决策与记录都在 collector 侧，便于复现）
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — 把单相机的 BGR 帧序列编码为 H.265 mp4
+- [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — 使用未来10Hz GT Box轨迹离线标注候选、当前位置、下一刻与历史原始代价
 - [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据与独立运动学时间序列写入 LMDB。
-- [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — 采集主循环：建队列→驱动 worker→碰撞重试→读共享内存→编码+写 LMDB
+- [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — 专家/模型双模式采集主循环：闭环推进、分段落盘与完整 GT 代价回填
 - [collector/run.py](../data/carla_data_collector/collector/run.py) — Py312 采集入口 CLI：加载配置并启动采集主循环
 
 ## model/ — 网络结构定义
