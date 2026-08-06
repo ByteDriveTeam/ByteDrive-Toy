@@ -3,275 +3,170 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="ByteDrive-Toy：面向 CARLA 合成数据的三目 + LiDAR、双帧时序行为克隆驾驶研究原型。"
-    />
-    <meta name="theme-color" content="#071019" />
-    <meta property="og:title" content="ByteDrive-Toy · 从像素到方向盘" />
-    <meta
-      property="og:description"
-      content="感知预训练、几何感知 BEV、多模态规划与 CARLA 闭环评测。"
-    />
+    <meta name="description" content="ByteDrive-Toy：面向 CARLA 合成数据的多传感器、双帧时序行为克隆驾驶研究系统。" />
+    <meta name="theme-color" content="#fbfaf7" />
+    <meta property="og:title" content="ByteDrive-Toy · 开放驾驶研究系统" />
+    <meta property="og:description" content="从异构数据采集、感知预训练与几何 BEV，到多模态规划和 CARLA 闭环评测。" />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="assets/visualizations/driving.png" />
-    <title>ByteDrive-Toy · 从像素到方向盘</title>
+    <title>ByteDrive-Toy · 开放驾驶研究系统</title>
     <link rel="icon" href="assets/logo_icon.png" />
     <link rel="stylesheet" href="styles.css" />
     <script defer src="main.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
-
-    <header class="site-header" data-header>
-      <a class="brand" href="#top" aria-label="ByteDrive-Toy 首页">
-        <span class="brand-word">Byte<span>Drive</span></span>
-        <span class="brand-tag">TOY / LAB</span>
-      </a>
-      <button class="menu-button" type="button" aria-label="打开导航" aria-expanded="false" data-menu-button>
-        <span></span><span></span>
-      </button>
-      <nav class="site-nav" aria-label="主要导航" data-menu>
-        <a href="#system">系统</a>
-        <a href="#results">结果</a>
-        <a href="#quickstart">开始</a>
-        <a href="#scope">边界</a>
-        <a class="nav-cta" href="https://github.com/ByteDriveTeam/ByteDrive-Toy">GitHub <span>↗</span></a>
-      </nav>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="#top" aria-label="ByteDrive-Toy 首页"><span>BD</span><strong>ByteDrive-Toy</strong></a>
+        <p>Multi-sensor behavior cloning for CARLA</p>
+        <nav aria-label="主要导航">
+          <a href="#abstract">摘要</a><a href="#system">系统</a><a href="#results">结果</a><a href="#limitations">边界</a>
+        </nav>
+        <a class="github-button" href="https://github.com/ByteDriveTeam/ByteDrive-Toy" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .7A11.5 11.5 0 0 0 8.36 23.1c.58.1.79-.25.79-.56v-2.2c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.28-1.7-1.28-1.7-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.74.4-1.25.73-1.54-2.57-.3-5.27-1.29-5.27-5.73 0-1.27.45-2.3 1.19-3.12-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.19a10.9 10.9 0 0 1 5.76 0c2.2-1.5 3.16-1.19 3.16-1.19.63 1.59.23 2.77.11 3.06.74.82 1.19 1.85 1.19 3.12 0 4.45-2.71 5.43-5.29 5.72.42.36.79 1.07.79 2.15v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg>
+          GitHub
+        </a>
+      </div>
     </header>
 
-    <main id="main">
-      <section class="hero" id="top">
-        <div class="hero-grid" aria-hidden="true"></div>
-        <div class="hero-copy reveal">
-          <div class="eyebrow"><span class="status-dot"></span> OPEN RESEARCH PROTOTYPE · CARLA 0.9.15</div>
-          <h1>从像素，<br />一路开到<span>方向盘。</span></h1>
-          <p class="hero-lead">
-            ByteDrive-Toy 将三目视觉、LiDAR 与双帧时序表征压进同一个前向 BEV，
-            联合学习感知、空间场、道路结构与多模态未来轨迹。
-          </p>
+    <main class="page" id="main">
+      <article class="article">
+        <a id="top"></a>
+        <section class="hero">
+          <p class="overline">OPEN RESEARCH SYSTEM · CARLA 0.9.15</p>
+          <h1>ByteDrive-Toy: From Pixels to Steering</h1>
+          <h2>从像素到方向盘：多传感器、双帧时序行为克隆驾驶研究系统</h2>
+          <div class="status-note"><strong>Status</strong><span>这个项目保留了早期的 “Toy” 名字，但已经是一套复杂研究原型。它不是商业产品，也不是可部署到真实车辆的完整自动驾驶系统。</span></div>
+          <div class="identity"><strong>ByteDrive Team</strong><span>·</span><span>Independent Open Research</span></div>
           <div class="hero-actions">
-            <a class="button button-primary" href="#results">观看闭环驾驶 <span>↓</span></a>
-            <a class="button button-ghost" href="https://github.com/ByteDriveTeam/ByteDrive-Toy#快速开始">阅读文档 <span>↗</span></a>
+            <a class="primary" href="#abstract">▸ 阅读项目</a>
+            <a href="https://github.com/ByteDriveTeam/ByteDrive-Toy" target="_blank" rel="noopener">源代码</a>
+            <a href="https://github.com/ByteDriveTeam/ByteDrive-Toy#使用方法从零跑通基本链路" target="_blank" rel="noopener">运行指南</a>
           </div>
-          <div class="hero-stats" aria-label="项目关键指标">
-            <div><strong>3</strong><span>路 RGB 相机</span></div>
-            <div><strong>29</strong><span>类语义分割</span></div>
-            <div><strong>8×20</strong><span>多模态航点</span></div>
-            <div><strong>64×64m</strong><span>前向 BEV</span></div>
+          <div class="highlight-grid" aria-label="项目核心特征">
+            <div><small>视觉输入</small><strong>三目 + 双帧</strong></div>
+            <div><small>空间表征</small><strong>Geometry-aware BEV</strong></div>
+            <div><small>未来预测</small><strong>8 模态轨迹</strong></div>
+            <div><small>执行环境</small><strong>CARLA 闭环</strong></div>
           </div>
-        </div>
+        </section>
 
-        <div class="hero-visual reveal reveal-delay">
-          <div class="telemetry-bar">
-            <span>LIVE / SIM</span>
-            <span class="telemetry-line"></span>
-            <span>TOWN02_OPT</span>
-          </div>
-          <video autoplay muted loop controls playsinline preload="metadata" poster="assets/visualizations/driving_poster.jpg" width="768" height="768">
-            <source src="assets/visualizations/driving_video_1_web.mp4" type="video/mp4" />
-          </video>
-          <div class="visual-overlay" aria-hidden="true">
-            <div class="reticle"><span></span></div>
-            <div class="visual-chip chip-one">BEV 64×64 M</div>
-            <div class="visual-chip chip-two">10 HZ WAYPOINTS</div>
-          </div>
-          <div class="telemetry-footer">
-            <span><i></i> 双帧推理在线</span>
-            <span>BEHAVIOR CLONING</span>
-          </div>
-        </div>
-      </section>
+        <section class="prose-section" id="abstract">
+          <h3 class="section-title">Abstract <span>摘要</span></h3>
+          <p>ByteDrive-Toy 将自动驾驶研究拆成两个连续阶段：首先使用冻结的 DINOv3 视觉骨干联合学习 29 类语义分割与米制深度估计；随后复用感知表征，把三路相机 frustum、LiDAR 体素与刚性对齐的历史 BEV 聚合到前向鸟瞰空间，并联合预测空间场、道路结构、交通控制、多模态轨迹和行为标签。</p>
+          <p>训练完成后，闭环运行器把模型接入 CARLA 同步仿真，形成“观测 → 双帧推理 → 轨迹选择 → 纯追踪 / PID 控制 → 下一观测”的反馈回路，并记录 episode 终态、进度、诊断和录像。</p>
+          <div class="callout important"><strong>准确定位</strong><p>这是一套开放、可检查、仍在演进的研究基础设施。页面只陈述仓库中已经存在的实现与结果，不使用商业产品式的性能承诺。</p></div>
+        </section>
 
-      <section class="thesis section-pad reveal" aria-label="项目定位">
-        <p class="section-index">01 / THESIS</p>
-        <div>
-          <p class="kicker">一个完整、可运行，也保持诚实的研究闭环。</p>
-          <h2>不是一张漂亮的路线图。<br />是已经接通的数据、模型与仿真。</h2>
-        </div>
-        <p class="section-note">
-          从 CARLA 异构采集到感知预训练，从几何感知 BEV 到候选轨迹安全重排，
-          项目的每一段都能在代码中找到对应实现。
-        </p>
-      </section>
-
-      <section class="pipeline section-pad" id="system">
-        <div class="section-heading reveal">
-          <p class="section-index">02 / SYSTEM</p>
-          <h2>一条主线，四个系统层。</h2>
-          <p>选择节点，查看观测如何成为一次可执行的驾驶决策。</p>
-        </div>
-
-        <div class="pipeline-layout reveal">
-          <div class="pipeline-tabs" role="tablist" aria-label="系统流水线">
-            <button class="pipeline-tab active" role="tab" aria-selected="true" data-step="0">
-              <span>01</span><strong>采集</strong><small>Capture</small>
-            </button>
-            <button class="pipeline-tab" role="tab" aria-selected="false" data-step="1">
-              <span>02</span><strong>感知</strong><small>Perceive</small>
-            </button>
-            <button class="pipeline-tab" role="tab" aria-selected="false" data-step="2">
-              <span>03</span><strong>规划</strong><small>Plan</small>
-            </button>
-            <button class="pipeline-tab" role="tab" aria-selected="false" data-step="3">
-              <span>04</span><strong>闭环</strong><small>Act</small>
-            </button>
-          </div>
-
-          <article class="pipeline-panel" aria-live="polite">
-            <div class="panel-copy">
-              <span class="panel-number" data-panel-number>01</span>
-              <p class="eyebrow" data-panel-eyebrow>CARLA SYNTHETIC DATA</p>
-              <h3 data-panel-title>异构双进程采集</h3>
-              <p data-panel-body>
-                Python 3.7 worker 驱动 CARLA，Python 3.12 collector 负责编排、编码与落盘；共享内存完成帧数据交接。
-              </p>
-              <ul data-panel-list>
-                <li>RGB / Depth / Semantic / Optical Flow / LiDAR</li>
-                <li>传感器 2Hz · 运动学 10Hz 异频采样</li>
-                <li>H.265 视频 + LMDB 非 RGB 数据</li>
-              </ul>
+        <section class="prose-section" id="system">
+          <h3 class="section-title"><i>1</i> System Overview <span>系统全景</span></h3>
+          <p>仓库覆盖从数据生成到仿真执行的完整链路。复杂度来自模块之间真实存在的依赖关系，而不是功能标签的堆叠。</p>
+          <div class="pipeline-figure" role="img" aria-label="ByteDrive-Toy 系统流水线">
+            <div class="figure-head"><span>Figure 1</span><span>End-to-end research pipeline</span></div>
+            <div class="pipeline-row">
+              <article><small>01 · DATA</small><strong>CARLA 采集</strong><p>RGB · Depth · Semantic<br />Flow · LiDAR · Pose</p></article><b>→</b>
+              <article><small>02 · PERCEPTION</small><strong>DINOv3</strong><p>29 类语义分割<br />米制深度估计</p></article><b>→</b>
+              <article><small>03 · GEOMETRY</small><strong>Frustum + BEV</strong><p>相机反投影 · 体素<br />双帧刚性对齐</p></article>
             </div>
-            <div class="panel-diagram" aria-hidden="true">
-              <div class="scan-ring ring-a"></div>
-              <div class="scan-ring ring-b"></div>
-              <div class="car-mark">B</div>
-              <span class="ray ray-a"></span><span class="ray ray-b"></span><span class="ray ray-c"></span>
-              <div class="diagram-label label-a">FRONT</div>
-              <div class="diagram-label label-b">LIDAR</div>
-              <div class="diagram-label label-c">POSE</div>
+            <div class="pipeline-down">↓</div>
+            <div class="pipeline-row second">
+              <article><small>06 · EVALUATE</small><strong>Episode 评测</strong><p>终态 · 进度 · 控制<br />诊断 · 录像</p></article><b>←</b>
+              <article><small>05 · CONTROL</small><strong>Pursuit + PID</strong><p>安全重排 · 转向<br />油门 · 制动</p></article><b>←</b>
+              <article><small>04 · PREDICTION</small><strong>Fields + Modes</strong><p>三场 · 道路 · 交通<br />8 模态轨迹</p></article>
             </div>
-          </article>
-        </div>
-      </section>
+          </div>
+          <h4 class="subsection-title" id="data">1.1 异构数据系统 <span>Data System</span></h4>
+          <p>Python 3.7 worker 驱动 CARLA 0.9.15，Python 3.12 collector 负责编排、编码和落盘。两个运行时通过共享内存 arena 交接帧数据，传感器以 2Hz、运动学以 10Hz 异频记录；RGB 保存为 H.265，非 RGB 数据进入 LMDB。</p>
+          <div class="fact-grid">
+            <div><small>SENSORS</small><strong>RGB / Depth / Semantic / Flow / LiDAR</strong></div>
+            <div><small>STORAGE</small><strong>H.265 + LMDB</strong></div>
+            <div><small>RUNTIME</small><strong>Python 3.7 ↔ 3.12</strong></div>
+          </div>
 
-      <section class="architecture section-pad">
-        <div class="section-heading reveal">
-          <p class="section-index">03 / ARCHITECTURE</p>
-          <h2>感知先行，几何落地。</h2>
-        </div>
-        <div class="arch-flow reveal" aria-label="模型架构流程">
-          <article>
-            <span class="arch-icon">RGB</span>
-            <small>FROZEN BACKBONE</small>
-            <h3>DINOv3</h3>
-            <p>提取第 3 / 6 / 12 层完整 Token 序列，骨干参数永久冻结。</p>
-          </article>
-          <span class="flow-arrow">→</span>
-          <article>
-            <span class="arch-icon">XYZ</span>
-            <small>GEOMETRY AWARE</small>
-            <h3>Frustum → BEV</h3>
-            <p>相机内外参反投影，结合 LiDAR 体素与上一帧刚性对齐 BEV。</p>
-          </article>
-          <span class="flow-arrow">→</span>
-          <article>
-            <span class="arch-icon">×8</span>
-            <small>MULTI-TASK HEADS</small>
-            <h3>Fields + Modes</h3>
-            <p>联合预测三场、道路、交通控制、8 模态轨迹与行为标签。</p>
-          </article>
-          <span class="flow-arrow">→</span>
-          <article class="arch-accent">
-            <span class="arch-icon">↻</span>
-            <small>CONTROL LOOP</small>
-            <h3>Pure Pursuit + PID</h3>
-            <p>安全重排候选轨迹，转成方向盘、油门与制动，进入下一观测。</p>
-          </article>
-        </div>
-      </section>
+          <h4 class="subsection-title" id="perception">1.2 感知预训练 <span>Perception Pretraining</span></h4>
+          <p>冻结 DINOv3 ViT-S+/16 视觉骨干，提取第 3、6、12 层完整 Token 序列。多尺度表征共同服务于 29 类语义分割、Symlog 深度回归和量程内外分类，并在驾驶模型中继续复用。</p>
 
-      <section class="results section-pad" id="results">
-        <div class="section-heading reveal">
-          <p class="section-index">04 / EVIDENCE</p>
-          <h2>看见模型看见的世界。</h2>
-          <p>所有画面均由仓库内工具和真实项目输出生成。</p>
-        </div>
+          <h4 class="subsection-title" id="driving">1.3 几何 BEV 与联合规划 <span>Driving Model</span></h4>
+          <p>相机内外参把 patch 中心与四角沿深度采样到三维空间；相机 frustum、LiDAR 体素和上一帧 BEV 在前向 64m × 64m 的鸟瞰空间汇合。规划分支使用 8 个可学习 Mode Token 查询 BEV 主干第 3、6 层特征，并以目标点和 ego 平面速度为条件。</p>
+          <div class="output-list">
+            <div><span>Spatial fields</span><p>风险场、可行驶场、轨迹分布场</p></div>
+            <div><span>Road structure</span><p>道路类别、有向切线、停止线与灯色</p></div>
+            <div><span>Future modes</span><p>8 模态 × 20 个 10Hz 航点与模态置信度</p></div>
+            <div><span>Behavior</span><p>8 类行为标签与辅助多任务监督</p></div>
+          </div>
+        </section>
 
-        <div class="result-grid">
-          <figure class="result-card result-wide reveal">
-            <button class="media-button" type="button" data-lightbox="assets/visualizations/perception.png" aria-label="放大感知预测图">
-              <img src="assets/visualizations/perception.png" alt="四帧 RGB、语义分割和深度预测与真值对比" loading="lazy" />
-              <span class="zoom-label">EXPAND ↗</span>
-            </button>
-            <figcaption><span>01</span><div><strong>感知预测</strong><small>RGB · 29 类语义 · 米制深度 · Ground Truth</small></div></figcaption>
+        <section class="prose-section" id="results">
+          <h3 class="section-title"><i>2</i> Qualitative Results <span>可视化结果</span></h3>
+          <p>以下图像与视频由仓库内工具直接生成。它们不是装饰性素材，而是用于检查预测质量、空间对齐与闭环行为的实验输出。</p>
+          <figure class="media-figure">
+            <button type="button" data-lightbox="assets/visualizations/perception.png" aria-label="放大感知预测图"><img src="assets/visualizations/perception.png" alt="四帧 RGB、语义分割和深度预测与真值对照" loading="lazy" /><span>Expand ↗</span></button>
+            <figcaption><strong>Figure 2.</strong> 感知预测与真值对照。每列为一帧，从上至下依次为 RGB、预测语义、预测深度、语义真值和深度真值。</figcaption>
           </figure>
-
-          <figure class="result-card reveal">
-            <button class="media-button crop-driving" type="button" data-lightbox="assets/visualizations/driving.png" aria-label="放大驾驶预测图">
-              <img src="assets/visualizations/driving.png" alt="驾驶 BEV 场、道路结构和多模态轨迹预测" loading="lazy" />
-              <span class="zoom-label">EXPAND ↗</span>
-            </button>
-            <figcaption><span>02</span><div><strong>驾驶预测</strong><small>三场 · 道路线 · 交通控制 · 多模态轨迹</small></div></figcaption>
+          <figure class="media-figure">
+            <button type="button" data-lightbox="assets/visualizations/driving.png" aria-label="放大驾驶预测图"><img src="assets/visualizations/driving.png" alt="驾驶 BEV 场、道路结构和多模态轨迹预测" loading="lazy" /><span>Expand ↗</span></button>
+            <figcaption><strong>Figure 3.</strong> 驾驶预测可视化。展示风险 / 可行驶 / 轨迹分布三场、道路线、交通控制和候选轨迹，并以统一几何范围比较预测与真值。</figcaption>
           </figure>
+          <h4 class="subsection-title" id="closed-loop">2.1 CARLA 闭环执行 <span>Closed-loop Episode</span></h4>
+          <p>视频顶部显示左 / 前 / 右三目与车辆状态，中部显示空间场和道路结构预测，底部显示全部候选轨迹与最终执行轨迹。</p>
+          <div class="video-grid">
+            <figure><video controls playsinline preload="metadata" poster="assets/visualizations/driving_poster.jpg"><source src="assets/visualizations/driving_video_1_web.mp4" type="video/mp4" /></video><figcaption><strong>Video 1.</strong> CARLA 闭环 episode A</figcaption></figure>
+            <figure><video controls playsinline preload="metadata" poster="assets/visualizations/driving_poster.jpg"><source src="assets/visualizations/driving_video_2_web.mp4" type="video/mp4" /></video><figcaption><strong>Video 2.</strong> CARLA 闭环 episode B</figcaption></figure>
+          </div>
+        </section>
 
-          <figure class="result-card result-video reveal">
-            <video controls playsinline preload="metadata" poster="assets/visualizations/driving_poster.jpg" width="768" height="768">
-              <source src="assets/visualizations/driving_video_2_web.mp4" type="video/mp4" />
-            </video>
-            <figcaption><span>03</span><div><strong>闭环 Episode</strong><small>双帧在线推理 · 安全重排 · 车辆控制</small></div></figcaption>
-          </figure>
-        </div>
-      </section>
+        <section class="prose-section" id="implementation">
+          <h3 class="section-title"><i>3</i> Implementation Status <span>实现状态</span></h3>
+          <p>下表描述仓库当前实际范围。这里区分“已经运行”和“尚未实现”，避免把研究目标写成产品能力。</p>
+          <div class="status-table" role="table" aria-label="系统实现状态">
+            <div class="table-head" role="row"><span>模块</span><span>当前范围</span><span>状态</span></div>
+            <div role="row"><strong>数据采集</strong><p>多传感器异频采集、共享内存交接、H.265 / LMDB 存储</p><b>已实现</b></div>
+            <div role="row"><strong>感知训练</strong><p>29 类语义、米制深度、冻结骨干、多任务训练</p><b>已实现</b></div>
+            <div role="row"><strong>驾驶训练</strong><p>双帧几何 BEV、空间场、道路、交通、多模态轨迹与行为</p><b>已实现</b></div>
+            <div role="row"><strong>闭环执行</strong><p>同步推理、安全重排、低层控制、episode 记录与录像</p><b>已实现</b></div>
+            <div class="absent" role="row"><strong>闭环强化学习</strong><p>无奖励函数、无在线采样更新、无闭环梯度回传</p><b>未实现</b></div>
+          </div>
+        </section>
 
-      <section class="quickstart section-pad" id="quickstart">
-        <div class="quickstart-copy reveal">
-          <p class="section-index">05 / START</p>
-          <h2>先跑通，<br />再拆开研究。</h2>
-          <p>已有兼容权重与 CARLA 0.9.15 环境时，只需指向检查点即可启动一次闭环 episode。</p>
-          <a href="https://github.com/ByteDriveTeam/ByteDrive-Toy#使用方法从零跑通基本链路">查看完整安装与训练流程 <span>↗</span></a>
-        </div>
-        <div class="code-window reveal">
-          <div class="code-title"><span><i></i><i></i><i></i></span><small>POWERSHELL</small><button type="button" data-copy>复制</button></div>
-          <pre><code><span class="comment"># 1. 指定驾驶检查点</span>
-<span class="cmd">clone_loop:</span>
-  inference:
-    checkpoint: <span class="string">train/ckpt/driving/driving20260803.pt</span>
+        <section class="prose-section" id="limitations">
+          <h3 class="section-title"><i>4</i> Scope &amp; Limitations <span>研究边界</span></h3>
+          <div class="callout warning"><strong>闭环运行 ≠ 闭环学习</strong><p>当前模型从 CARLA BehaviorAgent 专家轨迹进行离线监督学习。闭环只表示模型输出作用于仿真环境后，系统继续读取下一帧推理；其中没有奖励优化、策略更新或在线梯度回传。</p></div>
+          <ul class="limitations-list">
+            <li><strong>数据分布有限。</strong> 当前训练与演示数据集中在 Town02_Opt、单一专家行为风格和固定采集配方。</li>
+            <li><strong>仅双帧时序。</strong> 系统融合一帧刚性对齐的历史 BEV，不具备长时序记忆。</li>
+            <li><strong>行为克隆会累积误差。</strong> 停车、偏航、碰撞和路线完成率低仍是现阶段可能出现的行为。</li>
+            <li><strong>仅用于 CARLA 仿真研究。</strong> 不可直接用于真实道路、真实车辆或任何安全关键决策。</li>
+          </ul>
+        </section>
 
-<span class="comment"># 2. 启动一个闭环 episode</span>
-<span class="prompt">›</span> .\.venv\Scripts\python.exe clone_loop\run.py `
-    --env release20260803 --max-episodes 1</code></pre>
-          <div class="code-status"><span><i></i> READY</span><span>PYTHON 3.12</span></div>
-        </div>
-      </section>
+        <section class="prose-section" id="start">
+          <h3 class="section-title"><i>5</i> Start from the Repository <span>从仓库开始</span></h3>
+          <p>完整 README 记录了模型张量、训练方法、配置系统、数据格式、权重、闭环执行和已知限制。这个页面提供入口，而仓库才是项目的主要文档。</p>
+          <div class="repo-card">
+            <div><small>ByteDriveTeam / ByteDrive-Toy</small><strong>Build · inspect · drive · repeat.</strong><p>Apache-2.0 · Python 3.12 · CARLA 0.9.15</p></div>
+            <a href="https://github.com/ByteDriveTeam/ByteDrive-Toy" target="_blank" rel="noopener">打开仓库 ↗</a>
+          </div>
+        </section>
 
-      <section class="scope section-pad" id="scope">
-        <div class="section-heading reveal">
-          <p class="section-index">06 / SCOPE</p>
-          <h2>研究原型的边界，也应清晰可见。</h2>
-        </div>
-        <div class="scope-grid reveal">
-          <article class="scope-primary">
-            <span>IMPORTANT</span>
-            <h3>这是行为克隆闭环，<br />不是闭环强化学习。</h3>
-            <p>
-              当前模型从 CARLA BehaviorAgent 专家轨迹中进行离线监督学习；闭环仅表示模型输出作用于仿真环境后，
-              继续读取下一帧推理，不包含奖励优化、策略更新或在线梯度回传。
-            </p>
-          </article>
-          <article><span>DATA</span><strong>集中于 Town02_Opt</strong><p>地图、专家行为与采集配方覆盖仍有限。</p></article>
-          <article><span>TEMPORAL</span><strong>双帧时序</strong><p>融合一帧历史 BEV，不包含长时序记忆。</p></article>
-          <article><span>SAFETY</span><strong>仅限 CARLA 仿真</strong><p>不可直接用于真实道路或车辆安全决策。</p></article>
-        </div>
-      </section>
+        <footer class="article-footer"><span>ByteDrive-Toy · Open Research System</span><a href="#top">Back to top ↑</a></footer>
+      </article>
 
-      <section class="closing section-pad reveal">
-        <img src="assets/logo_icon.png" alt="" />
-        <p>BUILD · INSPECT · DRIVE · REPEAT</p>
-        <h2>把研究开进闭环。</h2>
-        <a class="button button-primary" href="https://github.com/ByteDriveTeam/ByteDrive-Toy">在 GitHub 探索代码 <span>↗</span></a>
-      </section>
+      <aside class="toc" aria-label="页面目录">
+        <nav>
+          <p>Contents</p>
+          <a href="#abstract">Abstract</a>
+          <a href="#system">1 · System Overview</a>
+          <div><a href="#data">1.1 Data System</a><a href="#perception">1.2 Perception</a><a href="#driving">1.3 Driving Model</a></div>
+          <a href="#results">2 · Results</a>
+          <div><a href="#closed-loop">2.1 Closed Loop</a></div>
+          <a href="#implementation">3 · Implementation</a>
+          <a href="#limitations">4 · Limitations</a>
+          <a href="#start">5 · Repository</a>
+        </nav>
+      </aside>
     </main>
 
-    <footer class="site-footer">
-      <div><span class="brand-word">Byte<span>Drive</span></span><span>RESEARCH PROTOTYPE</span></div>
-      <p>Apache-2.0 · Built for CARLA 0.9.15</p>
-      <a href="#top">返回顶部 ↑</a>
-    </footer>
-
-    <dialog class="lightbox" data-lightbox-dialog>
-      <button type="button" aria-label="关闭预览" data-lightbox-close>关闭 ×</button>
-      <img src="" alt="放大的项目可视化结果" />
-    </dialog>
+    <dialog class="lightbox" data-lightbox-dialog><button type="button" aria-label="关闭预览" data-lightbox-close>关闭 ×</button><img src="" alt="放大的项目可视化结果" /></dialog>
   </body>
 </html>
