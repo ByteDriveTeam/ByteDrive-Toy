@@ -290,11 +290,12 @@ def _persist_model_segment(saved, record_index, map_name, route, seed, weather,
 
 
 def _finalize_model_segments(records, terminal_status, route_geometry, all_world,
-                             all_steps, cc):
+                             all_steps, cc, cost_device):
     """用完整未来 GT 统一计算代价，再按段回填和安全压实。"""
     if all_steps:
         evaluate_drive_costs(
-            all_world, all_steps, route_geometry, cc.cost, cc.model_collection)
+            all_world, all_steps, route_geometry, cc.cost, cc.model_collection,
+            device=cost_device)
     cost_meta = {
         "complete": True,
         "drive_status": terminal_status,
@@ -409,7 +410,8 @@ def _collect_model_route(worker, shared, shared_lidar, policy, controller, map_n
             saved, len(records), map_name, route, seed, weather, status,
             static_meta, drive_id, cc, arena, output_root, cam_names, segment))
     _finalize_model_segments(
-        records, status, route_geometry, all_world, all_steps, cc)
+        records, status, route_geometry, all_world, all_steps, cc,
+        cfg.clone_loop.inference.device)
     print("[collector] {} 模型闭环完成 status={}，落盘 {} 段".format(
         drive_id, status, len(records)))
     return len(records)

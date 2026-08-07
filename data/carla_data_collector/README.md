@@ -25,7 +25,7 @@
 | ⑬ | 采集交通灯状态与路线相关控制点 | `worker/traffic_control.py`：缓存原生受控车道/停止 waypoint；逐帧按 BehaviorAgent 当前规划选择下一控制点并记录灯色 |
 | ⑭ | 运动学与高带宽传感器异频存储 | `collection.kinematics_every_n_ticks` 独立于 `capture_every_n_ticks`；默认运动学 10Hz、图像/Lidar/标注 2Hz，以 `frame_id/sim_time` 对齐 |
 | ⑮ | 模型闭环泛化数据 | `ego.controller=model` 时 10Hz 推理并保存全部候选轨迹；控制器只消费 Winner 轨迹，行为概率仅存档；RGB/语义 LiDAR 仍按 2Hz 落盘 |
-| ⑯ | 模型原始代价 | 行驶结束后使用未来 10Hz 真实 actor Box 回填当前位置、下一实际状态、全部候选逐航点和历史累计代价；所有分量非负、无上限、不裁剪、不归一化、不加权 |
+| ⑯ | 模型原始代价 | 行驶结束后使用未来 10Hz 真实 actor Box 回填当前位置、下一实际状态、全部候选逐航点和历史累计代价；候选几何分批走 Torch GPU（CUDA 不可用或显存不足时回退 CPU）；所有分量非负、无上限、不裁剪、不归一化、不加权 |
 
 ---
 

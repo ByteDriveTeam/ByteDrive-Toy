@@ -1,7 +1,7 @@
 """使用未来10Hz GT Box轨迹离线标注候选、当前位置、下一刻与历史原始代价。
 
 模块: collector/costs/costs.py
-依赖: math, numpy, collector.costs.checks.costs_checks
+依赖: math, time, numpy, collector.costs.checks.costs_checks, collector.costs.tensor_costs
 读取配置:
     carla_collector.cost.safety.safe_clearance_m
     carla_collector.cost.compliance.route_margin_m / wrong_way_tolerance_deg / speed_tolerance_mps
@@ -12,16 +12,19 @@
         stop_red_light_distance_m
 对外接口:
     - COST_TERMS
-    - evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cfg_model) -> None
+    - evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cfg_model,
+                           device=None) -> None
 说明: 所有项均为非负原始物理量或事件计数，无上限、无归一化、无跨项加权。候选环境采用
       Winner真实执行后采得的未来GT actor Box；灯态固定为候选生成时刻的真值。
 """
 
 import math
+import time
 
 import numpy as np
 
 from collector.costs.checks.costs_checks import check_cost_inputs
+from collector.costs.tensor_costs import evaluate_candidate_costs_torch
 
 
 COST_TERMS = (
@@ -104,6 +107,16 @@ def _signed_box_distance(first, second):
     return min(distances)
 
 
+def _circle_distance_lower_bound(first, second):
+    """OBB 净距的包围圆下界，用于严格排除不可能影响阈值的远框。"""
+    first_center = np.asarray(first["location"][:2], dtype=np.float64)
+    second_center = np.asarray(second["location"][:2], dtype=np.float64)
+    first_radius = float(np.linalg.norm(first["extent"][:2]))
+    second_radius = float(np.linalg.norm(second["extent"][:2]))
+    return float(np.linalg.norm(first_center - second_center)) \
+        - first_radius - second_radius
+
+
 def _route_projection(point, route):
     points = route["points"]
     index = int(np.argmin(np.linalg.norm(points - point[None], axis=1)))
@@ -155,7 +168,11 @@ def _motion_box(state, previous_xy, current_xy, speed, yaw_deg, collision_events
                 previous_control, cfg_cost, cfg_model, route):
     box = state["candidate_box"]
     actors = [item for item in state["bboxes"] if item["semantic"] != "ego"]
-    distances = [_signed_box_distance(box, actor) for actor in actors]
+    distances = [
+        _signed_box_distance(box, actor) for actor in actors
+        if _circle_distance_lower_bound(box, actor)
+        <= cfg_cost.safety.safe_clearance_m
+    ]
     minimum = min(distances) if distances else float("inf")
     values = np.zeros(len(COST_TERMS), dtype=np.float64)
     values[_TERM_INDEX["safety.clearance_deficit_m"]] = max(
@@ -196,7 +213,9 @@ def _motion_box(state, previous_xy, current_xy, speed, yaw_deg, collision_events
         courtesy["location"][1] += forward[1] * reaction * 0.5
         courtesy["extent"][0] += reaction * 0.5
         courtesy["extent"][1] += cfg_cost.interaction.lateral_margin_m
-        intrusion = max(intrusion, max(0.0, -_signed_box_distance(box, courtesy)))
+        if _circle_distance_lower_bound(box, courtesy) <= 0.0:
+            intrusion = max(
+                intrusion, max(0.0, -_signed_box_distance(box, courtesy)))
         relative = np.asarray(box["location"][:2]) - np.asarray(actor["location"][:2])
         longitudinal = float(np.dot(relative, forward))
         lateral = abs(float(np.dot(relative, right)))
@@ -255,6 +274,7 @@ def _front_obstacle(ego_box, actors, distance_m, half_angle_deg):
         if norm <= np.finfo(np.float64).eps:
             return True
         if float(np.dot(delta / norm, forward)) >= cosine_limit \
+                and _circle_distance_lower_bound(ego_box, actor) <= distance_m \
                 and _signed_box_distance(ego_box, actor) <= distance_m:
             return True
     return False
@@ -347,8 +367,10 @@ def _candidate_terms(step, start_state, future_states, cfg_cost, cfg_model, rout
     return values, valid
 
 
-def evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cfg_model):
-    """就地为全部模型步骤添加候选、当前、下一刻和逐项历史代价。"""
+def evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cfg_model,
+                         device=None):
+    """就地添加全部代价；候选批量走 Torch，真实状态递推留在 CPU。"""
+    started = time.perf_counter()
     check_cost_inputs(world_states, model_steps, route_geometry)
     ordered = sorted(world_states, key=lambda item: item["frame_id"])
     previous_events = 0
@@ -364,33 +386,34 @@ def evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cf
         "yaw": np.asarray(route_geometry["yaw_deg"], dtype=np.float64),
         "lane_width": np.asarray(route_geometry["lane_width_m"], dtype=np.float64),
     }
-    history = np.zeros(len(COST_TERMS), dtype=np.float64)
-    for step in model_steps:
-        input_frame = int(step["input_frame_id"])
-        next_frame = int(step["next_frame_id"])
-        current = by_frame[input_frame]
-        following = by_frame[next_frame]
-        current_index = index_by_frame[input_frame]
+    # 相邻模型步的 next/current 是同一个真实状态转移；每个 frame 只计算一次，
+    # 避免原实现对绝大多数真实状态重复执行两遍 OBB 代价。
+    actual_by_frame = {}
+    for current_index, current in enumerate(ordered):
         if current_index > 0:
             previous = ordered[current_index - 1]
         else:
             dt = float(ordered[1]["sim_time"] - current["sim_time"])
             previous = dict(current)
             previous["sim_time"] = float(current["sim_time"] - dt)
-        current_terms = _actual_terms(
+        actual_by_frame[int(current["frame_id"])] = _actual_terms(
             previous, current, cfg_cost, cfg_model, route)
-        next_terms = _actual_terms(current, following, cfg_cost, cfg_model, route)
-        start_index = index_by_frame[input_frame]
-        point_count = np.asarray(step["trajectories"]).shape[1]
-        futures = [ordered[start_index + offset]
-                   if start_index + offset < len(ordered) else None
-                   for offset in range(1, point_count + 1)]
-        candidate_terms, candidate_valid = _candidate_terms(
-            step, current, futures, cfg_cost, cfg_model, route)
+    actual_elapsed = time.perf_counter() - started
+
+    candidate_started = time.perf_counter()
+    torch_device = evaluate_candidate_costs_torch(
+        ordered, model_steps, by_frame, index_by_frame, route, cfg_cost, cfg_model,
+        _TERM_INDEX, _ACTUAL_ONLY, requested_device=device)
+    candidate_elapsed = time.perf_counter() - candidate_started
+
+    history = np.zeros(len(COST_TERMS), dtype=np.float64)
+    for step in model_steps:
+        input_frame = int(step["input_frame_id"])
+        next_frame = int(step["next_frame_id"])
+        current_terms = actual_by_frame[input_frame]
+        next_terms = actual_by_frame[next_frame]
         history += next_terms
         step.update({
-            "candidate_cost_terms": candidate_terms,
-            "candidate_cost_valid": candidate_valid,
             "current_cost_terms": current_terms.astype(np.float32),
             "next_cost_terms": next_terms.astype(np.float32),
             "current_cost_valid": np.ones(len(COST_TERMS), dtype=np.bool_),
@@ -398,3 +421,8 @@ def evaluate_drive_costs(world_states, model_steps, route_geometry, cfg_cost, cf
             "historical_cost_terms": history.astype(np.float32).copy(),
             "historical_cost_valid": np.ones(len(COST_TERMS), dtype=np.bool_),
         })
+    total_elapsed = time.perf_counter() - started
+    print("[collector] 代价计算完成 device={} steps={} actual={:.2f}s "
+          "candidate={:.2f}s total={:.2f}s".format(
+              torch_device, len(model_steps), actual_elapsed,
+              candidate_elapsed, total_elapsed))
