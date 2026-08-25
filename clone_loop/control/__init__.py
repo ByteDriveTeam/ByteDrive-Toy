@@ -5,8 +5,6 @@
 读取配置: —（由 TrajectoryController 读取传入的 clone_loop.control）
 对外接口:
     - TrajectoryController(cfg_control, fixed_delta_seconds)
-        .command(trajectory, pose, sim_time_s, speed_mps,
-                 behavior_probabilities) -> tuple[dict, dict]
 """
 
 from clone_loop.control.control import TrajectoryController

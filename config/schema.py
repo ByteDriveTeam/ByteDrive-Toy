@@ -839,16 +839,10 @@ class CloneInferenceCfg:
 @dataclass
 class CloneControlCfg:
     waypoint_dt_s: float
-    commit_horizon_s: float
-    blend_horizon_s: float
-    max_tracking_error_m: float
     speed_horizon: int
     min_target_speed_mps: float
     max_target_speed_mps: float
-    lookahead_min_m: float
-    lookahead_max_m: float
-    lookahead_time_s: float
-    lookahead_curvature_gain: float
+    lookahead_m: float
     wheelbase_m: float
     max_steer_angle_deg: float
     turn_steer_gain: float
@@ -860,9 +854,6 @@ class CloneControlCfg:
     max_throttle: float
     max_brake: float
     brake_deadband_mps: float
-    behavior_stop_threshold: float
-    behavior_stop_release_threshold: float
-    behavior_stop_indices: List[int]
 
 
 @dataclass
@@ -1287,21 +1278,6 @@ def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collec
     history_steps = control.waypoint_dt_s / sim.fixed_delta_seconds
     assert history_steps >= 1 and abs(history_steps - round(history_steps)) < 1e-6, \
         "clone_loop.control.waypoint_dt_s 必须是仿真固定步长的正整数倍"
-    trajectory_points = model.driving.trajectory.num_waypoints
-    trajectory_horizon = trajectory_points * control.waypoint_dt_s
-    rolling_values = (
-        control.commit_horizon_s, control.blend_horizon_s,
-        control.max_tracking_error_m)
-    assert all(math.isfinite(value) and value > 0 for value in rolling_values), \
-        "clone_loop.control 承诺/融合时长与最大跟踪误差必须为正"
-    assert all(abs(value / control.waypoint_dt_s - round(
-        value / control.waypoint_dt_s)) < 1e-6 for value in (
-            control.commit_horizon_s, control.blend_horizon_s)), \
-        "clone_loop.control 承诺/融合时长必须是航点间隔的整数倍"
-    assert control.commit_horizon_s + control.blend_horizon_s < trajectory_horizon, \
-        "clone_loop.control 承诺与融合时长之和必须短于模型轨迹总时域"
-    assert control.speed_horizon <= trajectory_points, \
-        "clone_loop.control.speed_horizon 不得超过模型轨迹航点数"
     training_history_dt = (
         collection_sim.fixed_delta_seconds * collection.capture_every_n_ticks
         * data.driving.previous_frame_offset)
@@ -1309,28 +1285,13 @@ def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collec
     assert online_history_steps >= 1 \
         and abs(online_history_steps - round(online_history_steps)) < 1e-6, \
         "训练历史帧时间间隔必须是闭环仿真固定步长的正整数倍"
-    lookahead_values = (
-        control.lookahead_min_m, control.lookahead_max_m,
-        control.lookahead_time_s, control.lookahead_curvature_gain)
-    assert all(math.isfinite(value) for value in lookahead_values) \
-        and 0 < control.lookahead_min_m <= control.lookahead_max_m \
-        and control.lookahead_time_s >= 0 and control.lookahead_curvature_gain >= 0 \
-        and control.wheelbase_m > 0 \
+    assert control.lookahead_m > 0 and control.wheelbase_m > 0 \
         and 0 < control.max_steer_angle_deg < 90 \
         and 0 < control.turn_steer_gain <= 1, \
         "clone_loop.control 横向控制参数取值非法"
     assert 0 <= control.steer_smoothing < 1 and control.integral_limit >= 0 \
         and 0 < control.max_throttle <= 1 and 0 < control.max_brake <= 1 \
         and control.brake_deadband_mps >= 0, "clone_loop.control PID/执行器参数取值非法"
-    assert 0 < control.behavior_stop_release_threshold \
-        < control.behavior_stop_threshold < 1, \
-        "clone_loop.control 停车标签释放/进入阈值须满足 0 < release < stop < 1"
-    assert control.behavior_stop_indices \
-        and len(control.behavior_stop_indices) == len(set(control.behavior_stop_indices)) \
-        and all(isinstance(index, int) and not isinstance(index, bool)
-                and 0 <= index < model.driving.behavior.num_classes
-                for index in control.behavior_stop_indices), \
-        "clone_loop.control 停车标签索引必须唯一且落在模型行为类别范围内"
     safety = cl.safety
     assert safety.max_route_deviation_m > 0, \
         "clone_loop.safety.max_route_deviation_m 必须 > 0"

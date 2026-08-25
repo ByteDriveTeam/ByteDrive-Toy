@@ -451,7 +451,7 @@ model:
     # 8 扇区多模态轨迹解码
     trajectory:
       num_modes: 8               # 8 个可学习 Mode Token，对应 8 条候选轨迹
-      num_waypoints: 20          # 每条轨迹航点数 T_wp（10Hz、0.1s/点 → 约 2s）
+      num_waypoints: 20          # 每条轨迹航点数 T_wp（10Hz、0.1s/点 → 4s）
       waypoint_dt_s: 0.1         # 相邻输出轨迹点的时间间隔
       planning_dim: 384          # 规划分支工作维；第 3/6 层分别归一后拼接再经 1×1 CNN 降到此维
       condition_mlp_hidden: 256  # 目标点+ego 速度条件编码 MLP 隐藏维
@@ -674,16 +674,10 @@ clone_loop:
 
   control:
     waypoint_dt_s: 0.1           # 模型 10Hz 轨迹相邻点时间间隔
-    commit_horizon_s: 0.5        # 每轮滚动中严格保留旧世界系计划的近端时长
-    blend_horizon_s: 0.5         # 承诺段后由旧计划线性过渡到新预测的时长
-    max_tracking_error_m: 2.0    # 实际位置偏离时间对齐参考点超过此值时立即重建计划
     speed_horizon: 15
     min_target_speed_mps: 0.0
     max_target_speed_mps: 12.0
-    lookahead_min_m: 2.0         # 速度自适应前视距离的基础下限；稳定时域更短时允许继续收缩
-    lookahead_max_m: 10.0        # 直道高速时的前视距离上限
-    lookahead_time_s: 0.5        # 速度每增加 1m/s 时按此前视时间增加距离
-    lookahead_curvature_gain: 4.0  # 按路径曲率缩短前视距离的米制增益
+    lookahead_m: 6.0
     wheelbase_m: 2.85
     max_steer_angle_deg: 70.0
     turn_steer_gain: 0.96        # 略减左右弯转角，使车辆相对原控制结果向弯道外侧修正
@@ -695,9 +689,6 @@ clone_loop:
     max_throttle: 0.75
     max_brake: 1.0
     brake_deadband_mps: 0.35
-    behavior_stop_threshold: 0.65          # 障碍/红灯停车标签进入制动状态的概率阈值
-    behavior_stop_release_threshold: 0.45  # 已停车后低于此概率才释放，避免逐帧标签抖动
-    behavior_stop_indices: [0, 1]          # 障碍停车、红灯停车；静止标签不作为控制指令
 
   safety:
     max_route_deviation_m: 8.0

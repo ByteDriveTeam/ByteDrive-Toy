@@ -1,4 +1,4 @@
-"""逐 episode 编码三目前向实况、模型输出与 active reference 诊断录像。
+"""逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
 
 模块: clone_loop/recorder/recorder.py
 依赖: fractions, pathlib, av, cv2, numpy, data.driving_targets, vis.driving_vis.render,
@@ -12,11 +12,11 @@
     driving_vis.field_colormap / lane_map.* / traffic_control.*
 对外接口:
     - EpisodeRecorder(run_dir, episode_index, cfg)
-        .write(frame_bgr, decision, execution, observation, command) -> None
+        .write(frame_bgr, decision, observation, command) -> None
         .write_terminal(frame_bgr) -> None
         .artifacts -> dict
         .close() -> None
-说明: 驾驶录像按左/前/右横向拼接三路 RGB；推理录像为三行画布，并以绿色叠加实际 active reference。
+说明: 驾驶录像按左/前/右横向拼接三路 RGB；推理录像为三行画布：三目/HUD、三场、道路线/交通控制/轨迹。
 """
 
 from fractions import Fraction
@@ -112,15 +112,14 @@ class EpisodeRecorder:
             bev_cfg.height * scale, bev_cfg.width * scale)
         self._inview = inview_mask(self._bev, bev_cfg.fov_deg)
 
-    def write(self, frame_bgr, decision, execution, observation, command):
-        """写入当前模型输入画面、预测候选和实际滚动参考轨迹。"""
+    def write(self, frame_bgr, decision, observation, command):
+        """写入当前模型输入画面和与之对应的全部推理输出画布。"""
         if not self._enabled:
             return
         triptych = self._triptych(frame_bgr)
         self._driving.write(triptych)
         self._inference.write(
-            self._render_inference(
-                triptych, decision, execution, observation, command))
+            self._render_inference(triptych, decision, observation, command))
 
     def write_terminal(self, frame_bgr):
         """终态没有下一次模型推理，仅把最后一帧追加到驾驶实况。"""
@@ -148,7 +147,7 @@ class EpisodeRecorder:
             if driving is not None:
                 driving.close()
 
-    def _render_inference(self, frame_bgr, decision, execution, observation, command):
+    def _render_inference(self, frame_bgr, decision, observation, command):
         visual = decision["visualization"]
         tile = self._recording.tile_size_px
         field_colormap = self._cfg.driving_vis.field_colormap
@@ -159,15 +158,13 @@ class EpisodeRecorder:
             visual["distribution"], field_colormap, self._inview)
         lane = self._lane_panel(visual)
         traffic = self._traffic_panel(visual)
-        trajectory = self._trajectory_panel(visual, traffic, decision, execution)
+        trajectory = self._trajectory_panel(visual, traffic, decision)
 
-        camera = _camera_panel(
-            frame_bgr, tile * 3, tile, decision, execution, observation, command)
+        camera = _camera_panel(frame_bgr, tile * 3, tile, decision, observation, command)
         fields = _panel_row(
             (risk, drivable, distribution), ("risk", "drivable", "distribution"), tile)
         structure = _panel_row(
-            (lane, traffic, trajectory),
-            ("lanes", "traffic", "trajectories + active"), tile)
+            (lane, traffic, trajectory), ("lanes", "traffic", "trajectories"), tile)
         return np.ascontiguousarray(np.vstack((camera, fields, structure)))
 
     def _lane_panel(self, visual):
@@ -187,18 +184,18 @@ class EpisodeRecorder:
             stop, visual["traffic_state"], None, traffic_cfg.state_colors,
             traffic_cfg.unknown_color, self._inview)
 
-    def _trajectory_panel(self, visual, traffic, decision, execution):
+    def _trajectory_panel(self, visual, traffic, decision):
         traffic_cfg = self._cfg.driving_vis.traffic_control
         base = render.bev_scene_composite(
             visual["risk"], visual["drivable"], visual["distribution"], self._inview)
         stop_mask = visual["stop_line"] > traffic_cfg.line_threshold
         base = render.overlay_traffic_control(
             base, traffic, stop_mask, traffic_cfg.overlay_alpha)
-        reference = execution["reference_trajectory"]
+        empty = np.zeros((0, 2), dtype=np.float32)
         return render.draw_trajectories(
             base, visual["trajectories"], decision["mode_scores"],
-            reference, np.ones(len(reference), dtype=np.float32), self._bev,
-            self._cfg.model.driving.bev.fov_deg, draw_gt=True)
+            empty, np.zeros(0, dtype=np.float32), self._bev,
+            self._cfg.model.driving.bev.fov_deg, draw_gt=False)
 
 
 def _panel_row(images, labels, tile):
@@ -210,7 +207,7 @@ def _panel_row(images, labels, tile):
     return np.ascontiguousarray(np.hstack(panels))
 
 
-def _camera_panel(frame, width, height, decision, execution, observation, command):
+def _camera_panel(frame, width, height, decision, observation, command):
     """相机等比缩放到首行中央，并叠加本次决策与车辆状态 HUD。"""
     canvas = _letterbox(frame, width, height)
     lines = (
@@ -225,13 +222,6 @@ def _camera_panel(frame, width, height, decision, execution, observation, comman
             observation["speed_mps"], command["target_speed_mps"]),
         "thr {:.2f}  steer {:.2f}  brake {:.2f}".format(
             command["throttle"], command["steer"], command["brake"]),
-        "track {:.2f}m  shift {:.2f}m  reset {}".format(
-            execution["tracking_error_m"], execution["prediction_shift_m"],
-            execution["reseed_reason"] or "no"),
-        "look {:.2f}m  curve {:.3f}  stop {}:{:.2f}".format(
-            execution["lookahead_m"], execution["path_curvature_inv_m"],
-            "yes" if execution["stop_requested"] else "no",
-            execution["stop_probability"]),
     )
     return _annotate(canvas, lines)
 

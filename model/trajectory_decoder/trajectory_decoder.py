@@ -1,4 +1,4 @@
-"""条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、约 2 秒轨迹。
+"""条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
 
 模块: model/trajectory_decoder/trajectory_decoder.py
 依赖: torch, config.schema.DrivingCfg, data.target_encoding, model.attention,
@@ -13,13 +13,13 @@
 对外接口:
     - TrajectoryDecoder(cfg_driving) -> nn.Module
         forward(perception_features, target_point, ego_velocity) -> dict
-            # trajectories/trajectory_residuals [B,M,20,2] / confidence [B,M] /
+            # trajectories/trajectory_residuals [B,M,40,2] / confidence [B,M] /
             # behavior_logits [B,C_behavior]
 说明: 目标点与 ego 平面速度先作 Symlog（仅用于把量纲差异大的条件输入压到有界范围喂 MLP），再经 MLP 产生
       第一路预查询，随后经 FFN 产生第二路预查询。主感知第 3、6 层特征分别 RMSNorm 后沿通道拼接，经单个
       1×1 CNN 降到 planning_dim；path1 直接、path2 再过一层 FFN，分别作为两个规划 CTB 的被查询序列。8 个
       随机初始化的可学习 Mode Token 携各自预查询依次经两个 CTB，其后四层 TB 协调各 Mode。新的 MLP
-      trajectory_head 回归 20 个 10Hz 米制基线残差，末层零初始化保证初始预测严格等于基线。新头采用新
+      trajectory_head 回归 40 个 10Hz 米制基线残差，末层零初始化保证初始预测严格等于基线。新头采用新
       state-dict 键，兼容加载器会恢复其余旧权重并让该头保留构造期初始化；baseline 始终按当前配置重建，
       避免旧检查点的 8 点缓存覆盖 40 点基线。
 """

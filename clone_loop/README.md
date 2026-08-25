@@ -17,7 +17,7 @@ Main environment (PyTorch)                    Python 3.7 worker (CARLA 0.9.15)
 Route queue / episode orchestration ─ JSON ─► reload map and populate traffic
 DrivingModel ◄── three RGB views + XYZ LiDAR shared regions ─ synchronized sensors
 Safety-aware trajectory reranking
-World-anchored rolling plan + pure pursuit/PID ─ JSON control ─► apply_control -> world.tick
+Pure pursuit + speed PID ───── JSON control ─► apply_control -> world.tick
 Step JSONL / summary ◄──────── state metadata ─ progress, collision, lane invasion, terminal state
 Two MP4 streams ◄───────────── RGB + inference output ─ one pair per route
 ```
@@ -29,9 +29,7 @@ Two MP4 streams ◄───────────── RGB + inference outpu
 - RGB uses fixed shared frames. LiDAR uses a separate variable-length FP32 xyz shared region and transmits the valid point count through the protocol. Capacity overflow fails explicitly instead of truncating points.
 - The navigation target is sampled at a fixed arc length ahead on the CARLA global route and transformed into the ego left-handed frame `(x forward, y right)`.
 - Trajectories are ordered by model confidence, then jointly scored by risk, drivable probability, and target alignment. Non-finite or clearly divergent candidates are rejected.
-- Each winning ego-frame trajectory is anchored in world coordinates. The active plan keeps the previous 0.5 s, blends toward the fresh prediction over the next 0.5 s, and uses the fresh prediction for the remaining horizon.
-- Pure pursuit and the integral-limited speed PID consume that same persistent reference. Lookahead grows with speed, contracts with path curvature, and is capped by the path distance inside the stable commitment/blending window.
-- Obstacle-stop and red-light-stop behavior probabilities gate target speed through separate enter/release thresholds. A tracking error above 2 m or a discontinuous simulation clock reseeds the plan.
+- Low-level control uses pure pursuit laterally and an integral-limited PID longitudinally. A predicted stop behavior may gate target speed to zero.
 - Collision, route deviation, step limit, and destination arrival produce explicit episode terminal states. Waiting at low speed does not end an episode automatically.
 - On Windows, press `q` to end the current episode while preserving complete logs and videos, then continue to the next route. In other terminals, type `q` and press Enter.
 
@@ -63,14 +61,14 @@ Use an environment override with:
 
 Each run creates `clone_loop.output.root/run_<timestamp>/` containing:
 
-- `episode_XXXX.jsonl`: time-aligned input/next observations, prediction, active reference, tracking diagnostics, and control;
+- `episode_XXXX.jsonl`: per-step observation, control, mode score, confidence, and behavior probability;
 - `episode_XXXX_driving.mp4`: a left/front/right driving view including the terminal frame;
-- `episode_XXXX_inference.mp4`: a three-row diagnostic canvas with cameras/HUD, spatial fields, lane and traffic-control predictions, every candidate, and the active reference trajectory;
+- `episode_XXXX_inference.mp4`: a three-row diagnostic canvas with cameras/HUD, spatial fields, lane and traffic-control predictions, and every candidate trajectory;
 - `summary.json`: aggregate success rate and per-route terminal state, progress, distance, and lane-invasion information.
 
 By default the runner loads `train/ckpt/driving/driving.pt`. It fails when the checkpoint is absent or compatible non-backbone weight coverage is below the configured threshold, preventing a random or incompatible model from controlling the vehicle.
 
-Lateral control remains pure pursuit rather than steering PID, but its input is the persistent plan transformed back into the current ego frame. `lookahead_min_m/max_m`, `lookahead_time_s`, and `lookahead_curvature_gain` adapt tracking distance; the commitment/blending horizon caps it to stable plan geometry. `behavior_stop_threshold` and `behavior_stop_release_threshold` provide stop hysteresis for configured stop-label indices.
+Lateral control uses pure pursuit, not PID. `clone_loop.control.turn_steer_gain` defaults to `0.96`, reducing left/right turn steering by 4% before smoothing so the result tracks slightly farther toward the outside of a curve. Set it to `1.0` to restore the unscaled pure-pursuit command.
 
 ## Weight and scoring semantics
 
@@ -91,7 +89,7 @@ score =
 - Larger `drivable_weight` rejects off-road and visibly occupied regions more strongly.
 - Larger `route_alignment_weight` favors the navigation target direction more strongly.
 
-The default confidence weight is `1.0`; the three auxiliary reranking weights currently default to `0.0`, so the model confidence ordering is unchanged unless an environment override enables those costs. Confidence is an unnormalized logit, so enabled terms do not naturally share a scale; tune them with `mode_scores` and the inference video.
+The default risk weight is 2 because collision risk is prioritized over route alignment. Confidence uses an unnormalized logit, however, so the terms do not naturally share a scale. Tune them with `mode_scores` in the JSONL and the inference video, and check that one term does not dominate persistently.
 
 ## Research boundary
 

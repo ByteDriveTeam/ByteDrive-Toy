@@ -104,7 +104,7 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。
 - [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。公开 API 重导出入口。
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、约 2 秒轨迹。
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
 
 ## train/ — 训练 / 评估循环
@@ -130,17 +130,13 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环三目+LiDAR 模型推理与轨迹选择的公开 API 重导出入口
 - [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹。
 - [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — 轨迹跟踪控制器的公开 API 重导出入口
-- [clone_loop/control/control.py](../clone_loop/control/control.py) — 把逐帧模型轨迹融合为世界系滚动计划，并转换为 CARLA 低层控制
-- [clone_loop/control/tests/__init__.py](../clone_loop/control/tests/__init__.py) — 轨迹控制器确定性测试包
-- [clone_loop/control/tests/test_control.py](../clone_loop/control/tests/test_control.py) — 验证世界系滚动轨迹承诺、融合、重建、控制边界与配置约束
+- [clone_loop/control/control.py](../clone_loop/control/control.py) — 把模型选中的 ego 系轨迹转换为 CARLA 归一化转向、油门与制动
 - [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Py37 worker 子进程客户端的公开 API 重导出入口
 - [clone_loop/client/client.py](../clone_loop/client/client.py) — 派生 Py37 CARLA worker，并以同步 JSON RPC 驱动闭环 episode
 - [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — 闭环逐步日志与汇总写入器的公开 API 重导出入口
-- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把时间对齐的闭环观测、滚动计划、控制与选择结果写为 JSONL，并生成运行汇总
-- [clone_loop/logger/tests/__init__.py](../clone_loop/logger/tests/__init__.py) — 闭环日志确定性测试包
-- [clone_loop/logger/tests/test_logger.py](../clone_loop/logger/tests/test_logger.py) — 验证时间对齐观测与滚动轨迹诊断可稳定写入 JSONL
+- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总
 - [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — 闭环驾驶与逐帧推理录像器的公开 API 重导出入口
-- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向实况、模型输出与 active reference 诊断录像。
+- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
 - [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
 - [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB/LiDAR、驾驶模型、轨迹控制与逐 episode 评测日志
 
