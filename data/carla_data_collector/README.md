@@ -22,7 +22,7 @@ This directory collects synthetic driving data from CARLA. It uses a **heterogen
 | 12 | Semantic bounding boxes | `worker/annotations.py` captures dynamic boxes per frame and static environment boxes per scene |
 | 13 | Traffic-control ground truth | `worker/traffic_control.py` records native controlled lanes/stop waypoints and associates the next control with the current expert route |
 | 14 | Multi-rate timelines | Kinematics and high-bandwidth sensors use independent intervals, normally 10 Hz and 2 Hz, aligned by `frame_id`/`sim_time` |
-| 15 | Model-driven generalization collection | With `ego.controller=model`, inference runs at 10 Hz, all candidate trajectories are retained, and only the winning trajectory drives control |
+| 15 | Model-driven generalization collection | With `ego.controller=model`, inference runs at 10 Hz, all candidates are retained, and the winner drives a shared world-anchored rolling trajectory controller |
 | 16 | Raw model costs | Future 10 Hz ground-truth actor boxes annotate every candidate waypoint plus current, next, and historical raw costs; values are nonnegative, unbounded, unnormalized, unclipped, and unweighted |
 
 ## 2. Architecture and data flow
@@ -125,8 +125,9 @@ Every scene is self-contained and may be removed, moved, or processed independen
 | Key | Content |
 | --- | --- |
 | `num_world_states` / `world/{t}` | Complete 10 Hz ground truth: ego motion, dynamic world-frame OBB/velocity, lights, relevant stop line, route progress, collision and lane-invasion events |
-| `num_model_steps` / `model/{t}/meta` | Inference input/next IDs, winner, confidence, mode scores, archived behavior probabilities, and executed control |
+| `num_model_steps` / `model/{t}/meta` | Input/next IDs, winner, confidence, mode scores, rolling/adaptive-lookahead diagnostics, stop-label probabilities/state, and executed control |
 | `model/{t}/trajectories` | Every candidate trajectory `[M,T,2]`, not only the winner |
+| `model/{t}/reference_trajectory` | The ego-frame active reference `[T,2]` actually consumed by pure pursuit and speed PID |
 | `model/{t}/candidate_cost_terms` | Raw per-candidate, per-waypoint costs `[M,T,K]` using future ground-truth actors observed after execution |
 | `model/{t}/current_cost_terms` / `next_cost_terms` | Raw cost vector at the current and actual next state |
 | `model/{t}/historical_cost_terms` | Component-wise accumulated actual cost from scene start |

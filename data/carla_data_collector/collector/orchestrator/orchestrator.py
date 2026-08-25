@@ -5,7 +5,8 @@
 读取配置: carla_collector 全树、clone_loop.ipc/control、data.driving.cameras
 对外接口:
     - run(cfg, max_scenes_override=None) -> int     # 执行采集，返回成功落盘的场景段数
-说明: behavior_agent 保持原专家采集语义；model 模式只用 Winner 轨迹产生控制，行为概率仅存档。
+说明: behavior_agent 保持原专家采集语义；model 模式由 Winner 滚动轨迹控制几何与速度，
+      障碍物/红灯停车标签通过滞回门控触发制动。
       父进程创建共享内存 arena 并持有，worker 子进程写入。一次行驶随 arena 反复写满被切成多个连续段，
       每段落一个自包含场景目录（共享 drive_id、segment_idx 递增），worker 在多次 RPC 间保活世界续采，
       直到到达终点或达整次行驶总帧上限。专家碰撞沿用原重试；模型碰撞进入恢复窗口且失败数据也保留。本次行驶 0 段产出
@@ -251,9 +252,9 @@ def _live_lidar_array(shared, count):
         int(count), 3).copy()
 
 
-def _model_step(decision, command, current_state, next_state, waypoint_dt_s,
-                world_index):
-    """构造可落盘模型记录；行为概率仅记录，不进入控制。"""
+def _model_step(decision, execution, command, current_state, next_state,
+                waypoint_dt_s, world_index):
+    """构造可落盘的原始预测、实际参考轨迹与控制记录。"""
     return {
         "input_frame_id": int(current_state["frame_id"]),
         "next_frame_id": int(next_state["frame_id"]),
@@ -261,13 +262,19 @@ def _model_step(decision, command, current_state, next_state, waypoint_dt_s,
         "winner_mode": int(decision["mode"]),
         "history_valid": bool(decision["history_valid"]),
         "waypoint_dt_s": float(waypoint_dt_s),
-        "control_source": "winner_trajectory_only",
+        "control_source": "persistent_world_trajectory",
         "control": {key: float(value) for key, value in command.items()},
         "confidence": np.asarray(decision["confidence"]).tolist(),
         "mode_scores": np.asarray(decision["mode_scores"]).tolist(),
         "behavior_probabilities": np.asarray(
             decision["behavior_probabilities"]).tolist(),
         "trajectories": np.asarray(decision["trajectories"], dtype=np.float32),
+        "reference_trajectory": np.asarray(
+            execution["reference_trajectory"], dtype=np.float32),
+        "execution": {
+            key: value for key, value in execution.items()
+            if key != "reference_trajectory"
+        },
     }
 
 
@@ -374,12 +381,15 @@ def _collect_model_route(worker, shared, shared_lidar, policy, controller, map_n
             shared, views, cc.cameras.height, cc.cameras.width)
         lidar = _live_lidar_array(shared_lidar, observation["lidar_count"])
         decision = policy.infer(frame, lidar, observation)
-        # 唯一控制来源：Winner 轨迹。behavior_probabilities 只进入上面的记录字段。
-        command = controller.command(decision["trajectory"], observation["speed_mps"])
+        # Winner 决定几何/速度参考，模型障碍与红灯停车标签只负责把目标速度门控为零。
+        command, execution = controller.command(
+            decision["trajectory"], observation["pose"],
+            observation["sim_time_s"], observation["speed_mps"],
+            decision["behavior_probabilities"])
         result = worker.model_step(command)
         next_state = result["world_state"]
         step = _model_step(
-            decision, command, current_state, next_state,
+            decision, execution, command, current_state, next_state,
             cfg.clone_loop.control.waypoint_dt_s, len(all_world) - 1)
         all_steps.append(step)
         segment["model_steps"].append(step)

@@ -297,7 +297,8 @@ class LmdbWriter:
     def append_model_data(self, meta_updates, world_states, model_steps):
         """给已存在场景追加模型 10Hz 时间轴及逐候选、逐点原始代价数组。"""
         array_names = (
-            "trajectories", "candidate_cost_terms", "candidate_cost_valid",
+            "trajectories", "reference_trajectory",
+            "candidate_cost_terms", "candidate_cost_valid",
             "current_cost_terms", "current_cost_valid", "next_cost_terms",
             "next_cost_valid", "historical_cost_terms", "historical_cost_valid",
         )

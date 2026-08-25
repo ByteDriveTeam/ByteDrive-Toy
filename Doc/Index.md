@@ -128,13 +128,17 @@ Python 3.12 collector:
 - [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — Public three-camera + LiDAR inference and trajectory-selection API
 - [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — Checkpoint loading, temporal state, and safety/route-aware trajectory selection
 - [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — Public trajectory-controller API
-- [clone_loop/control/control.py](../clone_loop/control/control.py) — Ego-frame trajectory conversion to normalized CARLA steering, throttle, and brake
+- [clone_loop/control/control.py](../clone_loop/control/control.py) — World-anchored rolling trajectory commitment, fusion, and CARLA low-level control
+- [clone_loop/control/tests/__init__.py](../clone_loop/control/tests/__init__.py) — Deterministic trajectory-controller test package
+- [clone_loop/control/tests/test_control.py](../clone_loop/control/tests/test_control.py) — Verifies rolling-trajectory commitment, fusion, reseeding, control bounds, and configuration constraints
 - [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Public Python 3.7 worker-client API
 - [clone_loop/client/client.py](../clone_loop/client/client.py) — Worker spawning and synchronous JSON RPC episode control
 - [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — Public step-log and summary API
-- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — Episode JSONL state/control/selection logging and run summary generation
+- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — Time-aligned observation, rolling-plan, control, and selection JSONL logging
+- [clone_loop/logger/tests/__init__.py](../clone_loop/logger/tests/__init__.py) — Deterministic closed-loop logger test package
+- [clone_loop/logger/tests/test_logger.py](../clone_loop/logger/tests/test_logger.py) — Verifies stable JSONL serialization of time-aligned observations and rolling-plan diagnostics
 - [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — Public driving and inference recorder API
-- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — Per-episode camera video and composite online-inference diagnostics encoding
+- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — Per-episode camera, model-output, and active-reference diagnostic video encoding
 - [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — Public episode-orchestrator API
 - [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — CARLA, shared sensors, model inference, control, evaluation, and logging orchestration
 

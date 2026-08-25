@@ -1,4 +1,4 @@
-"""把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总。
+"""把时间对齐的闭环观测、滚动计划、控制与选择结果写为 JSONL，并生成运行汇总。
 
 模块: clone_loop/logger/logger.py
 依赖: datetime, json, pathlib
@@ -6,7 +6,7 @@
 对外接口:
     - RunLogger(output_root)
         .start_episode(index, route, seed) -> None
-        .write_step(observation, command, decision) -> None
+        .write_step(input_observation, next_observation, command, decision, execution) -> None
         .finish_episode(observation, artifacts=None) -> dict
         .finish_run() -> dict
         .close() -> None
@@ -39,13 +39,15 @@ class RunLogger:
         self._max_deviation = 0.0
         self._write({"type": "episode", **self._episode})
 
-    def write_step(self, observation, command, decision):
-        """记录一步闭环的仿真状态、执行控制与模型选择摘要。"""
+    def write_step(self, input_observation, next_observation, command,
+                   decision, execution):
+        """记录时间对齐的输入/下一观测、模型决策、滚动计划与实际控制。"""
         self._max_deviation = max(
-            self._max_deviation, float(observation["route_deviation_m"]))
+            self._max_deviation, float(next_observation["route_deviation_m"]))
         self._write({
             "type": "step",
-            "observation": observation,
+            "input_observation": input_observation,
+            "next_observation": next_observation,
             "control": command,
             "decision": {
                 "mode": decision["mode"],
@@ -54,6 +56,10 @@ class RunLogger:
                 "behavior_probabilities": decision["behavior_probabilities"].tolist(),
                 "history_valid": decision["history_valid"],
                 "selected_trajectory": decision["trajectory"].tolist(),
+            },
+            "execution": {
+                **execution,
+                "reference_trajectory": execution["reference_trajectory"].tolist(),
             },
         })
 

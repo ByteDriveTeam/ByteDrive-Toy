@@ -102,10 +102,14 @@ def _episode(worker, shared, shared_lidar, policy, controller, recorder, logger,
         frame = _frame_array(shared, views, camera_cfg.height, camera_cfg.width)
         lidar = _lidar_array(shared_lidar, observation["lidar_count"])
         decision = policy.infer(frame, lidar, observation)
-        command = controller.command(decision["trajectory"], observation["speed_mps"])
-        recorder.write(frame, decision, observation, command)
+        input_observation = observation
+        command, execution = controller.command(
+            decision["trajectory"], input_observation["pose"],
+            input_observation["sim_time_s"], input_observation["speed_mps"],
+            decision["behavior_probabilities"])
+        recorder.write(frame, decision, execution, input_observation, command)
         observation = worker.step(command)
-        logger.write_step(observation, command, decision)
+        logger.write_step(input_observation, observation, command, decision, execution)
         if observation["step"] % cl.output.log_every == 0:
             print("[clone_loop] step={} progress={:.1%} speed={:.2f}m/s mode={}".format(
                 observation["step"], observation["route_completion"],

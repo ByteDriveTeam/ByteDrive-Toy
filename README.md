@@ -56,7 +56,7 @@ At runtime, the closed-loop runner connects `DrivingModel` to synchronous CARLA 
 
 ```text
 observation -> two-frame inference -> trajectory selection
-            -> pure-pursuit/PID control -> next observation
+            -> world-anchored rolling plan -> pure-pursuit/PID control -> next observation
 ```
 
 It records terminal state, progress, controls, diagnostics, and videos for every route.
@@ -73,7 +73,7 @@ It records terminal state, progress, controls, diagnostics, and videos for every
 | Training | AdamW; BF16 trunk with FP32 output/loss paths; differential learning rate for perception modules |
 | Data | CARLA 0.9.15; RGB in H.265 and non-RGB modalities in LMDB; sensors at 2 Hz and kinematics at 10 Hz |
 | Reconstruction | Multi-frame semantic LiDAR fusion; static/dynamic separation; sparse TUDF by default and optional Poisson mesh |
-| Closed loop | Synchronous CARLA, online two-frame inference, safety reranking, pure-pursuit lateral control, speed PID, episode metrics, and recording |
+| Closed loop | Synchronous CARLA, online two-frame inference, safety reranking, world-anchored commitment/fusion, speed/curvature-adaptive pure pursuit, behavior-label stopping, speed PID, metrics, and recording |
 
 ```mermaid
 flowchart LR
@@ -145,7 +145,7 @@ flowchart TB
         OBS["Three RGB views + LiDAR<br/>pose, velocity, route target"]
         INF["Two-frame inference"]
         SELECT["Confidence + risk + drivable<br/>+ route-alignment reranking"]
-        CTRL["Pure pursuit + speed PID"]
+        CTRL["World-anchored rolling plan<br/>adaptive pure pursuit + label stop/PID"]
         STEP["apply_control -> world.tick"]
         OBS --> INF --> SELECT --> CTRL --> STEP --> OBS
     end
