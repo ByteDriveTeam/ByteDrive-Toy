@@ -1,91 +1,96 @@
-# CARLA 0.9.15 行为克隆闭环
+# CARLA 0.9.15 Behavior-Cloning Closed Loop
 
-该模块把现有 `DrivingModel` 接入 CARLA 同步仿真，形成“观测 → 双帧推理 → 多模态轨迹选择 →
-低层控制 → 下一观测”的闭环。架构沿用数据采集器的异构设计：
+**English** · [简体中文](README.zh-CN.md)
 
-```
-主环境（PyTorch）                         Py37 worker（CARLA 0.9.15）
-────────────────────                     ─────────────────────────
-路线队列 / episode 编排 ─── JSON ───────► 重载地图、布置交通流
-DrivingModel ◄──── 三目 RGB + XYZ LiDAR 共享区 ─ 三路相机与语义 LiDAR 严格同步
-轨迹安全重排
-纯追踪 + 速度 PID ─────── JSON control ─► apply_control → world.tick
-逐步 JSONL / summary ◄──── 状态元数据 ─── 路线进度、碰撞、压线、终态
-双路 MP4 ◄─────────────── RGB + 推理输出 ─ 每条路线独立保存
+This module connects the existing `DrivingModel` to synchronous CARLA simulation and forms the loop
+
+```text
+observation -> two-frame inference -> multimodal trajectory selection
+            -> low-level control -> next observation
 ```
 
-## 关键口径
+It follows the collector's heterogeneous runtime design:
 
-- 输入与训练一致：三路 BGR 转 RGB、ImageNet/DINO 归一化；语义 LiDAR 在主环境编码为 0.5m 体素
-  中心相对 XYZ 米制均值/总体标准差；相机轴、内外参均按 `data.driving.cameras` 顺序。
-- 时序与训练一致：主环境按 `waypoint_dt_s / fixed_delta_seconds` 缓存对应时距的历史 RGB/LiDAR/位姿；
-  历史未满时以当前帧回填且 `previous_valid=0`。
-- RGB 保持固定共享帧；LiDAR 使用独立变长 XYZ FP32 共享区，有效点数经协议传递，容量不足时硬失败而不截断。
-- 导航目标来自 CARLA 全局路线前方固定弧长点，并转换为 ego 左手系 `(x 前, y 右)`。
-- 轨迹先按模型置信度排序，再联合风险场、可行驶场和目标方向评分；非有限或明显发散轨迹拒绝执行。
-- 低层控制使用纯追踪横向控制和带积分限幅的纵向 PID；模型停车行为可把目标速度门控为零。
-- 碰撞、偏航、步数上限和到达终点形成明确 episode 终态；低速等待不会自动结束。
-- Windows 控制台运行期间按 `q` 可手动结束当前 episode 并保存完整日志/录像，然后继续下一条路线；
-  其他终端输入 `q` 后按回车。
+```text
+Main environment (PyTorch)                    Python 3.7 worker (CARLA 0.9.15)
+──────────────────────────                    ─────────────────────────────────
+Route queue / episode orchestration ─ JSON ─► reload map and populate traffic
+DrivingModel ◄── three RGB views + XYZ LiDAR shared regions ─ synchronized sensors
+Safety-aware trajectory reranking
+Pure pursuit + speed PID ───── JSON control ─► apply_control -> world.tick
+Step JSONL / summary ◄──────── state metadata ─ progress, collision, lane invasion, terminal state
+Two MP4 streams ◄───────────── RGB + inference output ─ one pair per route
+```
 
-## 环境
+## Core semantics
 
-默认直接复用数据采集器已有的 Python 3.7 环境：
+- Inputs match training: BGR is converted to RGB and normalized for ImageNet/DINO; semantic LiDAR is encoded in the main runtime as center-relative xyz metric means and population standard deviations in 0.5 m voxels. Camera axes, intrinsics, and extrinsics follow `data.driving.cameras` order.
+- Temporal spacing matches training. The main runtime caches historical RGB, LiDAR, and pose at `waypoint_dt_s / fixed_delta_seconds`; before history is available, it reuses the current frame and sets `previous_valid=0`.
+- RGB uses fixed shared frames. LiDAR uses a separate variable-length FP32 xyz shared region and transmits the valid point count through the protocol. Capacity overflow fails explicitly instead of truncating points.
+- The navigation target is sampled at a fixed arc length ahead on the CARLA global route and transformed into the ego left-handed frame `(x forward, y right)`.
+- Trajectories are ordered by model confidence, then jointly scored by risk, drivable probability, and target alignment. Non-finite or clearly divergent candidates are rejected.
+- Low-level control uses pure pursuit laterally and an integral-limited PID longitudinally. A predicted stop behavior may gate target speed to zero.
+- Collision, route deviation, step limit, and destination arrival produce explicit episode terminal states. Waiting at low speed does not end an episode automatically.
+- On Windows, press `q` to end the current episode while preserving complete logs and videos, then continue to the next route. In other terminals, type `q` and press Enter.
 
-`data/carla_data_collector/py37_venv/Scripts/python.exe`
+## Environment
 
-主环境使用项目根 `.venv`。CARLA 服务端须已启动，版本为 0.9.15。全部可调项集中在
-`config/default.yaml` 的 `clone_loop` 节；机器差异建议写入 `config/<env>.yaml` 覆盖。
+The default worker reuses the data collector's Python 3.7 environment:
 
-## 运行
+```text
+data/carla_data_collector/py37_venv/Scripts/python.exe
+```
 
-从仓库根执行：
+The main runtime uses the repository-root `.venv`. A CARLA 0.9.15 server must already be running. All configurable values live under `clone_loop` in `config/default.yaml`; machine-specific values should be placed in a `config/<env>.yaml` override.
+
+## Running
+
+From the repository root:
 
 ```powershell
 .\.venv\Scripts\python.exe clone_loop\run.py --max-episodes 1
 ```
 
-运行期间若模型长期停车或希望提前截断当前片段，按 `q` 即可；不要用 `Ctrl+C`，后者用于结束整个进程。
+Press `q` when a model remains stopped or the current segment should be cut short. `Ctrl+C` terminates the entire process.
 
-指定环境覆盖：
+Use an environment override with:
 
 ```powershell
 .\.venv\Scripts\python.exe clone_loop\run.py --env carla_local
 ```
 
-每次运行会在 `clone_loop.output.root/run_<时间>/` 下生成：
+Each run creates `clone_loop.output.root/run_<timestamp>/` containing:
 
-- `episode_XXXX.jsonl`：每步观测、控制、模式评分、置信度与行为概率；
-- `episode_XXXX_driving.mp4`：左/前/右三目横向拼接驾驶实况，包含终态帧；
-- `episode_XXXX_inference.mp4`：每次模型推理的三行诊断画布，包含相机/HUD、三场、
-  道路线、交通控制与全部候选轨迹；
-- `summary.json`：成功率与每条路线的终态、进度、里程、压线等摘要。
+- `episode_XXXX.jsonl`: per-step observation, control, mode score, confidence, and behavior probability;
+- `episode_XXXX_driving.mp4`: a left/front/right driving view including the terminal frame;
+- `episode_XXXX_inference.mp4`: a three-row diagnostic canvas with cameras/HUD, spatial fields, lane and traffic-control predictions, and every candidate trajectory;
+- `summary.json`: aggregate success rate and per-route terminal state, progress, distance, and lane-invasion information.
 
-闭环默认加载 `train/ckpt/driving/driving.pt`。检查点不存在或非骨干权重覆盖率低于配置阈值时会硬失败，
-避免随机模型被误用于车辆控制。
+By default the runner loads `train/ckpt/driving/driving.pt`. It fails when the checkpoint is absent or compatible non-backbone weight coverage is below the configured threshold, preventing a random or incompatible model from controlling the vehicle.
 
-横向控制使用纯追踪而非 PID。`clone_loop.control.turn_steer_gain` 默认设为 `0.96`，在平滑前将左右弯
-转角等比例缩小 4%，使车辆相对原控制结果略向弯道外侧修正；设为 `1.0` 即恢复原始纯追踪输出。
+Lateral control uses pure pursuit, not PID. `clone_loop.control.turn_steer_gain` defaults to `0.96`, reducing left/right turn steering by 4% before smoothing so the result tracks slightly farther toward the outside of a curve. Set it to `1.0` to restore the unscaled pure-pursuit command.
 
-## 权重含义
+## Weight and scoring semantics
 
-`min_weight_coverage` 不是轨迹评分权重。它表示检查点中形状兼容的非 DINO 骨干状态项，占当前模型预期
-非骨干状态项的最低比例；默认 `0.95` 会拒绝缺失超过 5% 的残缺或不兼容检查点。
+`min_weight_coverage` is not a trajectory score weight. It is the minimum fraction of shape-compatible, non-DINO state entries found in the checkpoint relative to the current model. The default `0.95` rejects checkpoints that omit more than 5% of those entries.
 
-其余四项只参与在线候选轨迹重排，不改变神经网络本身：
+The remaining four weights affect online candidate reranking only; they do not change the network:
 
-```
+```text
 score =
-    confidence_weight × 模型置信度 logit
-  - risk_weight × 轨迹沿线平均风险概率
-  - drivable_weight × (1 - 轨迹沿线平均可行驶概率)
-  - route_alignment_weight × (1 - 轨迹终点方向与导航目标方向的余弦相似度)
+    confidence_weight * model confidence logit
+  - risk_weight * mean risk probability along the trajectory
+  - drivable_weight * (1 - mean drivable probability along the trajectory)
+  - route_alignment_weight * (1 - cosine similarity to target direction)
 ```
 
-- `confidence_weight` 越大，越信任模型原始 Mode 排名；
-- `risk_weight` 越大，越排斥遮挡、未知或预测危险区域；
-- `drivable_weight` 越大，越排斥道路外和可见障碍占用；
-- `route_alignment_weight` 越大，越偏向导航目标方向。
+- Larger `confidence_weight` trusts the model's original mode ordering more strongly.
+- Larger `risk_weight` rejects occluded, unknown, or predicted-dangerous regions more strongly.
+- Larger `drivable_weight` rejects off-road and visibly occupied regions more strongly.
+- Larger `route_alignment_weight` favors the navigation target direction more strongly.
 
-默认风险权重为 2，是因为碰撞风险优先级高于路线贴合；但置信度使用未归一化 logit，四项并非天然同尺度，
-实际调参应结合 JSONL 中的 `mode_scores` 和推理录像观察，避免某一项长期压倒其余项。
+The default risk weight is 2 because collision risk is prioritized over route alignment. Confidence uses an unnormalized logit, however, so the terms do not naturally share a scale. Tune them with `mode_scores` in the JSONL and the inference video, and check that one term does not dominate persistently.
+
+## Research boundary
+
+This is a **behavior-cloning inference and evaluation loop**, not a reinforcement-learning loop. Episode progress, collisions, and terminal states are recorded but never converted into rewards, replay data, gradients, or online policy updates. The current data distribution is narrow, so closed-loop distribution shift and compounding error remain expected limitations.

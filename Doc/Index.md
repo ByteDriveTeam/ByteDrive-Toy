@@ -1,196 +1,205 @@
-# ByteDrive 文档索引
+# ByteDrive File and Documentation Index
 
-全项目文档与源文件的单一导航入口。**每次增删文件，同一提交内更新本表。**
-每行格式：`相对路径 — 一句话职责`（职责应与该文件文件头首行一致）。
-校验伴随文件 `X_checks.py` 附属于 `X.py`，**不单独列入索引**。
+**English** · [简体中文](Index.zh-CN.md)
 
-## 规范与文档
+This is the single navigation entry for project documentation and source files. **Update it in the same commit whenever files are added or removed.** Each entry uses `relative path — one-line responsibility`; companion `X_checks.py` files belong to `X.py` and are not listed separately.
 
-- [README.md](../README.md) — ByteDrive-Toy 项目总览：代码库、模型架构、数据系统、训练策略、权重下载与运行指南
-- [Doc/开发规范.md](开发规范.md) — 项目强制开发规范（文档/注释/配置/校验/简洁）
-- [Doc/Index.md](Index.md) — 本文档索引
+## Guidelines and documentation
 
-## config/ — 配置与校验（参数唯一来源）
+- [README.md](../README.md) — English primary overview: architecture, data, training, weights, installation, and usage
+- [README.zh-CN.md](../README.zh-CN.md) — Complete Simplified Chinese project overview
+- [Doc/DevelopmentGuidelines.md](DevelopmentGuidelines.md) — English primary development rules for documentation, comments, config, validation, and code structure
+- [Doc/开发规范.md](开发规范.md) — Simplified Chinese development guidelines
+- [Doc/Index.md](Index.md) — English primary file and documentation index
+- [Doc/Index.zh-CN.md](Index.zh-CN.md) — Simplified Chinese file and documentation index
+- [site/index.html](../site/index.html) — English primary project website
+- [site/index.zh-CN.html](../site/index.zh-CN.html) — Simplified Chinese project website
 
-- [config/default.yaml](../config/default.yaml) — ByteDrive 全部参数默认值（唯一数据来源）
-- [config/schema.py](../config/schema.py) — 配置的类型定义与加载期校验（参数约束的唯一来源）
-- [config/__init__.py](../config/__init__.py) — 配置加载入口：读 yaml → 构造 schema → 校验 → 返回配置对象
+## config/ — configuration and validation
 
-## data/ — 数据读取与预处理
+- [config/default.yaml](../config/default.yaml) — Default values for every ByteDrive parameter; the single value source
+- [config/schema.py](../config/schema.py) — Configuration types and load-time validation; the single constraint source
+- [config/__init__.py](../config/__init__.py) — Configuration entry point: read YAML, construct schema, validate, and return config
 
-- [data/__init__.py](../data/__init__.py) — 数据读取与预处理包标识：只读消费 config 与已落盘数据集
-- [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
-- [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、有界 SceneReader 缓存、RGB 归一化（感知与驾驶数据集复用）
-- [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — 场景感知批采样器：连续帧同批、批间随机，减少视频随机 seek 与跨场景解码器切换
-- [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
-- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
-- [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格中心相对 XYZ 米制均值与总体标准差。
-- [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API。
-- [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — 多帧语义 LiDAR 静态融合、动态对象级重建、场景级断点恢复与批处理。
-- [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — 多帧点云融合 CLI：加载配置并处理单场景或递归数据集。
-- [data/mesh_reconstruction/__init__.py](../data/mesh_reconstruction/__init__.py) — 融合点云 Mesh 重建公开 API，支持可选水密修复。
-- [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — 融合 PT 的静态优先 Mesh 重建、动态 donor 复用、断点恢复与批处理。
-- [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — 融合点云 Mesh 批处理 CLI。
-- [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Poisson 表面重建与可选水密修复公开 API。
-- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — 以 PyTorch 观测支撑裁剪和 Open3D Poisson 生成三角 Mesh，并可选执行水密修复。
-- [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — 隔离 Poisson 子进程入口：关闭 Windows 崩溃弹窗并返回单次表面重建结果。
-- [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — 动态对象 Poisson、donor 复用与 Box 回退公开 API。
-- [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — 按点覆盖率重建动态对象，并依次执行相同 donor、相似 donor 与 Box 回退。
-- [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — 静态世界与动态局部稀疏 TUDF 重建公开 API。
-- [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — 以 PyTorch 稀疏规则张量构建静态世界与动态局部截断无符号距离场。
+## data/ — data loading and preprocessing
 
-### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
+- [data/__init__.py](../data/__init__.py) — Data package marker; reads config and persisted datasets
+- [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — Pure target-encoding functions for symlog physical values and depth-range masks
+- [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — Shared single-frame dataset base with scene/frame indexing, bounded readers, and RGB normalization
+- [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — Scene-aware batch sampler that groups consecutive frames and shuffles batches to reduce random video seeks
+- [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Two-frame, three-camera + LiDAR dataset with voxel statistics, temporal transforms, and multitask supervision
+- [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz
+- [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — Public API for multi-frame semantic-LiDAR fusion and dynamic-object reconstruction
+- [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — Static fusion, object-level dynamic reconstruction, scene checkpoints, and batch processing
+- [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — CLI for one-scene or recursive multi-frame point-cloud fusion
+- [data/mesh_reconstruction/__init__.py](../data/mesh_reconstruction/__init__.py) — Public mesh-reconstruction API with optional watertight repair
+- [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — Static-first mesh reconstruction, dynamic donor reuse, checkpoints, and batch processing
+- [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — Fused point-cloud reconstruction CLI
+- [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Public Poisson-surface and optional watertight-repair API
+- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — PyTorch support cropping and Open3D Poisson triangle-mesh generation
+- [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — Isolated Poisson subprocess that suppresses Windows crash dialogs and returns one surface result
+- [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — Public dynamic Poisson, donor reuse, and box-fallback API
+- [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — Coverage-based dynamic reconstruction with same-object, similar-object, and box fallbacks
+- [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — Public sparse TUDF API for the static world and local dynamic objects
+- [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — Sparse regular-tensor construction of static and dynamic truncated unsigned distance fields
 
-- [data/carla_data_collector/README.md](../data/carla_data_collector/README.md) — 本采集模块的设计文档（架构/数据流/输出布局/运行）
-- [scene_layout.py](../data/carla_data_collector/scene_layout.py) — 从 Carla 地图提取静态/动态场景布局（官方示例改造）
+### data/carla_data_collector/ — heterogeneous CARLA collection
 
-共享层 `common/`（两端纯 Python，3.7/3.12 双兼容）
+- [data/carla_data_collector/README.md](../data/carla_data_collector/README.md) — English primary collector architecture, data flow, output schema, and usage
+- [data/carla_data_collector/README.zh-CN.md](../data/carla_data_collector/README.zh-CN.md) — Simplified Chinese collector design
+- [scene_layout.py](../data/carla_data_collector/scene_layout.py) — Adapted official utility for static/dynamic CARLA map layout extraction
 
-- [common/protocol/protocol.py](../data/carla_data_collector/common/protocol/protocol.py) — 控制管道 JSON 行命令/响应协议与帧索引/语义Lidar dtype 定义
-- [common/shm/shm.py](../data/carla_data_collector/common/shm/shm.py) — 匿名共享内存 arena：跨进程零拷贝传大块数据，兼作场景内存缓冲
+Shared Python 3.7/3.12 layer:
 
-Py37 采集端 `worker/`（仅 py37_venv 运行）
+- [common/protocol/protocol.py](../data/carla_data_collector/common/protocol/protocol.py) — JSON-line control protocol, frame index, and semantic-LiDAR dtype definitions
+- [common/shm/shm.py](../data/carla_data_collector/common/shm/shm.py) — Named shared-memory arena for zero-copy payload handoff and scene buffering
 
-- [worker/main.py](../data/carla_data_collector/worker/main.py) — Py37 worker 子进程入口：经 stdin/stdout JSON 协议受 collector 驱动采集
-- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — Carla 世界/地图生命周期：连接、加载 Opt 地图、严格同步、天气与种子
-- [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — 主车、交通流与行人的生成与销毁
-- [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — 传感器阵列：逐视角按开关创建 RGB/Depth/语义/光流相机、语义分割 Lidar、碰撞传感器
-- [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — 带语义的包围框抽取：动态 actor（逐帧）与静态环境物体（每场景）
-- [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — CARLA 原生交通灯车道拓扑与 Agent 当前规划关联，生成可落盘交通控制真值。
-- [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — 单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引。
-- [worker/model_runtime/model_runtime.py](../data/carla_data_collector/worker/model_runtime/model_runtime.py) — 在 CARLA 中执行纯轨迹模型控制并同步采集 10Hz 真值与 2Hz 传感器
-- [worker/geometry/geometry.py](../data/carla_data_collector/worker/geometry/geometry.py) — carla 几何对象与纯数值的转换，及相机内参推导
+Python 3.7 worker:
 
-Py312 编排处理端 `collector/`（根 .venv 运行）
+- [worker/main.py](../data/carla_data_collector/worker/main.py) — Worker subprocess entry point driven through stdin/stdout JSON
+- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — CARLA world/map lifecycle, optimized maps, strict synchronization, weather, and seed
+- [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — Ego, traffic, and pedestrian creation and destruction
+- [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — Configurable RGB/depth/semantic/flow cameras, semantic LiDAR, and collision sensor
+- [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — Per-frame dynamic and per-scene static semantic bounding boxes
+- [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — Native traffic-light lane topology, route association, and persistent control ground truth
+- [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — Strictly synchronized scene collection of sensors, lights, shared-memory payloads, and frame indices
+- [worker/model_runtime/model_runtime.py](../data/carla_data_collector/worker/model_runtime/model_runtime.py) — Trajectory-model control with synchronized 10 Hz ground truth and 2 Hz sensors
+- [worker/geometry/geometry.py](../data/carla_data_collector/worker/geometry/geometry.py) — CARLA/numeric geometry conversion and camera-intrinsic derivation
 
-- [collector/worker_proc/worker_proc.py](../data/carla_data_collector/collector/worker_proc/worker_proc.py) — 派生并驱动 Py37 worker 子进程的控制管道客户端
-- [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — 由可达点构建路线队列：距离过滤、随机排序，并剔除起终点邻近的相似路线
-- [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — 逐场景随机：种子与天气预设（决策与记录都在 collector 侧，便于复现）
-- [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — 把单相机的 BGR 帧序列编码为 H.265 mp4
-- [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — 使用未来10Hz GT Box轨迹离线标注候选、当前位置、下一刻与历史原始代价
-- [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据与独立运动学时间序列写入 LMDB。
-- [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — 专家/模型双模式采集主循环：闭环推进、分段落盘与完整 GT 代价回填
-- [collector/run.py](../data/carla_data_collector/collector/run.py) — Py312 采集入口 CLI：加载配置并启动采集主循环
+Python 3.12 collector:
 
-## model/ — 网络结构定义
+- [collector/worker_proc/worker_proc.py](../data/carla_data_collector/collector/worker_proc/worker_proc.py) — Control-pipe client that spawns and drives the Python 3.7 worker
+- [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — Route queue construction, distance filtering, deterministic shuffle, and similarity removal
+- [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — Reproducible per-scene seed and weather selection
+- [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — Per-camera BGR sequence encoding to H.265 MP4
+- [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — Offline raw costs for candidates, current/next states, and history using future 10 Hz ground-truth boxes
+- [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — Non-RGB scene data and independent kinematics timeline writer for LMDB
+- [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — Expert/model collection loop, closed-loop advancement, segmented storage, and complete cost backfill
+- [collector/run.py](../data/carla_data_collector/collector/run.py) — Python 3.12 collection CLI
 
-- [model/__init__.py](../model/__init__.py) — 网络结构定义包标识：只读消费 config，不含可调参数默认值
-- [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — 通用 SwiGLU 激活模块（沿维度二等分为 value/gate）
-- [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — 通用 3D RoPE 旋转位置编码（只消费调用方传入的三维坐标，全程 FP32）
-- [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 2D/3D ConvNeXt 块）
-- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，可选 patch-only 2D RoPE）。
-- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-S+ 视觉骨干：全程冻结 + eval，逐帧输出选定层的完整 Token 序列。
-- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层序列融合：对选定层逐层 RMSNorm 后沿末维拼接，再线性降到预测主干工作维。
-- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 预测特征主干：完整继承 DINOv3 Token 序列，经三层带 patch-only 2D RoPE 的 Pre-Norm Transformer。
-- [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
-- [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型。
-- [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
-- [model/bev_query_embedding/bev_query_embedding.py](../model/bev_query_embedding/bev_query_embedding.py) — BEV 查询几何嵌入：仅把 BEV 栅格中心 xyz（含垂直 z 采样）编码为初始查询网格
-- [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — LiDAR 体素融合：局部米制统计乘 4 编码，并以视觉条件门控注入初始 BEV 查询。
-- [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
-- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼。
-- [model/bev_decoder/__init__.py](../model/bev_decoder/__init__.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。公开 API 重导出入口。
-- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。
-- [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。公开 API 重导出入口。
-- [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
+## model/ — network definitions
 
-## train/ — 训练 / 评估循环
+- [model/__init__.py](../model/__init__.py) — Network package marker; reads config without defining defaults
+- [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — Reusable SwiGLU activation
+- [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — FP32 3D rotary position encoding for caller-supplied coordinates
+- [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 1D/2D/3D RMSNorm, bottleneck residual blocks, and 2D/3D ConvNeXt blocks
+- [model/attention/attention.py](../model/attention/attention.py) — Pre-norm cross/self attention with native PyTorch SDPA and optional patch-only 2D RoPE
+- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — Frozen eval-only DINOv3 ViT-S+ returning full selected-layer token sequences
+- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — Per-layer RMSNorm, concatenation, and linear projection of DINO sequences
+- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — Three-layer pre-norm transformer over complete DINO token sequences
+- [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — Cascaded 2x PixelShuffle upsampling to input resolution
+- [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — Residual, channel-reduction, and PixelShuffle perception decoder
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — Shared visual encoder with semantic and depth heads
+- [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — Patch-center/corner by depth-sample 3D frustum geometry encoding
+- [model/bev_query_embedding/bev_query_embedding.py](../model/bev_query_embedding/bev_query_embedding.py) — Geometry-only xyz BEV query initialization including vertical samples
+- [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — Fourfold local-statistics encoding with visual-conditioned injection into initial BEV queries
+- [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — Perception/DINO feature fusion, frustum geometry, and 2D residual processing
+- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — Three-camera and historical-BEV fusion followed by a register-token 2D-RoPE transformer
+- [model/bev_decoder/__init__.py](../model/bev_decoder/__init__.py) — Public unified BEV decoder API
+- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — Shared upsampling for the three fields, lane geometry, and traffic controls
+- [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — Public BEV-specific PixelShuffle upsampler API
+- [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Two-frame three-camera + LiDAR model combining image geometry, voxel statistics, and aligned historical BEV
 
-- [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
-- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
-- [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
-- [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重。
+## train/ — training and evaluation
 
-## clone_loop/ — 行为克隆闭环
+- [train/__init__.py](../train/__init__.py) — Training/optimization/evaluation package marker
+- [train/losses/losses.py](../train/losses/losses.py) — Multitask perception, field, lane, traffic-control, trajectory, behavior, and safety losses
+- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
+- [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
+- [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
 
-- [clone_loop/README.md](../clone_loop/README.md) — CARLA 0.9.15 异构行为克隆闭环的架构、运行与输出说明
-- [clone_loop/__init__.py](../clone_loop/__init__.py) — CARLA 0.9.15 行为克隆闭环包：连接异构仿真 worker 与主环境模型推理
-- [clone_loop/run.py](../clone_loop/run.py) — CARLA 0.9.15 行为克隆闭环 CLI：加载配置并启动异构 episode 编排
-- [clone_loop/protocol/__init__.py](../clone_loop/protocol/__init__.py) — 闭环控制管道协议的公开 API 重导出入口
-- [clone_loop/protocol/protocol.py](../clone_loop/protocol/protocol.py) — 定义 Py37 仿真 worker 与主环境闭环编排器之间的 JSON 行协议
-- [clone_loop/shared_frame/__init__.py](../clone_loop/shared_frame/__init__.py) — 固定容量传感器共享区的公开 API 重导出入口
-- [clone_loop/shared_frame/shared_frame.py](../clone_loop/shared_frame/shared_frame.py) — 跨解释器复用固定容量传感器缓冲，避免每个闭环步经 JSON 复制 RGB/LiDAR
-- [clone_loop/routes/__init__.py](../clone_loop/routes/__init__.py) — 闭环路线队列构造的公开 API 重导出入口
-- [clone_loop/routes/routes.py](../clone_loop/routes/routes.py) — 由 CARLA 推荐生成点构造可复现、无重复的闭环评测路线队列
-- [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环三目+LiDAR 模型推理与轨迹选择的公开 API 重导出入口
-- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹。
-- [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — 轨迹跟踪控制器的公开 API 重导出入口
-- [clone_loop/control/control.py](../clone_loop/control/control.py) — 把模型选中的 ego 系轨迹转换为 CARLA 归一化转向、油门与制动
-- [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Py37 worker 子进程客户端的公开 API 重导出入口
-- [clone_loop/client/client.py](../clone_loop/client/client.py) — 派生 Py37 CARLA worker，并以同步 JSON RPC 驱动闭环 episode
-- [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — 闭环逐步日志与汇总写入器的公开 API 重导出入口
-- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总
-- [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — 闭环驾驶与逐帧推理录像器的公开 API 重导出入口
-- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
-- [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
-- [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB/LiDAR、驾驶模型、轨迹控制与逐 episode 评测日志
+## clone_loop/ — behavior-cloning closed loop
 
-Py37 仿真端 `worker/`
+- [clone_loop/README.md](../clone_loop/README.md) — English primary architecture, operation, scoring, and outputs
+- [clone_loop/README.zh-CN.md](../clone_loop/README.zh-CN.md) — Simplified Chinese closed-loop documentation
+- [clone_loop/__init__.py](../clone_loop/__init__.py) — Package connecting the heterogeneous CARLA worker with main-runtime inference
+- [clone_loop/run.py](../clone_loop/run.py) — Closed-loop CLI and episode orchestration entry point
+- [clone_loop/protocol/__init__.py](../clone_loop/protocol/__init__.py) — Public control-protocol API
+- [clone_loop/protocol/protocol.py](../clone_loop/protocol/protocol.py) — JSON-line protocol between Python 3.7 simulation and main-runtime orchestration
+- [clone_loop/shared_frame/__init__.py](../clone_loop/shared_frame/__init__.py) — Public fixed-capacity sensor-sharing API
+- [clone_loop/shared_frame/shared_frame.py](../clone_loop/shared_frame/shared_frame.py) — Cross-interpreter RGB/LiDAR buffers avoiding JSON payload copies
+- [clone_loop/routes/__init__.py](../clone_loop/routes/__init__.py) — Public route-queue API
+- [clone_loop/routes/routes.py](../clone_loop/routes/routes.py) — Reproducible, deduplicated evaluation routes from CARLA recommended spawn points
+- [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — Public three-camera + LiDAR inference and trajectory-selection API
+- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — Checkpoint loading, temporal state, and safety/route-aware trajectory selection
+- [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — Public trajectory-controller API
+- [clone_loop/control/control.py](../clone_loop/control/control.py) — Ego-frame trajectory conversion to normalized CARLA steering, throttle, and brake
+- [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Public Python 3.7 worker-client API
+- [clone_loop/client/client.py](../clone_loop/client/client.py) — Worker spawning and synchronous JSON RPC episode control
+- [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — Public step-log and summary API
+- [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — Episode JSONL state/control/selection logging and run summary generation
+- [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — Public driving and inference recorder API
+- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — Per-episode camera video and composite online-inference diagnostics encoding
+- [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — Public episode-orchestrator API
+- [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — CARLA, shared sensors, model inference, control, evaluation, and logging orchestration
 
-- [clone_loop/worker/__init__.py](../clone_loop/worker/__init__.py) — Py37 CARLA 闭环 worker 包标识
-- [clone_loop/worker/run.py](../clone_loop/worker/run.py) — Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB/LiDAR 写入共享区
-- [clone_loop/worker/navigation/__init__.py](../clone_loop/worker/navigation/__init__.py) — CARLA 路线进度与局部目标模块的公开 API 重导出入口
-- [clone_loop/worker/navigation/navigation.py](../clone_loop/worker/navigation/navigation.py) — 在 CARLA 全局路线中跟踪主车进度，并生成模型所需的 ego 系近端目标
-- [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — 闭环三目 RGB、语义 LiDAR、碰撞与压线传感器的公开 API 重导出入口
-- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向三目 RGB、语义 LiDAR 与安全事件传感器，并严格同步取样。
-- [clone_loop/worker/runtime/__init__.py](../clone_loop/worker/runtime/__init__.py) — CARLA 闭环世界生命周期的公开 API 重导出入口
-- [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
+Python 3.7 simulation worker:
 
-## vis/ — 可视化与日志渲染
+- [clone_loop/worker/__init__.py](../clone_loop/worker/__init__.py) — CARLA closed-loop worker package marker
+- [clone_loop/worker/run.py](../clone_loop/worker/run.py) — JSON-command worker CLI that advances simulation and writes shared sensors
+- [clone_loop/worker/navigation/__init__.py](../clone_loop/worker/navigation/__init__.py) — Public route-progress and local-target API
+- [clone_loop/worker/navigation/navigation.py](../clone_loop/worker/navigation/navigation.py) — Global-route progress tracking and ego-frame near-target generation
+- [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — Public RGB, semantic-LiDAR, collision, and lane-invasion sensor API
+- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — Strictly synchronized front camera triplet, LiDAR, and safety-event sensors
+- [clone_loop/worker/runtime/__init__.py](../clone_loop/worker/runtime/__init__.py) — Public CARLA world-lifecycle API
+- [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — CARLA world, traffic, ego, route, and stepwise closed-loop lifecycle
 
-### vis/reconstructed_mesh_vis/ — 水密 Mesh Open3D 逐帧可视化
+## vis/ — visualization and log rendering
 
-- [vis/reconstructed_mesh_vis/__init__.py](../vis/reconstructed_mesh_vis/__init__.py) — 水密 Mesh Open3D 可视化包：读取统一 PT 并按逐帧位姿组合静动态几何。
-- [vis/reconstructed_mesh_vis/run.py](../vis/reconstructed_mesh_vis/run.py) — 水密 Mesh 可视化 CLI：选择统一 PT 并启动 Open3D 逐帧查看器。
-- [vis/reconstructed_mesh_vis/reader/__init__.py](../vis/reconstructed_mesh_vis/reader/__init__.py) — 重建 Mesh PT 读取与定位公开 API。
-- [vis/reconstructed_mesh_vis/reader/reader.py](../vis/reconstructed_mesh_vis/reader/reader.py) — 统一 Mesh PT 读取器：加载静态表面、动态局部模型与逐帧位姿。
-- [vis/reconstructed_mesh_vis/render/__init__.py](../vis/reconstructed_mesh_vis/render/__init__.py) — 重建 Mesh 的静态、动态与轨迹渲染公开 API。
-- [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D Mesh 渲染：静态/动态 BEV 裁剪、逐帧刚体放置与 actor 轨迹。
-- [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Open3D Mesh 全局/自车 BEV 交互查看器公开 API。
-- [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Open3D Mesh 查看器：逐帧播放、全局/自车 BEV、着色与截图。
+### Reconstructed mesh
 
-### vis/reconstructed_udf_vis/ — 稀疏 TUDF Open3D 逐帧可视化
+- [vis/reconstructed_mesh_vis/__init__.py](../vis/reconstructed_mesh_vis/__init__.py) — Open3D mesh package combining static/dynamic geometry from unified PT files
+- [vis/reconstructed_mesh_vis/run.py](../vis/reconstructed_mesh_vis/run.py) — Mesh viewer CLI
+- [vis/reconstructed_mesh_vis/reader/__init__.py](../vis/reconstructed_mesh_vis/reader/__init__.py) — Public mesh PT reader and locator API
+- [vis/reconstructed_mesh_vis/reader/reader.py](../vis/reconstructed_mesh_vis/reader/reader.py) — Unified static surface, dynamic local-model, and per-frame pose reader
+- [vis/reconstructed_mesh_vis/render/__init__.py](../vis/reconstructed_mesh_vis/render/__init__.py) — Public static/dynamic/trajectory renderer API
+- [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D mesh clipping, rigid dynamic placement, and actor trajectories
+- [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Public global/ego-BEV interactive viewer API
+- [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Playback, view switching, coloring, and screenshots
 
-- [vis/reconstructed_udf_vis/__init__.py](../vis/reconstructed_udf_vis/__init__.py) — 稀疏 TUDF 读取、逐帧组合与 Open3D 可视化包。
-- [vis/reconstructed_udf_vis/run.py](../vis/reconstructed_udf_vis/run.py) — 稀疏 TUDF Open3D 逐帧可视化 CLI。
-- [vis/reconstructed_udf_vis/reader/__init__.py](../vis/reconstructed_udf_vis/reader/__init__.py) — 稀疏 TUDF 读取与定位公开 API。
-- [vis/reconstructed_udf_vis/reader/reader.py](../vis/reconstructed_udf_vis/reader/reader.py) — 统一稀疏 TUDF PT 读取器。
-- [vis/reconstructed_udf_vis/render/__init__.py](../vis/reconstructed_udf_vis/render/__init__.py) — 稀疏 TUDF 体素、轨迹渲染公开 API。
-- [vis/reconstructed_udf_vis/render/render.py](../vis/reconstructed_udf_vis/render/render.py) — 把静态世界和当前帧动态局部 TUDF 渲染为 Open3D 稀疏点体素。
-- [vis/reconstructed_udf_vis/viewer/__init__.py](../vis/reconstructed_udf_vis/viewer/__init__.py) — Open3D 稀疏 TUDF 交互查看器公开 API。
-- [vis/reconstructed_udf_vis/viewer/viewer.py](../vis/reconstructed_udf_vis/viewer/viewer.py) — Open3D 稀疏 TUDF 查看器：逐帧、全局/自车 BEV、着色和截图。
+### Sparse TUDF
 
-### vis/reconstructed_pointcloud_vis/ — 融合重建点云 Open3D 交互可视化
+- [vis/reconstructed_udf_vis/__init__.py](../vis/reconstructed_udf_vis/__init__.py) — Sparse TUDF reading, per-frame composition, and Open3D visualization
+- [vis/reconstructed_udf_vis/run.py](../vis/reconstructed_udf_vis/run.py) — Sparse TUDF viewer CLI
+- [vis/reconstructed_udf_vis/reader/__init__.py](../vis/reconstructed_udf_vis/reader/__init__.py) — Public sparse TUDF reader/locator API
+- [vis/reconstructed_udf_vis/reader/reader.py](../vis/reconstructed_udf_vis/reader/reader.py) — Unified sparse TUDF PT reader
+- [vis/reconstructed_udf_vis/render/__init__.py](../vis/reconstructed_udf_vis/render/__init__.py) — Public TUDF voxel and trajectory renderer API
+- [vis/reconstructed_udf_vis/render/render.py](../vis/reconstructed_udf_vis/render/render.py) — Static-world and current-frame dynamic TUDF to Open3D sparse voxels
+- [vis/reconstructed_udf_vis/viewer/__init__.py](../vis/reconstructed_udf_vis/viewer/__init__.py) — Public interactive TUDF viewer API
+- [vis/reconstructed_udf_vis/viewer/viewer.py](../vis/reconstructed_udf_vis/viewer/viewer.py) — Playback, global/ego BEV, coloring, and screenshots
 
-- [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — 融合重建点云 Open3D 可视化包：读取统一 PT、分层着色并交互浏览轨迹。
-- [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — 融合重建点云可视化 CLI：选择 PT 场景并启动 Open3D 交互窗口。
-- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载分离的静态地图、动态对象模型及逐帧位姿。
-- [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Open3D 重建点云渲染：图层筛选、分层下采样、着色与 actor 轨迹生成。
-- [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Open3D 交互查看器：切换全局/当前帧 BEV、静动态层、轨迹与着色并保存截图。
+### Reconstructed point cloud
 
-- [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — 可视化包标识：只读消费采集数据集并渲染
-- [vis/data_vis/run.py](../vis/data_vis/run.py) — 可视化入口 CLI：加载配置、定位场景目录、启动交互窗口
-- [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — 场景读取器：合并单场景的 LMDB 与 mp4 为逐帧数据，探测各模态可用性
-- [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — 纯 numpy 复刻 CARLA 坐标变换与 3D->2D 投影
-- [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — CARLA 语义标签到颜色的调色板与向量化映射
-- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、lidar+框 鸟瞰图、多面板合成与 HUD
-- [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
+- [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — Open3D package for unified PT reading, layered coloring, and trajectory browsing
+- [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — Point-cloud viewer CLI
+- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — Static map, dynamic object model, and per-frame pose reader
+- [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Layer filtering, downsampling, coloring, and actor trajectories
+- [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Global/current BEV, layer, trajectory, color, and screenshot controls
 
-### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）
+### Raw data
 
-- [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染双头预测与 GT 对照
-- [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
-- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存
+- [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — Raw dataset visualization package marker
+- [vis/data_vis/run.py](../vis/data_vis/run.py) — Configuration, scene location, and interactive-window CLI
+- [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — Per-scene LMDB/MP4 reader and modality discovery
+- [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — NumPy CARLA transforms and 3D-to-2D projection
+- [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette
+- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR BEV, composite panels, and HUD rendering
+- [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
 
-### vis/driving_vis/ — 驾驶模型可视化（透视模态 + GT/预测 三场/道路线/交通控制/轨迹）
+### Perception predictions
 
-- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块：对照渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹。
-- [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — 驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
-- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布。
-- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 三目+LiDAR 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测 BEV 多任务结果。
+- [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — Perception-checkpoint loading and prediction/ground-truth visualization package
+- [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — Colorized semantic/depth prediction and optional ground-truth canvas rendering
+- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — Per-frame inference, rendering, and save CLI
+
+### Driving predictions
+
+- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — Perspective and BEV field/lane/traffic/trajectory comparison package
+- [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — Public mixed-size driving visualization renderer API
+- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — Color and composite rendering for fields, lanes, traffic controls, trajectories, and camera modalities
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — Three-camera + LiDAR driving visualization CLI
