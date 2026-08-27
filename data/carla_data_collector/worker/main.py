@@ -69,7 +69,8 @@ def _handle_query_spawn_points(state, _args):
     """加载 collector 指定的地图并返回全部可达点（collector 据此建路线队列）。"""
     map_name = _args.get("map")
     check_map_name(map_name, state["cc"].simulation.maps)
-    return {"spawn_points": session.query_spawn_points(state["client"], map_name)}
+    return {"spawn_points": session.query_spawn_points(
+        state["client"], map_name, state["cc"].simulation.no_rendering_mode)}
 
 
 def _destroy_actors(client, world, ego, vehicle_ids, crowd, rig):
@@ -118,7 +119,8 @@ def _handle_start_scene(state, args):
     np.random.seed(seed % (2 ** 32))  # 让蓝图/颜色等随机选择也随 seed 复现
 
     world, tm = session.load_scene_world(
-        client, map_name, cc.simulation.fixed_delta_seconds, cc.traffic.tm_port, seed)
+        client, map_name, cc.simulation.fixed_delta_seconds, cc.traffic.tm_port, seed,
+        cc.simulation.no_rendering_mode)
     state["world"], state["tm"] = world, tm
     session.apply_weather(world, args["weather"])
 
@@ -134,7 +136,8 @@ def _handle_start_scene(state, args):
         crowd = actors.spawn_walkers(
             client, world, cc.traffic.num_walkers, cc.traffic.walker_filter,
             cc.traffic.walker_running_pct, cc.traffic.walker_arrival_radius_m)
-        rig = SensorRig(world, ego, cc.cameras, cc.lidar)
+        rig = SensorRig(world, ego, cc.cameras, cc.lidar,
+                        rendering_enabled=not cc.simulation.no_rendering_mode)
         state["allocator"].reset()
 
         end = args["route"]["end"]

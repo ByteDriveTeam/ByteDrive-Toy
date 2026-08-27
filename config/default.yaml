@@ -26,6 +26,7 @@ carla_collector:
       Town02_Opt: 200
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
+    no_rendering_mode: false   # 仅采集状态数据时关闭 CARLA 渲染并跳过视觉/LiDAR 传感器
 
   # 路线队列：可达点两两组合，按直线距离过滤后剔除相似路线
   route:

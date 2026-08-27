@@ -4,7 +4,7 @@
 依赖: queue, carla, worker.geometry, worker.sensors.checks.sensors_checks
 读取配置: 由 SensorRig 接收 cameras_cfg(width/height/modalities/rig，其中 rig 含各相机 fov) 与 lidar_cfg(enabled,...)；自身不读 config
 对外接口:
-    - SensorRig(world, ego, cameras_cfg, lidar_cfg)
+    - SensorRig(world, ego, cameras_cfg, lidar_cfg, rendering_enabled=True)
         .gather(frame_id, timeout_s, keys=None) -> dict[str, carla 传感器数据]
         .collided / .collision_events / .lane_invasions
         .extrinsics -> dict[str, list[6]]    # 各相机相对 ego 外参
@@ -26,12 +26,13 @@ from worker.sensors.checks.sensors_checks import check_ego, check_no_future_fram
 
 
 class SensorRig:
-    def __init__(self, world, ego, cameras_cfg, lidar_cfg):
+    def __init__(self, world, ego, cameras_cfg, lidar_cfg, rendering_enabled=True):
         check_ego(ego)
         self._world = world
         self._ego = ego
         self._cameras_cfg = cameras_cfg
         self._lidar_cfg = lidar_cfg
+        self._rendering_enabled = bool(rendering_enabled)
         self._actors = []
         self._queues = {}          # key -> Queue：参与同步 gather 的传感器
         self._collided = False
@@ -63,8 +64,9 @@ class SensorRig:
         cam = self._cameras_cfg
 
         # 仅创建开关为真的相机模态；蓝图在各视角间复用（spawn 时快照属性，故循环内改 FOV 安全）
-        enabled = [(name, bl.find(bp_type)) for name, bp_type in self._CAMERA_MODALITIES
-                   if getattr(cam.modalities, name)]
+        enabled = ([(name, bl.find(bp_type)) for name, bp_type in self._CAMERA_MODALITIES
+                    if getattr(cam.modalities, name)]
+                    if self._rendering_enabled else [])
         for _, bp in enabled:
             bp.set_attribute("image_size_x", str(cam.width))
             bp.set_attribute("image_size_y", str(cam.height))
@@ -76,7 +78,7 @@ class SensorRig:
                 bp.set_attribute("fov", str(c.fov))
                 self._attach(bp, transform, name + "/" + c.name)
 
-        if self._lidar_cfg.enabled:
+        if self._rendering_enabled and self._lidar_cfg.enabled:
             self._build_lidar(bl)
 
         col_bp = bl.find("sensor.other.collision")

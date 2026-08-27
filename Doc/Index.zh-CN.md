@@ -62,7 +62,7 @@
 Py37 采集端 `worker/`（仅 py37_venv 运行）
 
 - [worker/main.py](../data/carla_data_collector/worker/main.py) — Py37 worker 子进程入口：经 stdin/stdout JSON 协议受 collector 驱动采集
-- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — Carla 世界/地图生命周期：连接、加载 Opt 地图、严格同步、天气与种子
+- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — Carla 世界/地图生命周期：连接、加载 Opt 地图、无渲染模式、严格同步、天气与种子
 - [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — 主车、交通流与行人的生成与销毁
 - [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — 传感器阵列：逐视角按开关创建 RGB/Depth/语义/光流相机、语义分割 Lidar、碰撞传感器
 - [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — 带语义的包围框抽取：动态 actor（逐帧）与静态环境物体（每场景）

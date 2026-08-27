@@ -196,7 +196,18 @@ data/carla_data_collector/
 
 参数可调项全部在 `config/default.yaml`；环境差异用 `config/<env>.yaml` 覆盖（`--env <name>`）。
 
-专家采集保持默认。启用模型泛化采集只需覆盖：
+专家采集保持默认。如只需采集状态（Box、路线/交通状态和运动学），显式关闭 CARLA 渲染：
+
+```yaml
+carla_collector:
+  simulation:
+    no_rendering_mode: true
+```
+
+该模式无论相机模态和 LiDAR 的单项开关如何配置，都会跳过全部相机与 LiDAR actor；不能与
+`ego.controller: model` 同时使用，因为模型输入需要 RGB 与 LiDAR。
+
+启用模型泛化采集只需覆盖：
 
 ```yaml
 carla_collector:

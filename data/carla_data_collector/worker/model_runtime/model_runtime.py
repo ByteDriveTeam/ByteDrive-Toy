@@ -69,7 +69,7 @@ class ModelCollectionRuntime:
         np.random.seed(int(seed) % (2 ** 32))
         world, tm = session.load_scene_world(
             self._client, map_name, self._cc.simulation.fixed_delta_seconds,
-            self._cc.traffic.tm_port, int(seed))
+            self._cc.traffic.tm_port, int(seed), self._cc.simulation.no_rendering_mode)
         self._world, self._tm = world, tm
         session.apply_weather(world, weather)
         try:

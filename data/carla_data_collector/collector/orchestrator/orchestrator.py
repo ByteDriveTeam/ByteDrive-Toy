@@ -127,6 +127,10 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
     scene_dir.mkdir(parents=True, exist_ok=True)
     mods = cc.cameras.modalities
     lidar_on = cc.lidar.enabled
+    if cc.simulation.no_rendering_mode:
+        # worker 在无渲染模式不创建视觉传感器，落盘侧也必须使用同一组有效模态。
+        mods = type(mods)(rgb=False, depth=False, semantic=False, optical_flow=False)
+        lidar_on = False
 
     # RGB 关闭则本场景无 mp4；其余模态各自落 LMDB
     video_files = {}

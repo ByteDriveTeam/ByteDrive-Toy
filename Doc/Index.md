@@ -60,7 +60,7 @@ Shared Python 3.7/3.12 layer:
 Python 3.7 worker:
 
 - [worker/main.py](../data/carla_data_collector/worker/main.py) — Worker subprocess entry point driven through stdin/stdout JSON
-- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — CARLA world/map lifecycle, optimized maps, strict synchronization, weather, and seed
+- [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — CARLA world/map lifecycle, optimized maps, no-rendering mode, strict synchronization, weather, and seed
 - [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — Ego, traffic, and pedestrian creation and destruction
 - [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — Configurable RGB/depth/semantic/flow cameras, semantic LiDAR, and collision sensor
 - [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — Per-frame dynamic and per-scene static semantic bounding boxes

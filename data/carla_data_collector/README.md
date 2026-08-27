@@ -163,7 +163,18 @@ From the repository root:
 
 Use `--max-scenes N` for a small debug run and `--env <name>` for `config/<name>.yaml`. The orchestrator starts the Python 3.7 worker automatically.
 
-Expert collection is the default. Enable model-driven collection with:
+Expert collection is the default. For state-only collection (boxes, route/traffic state, and kinematics), explicitly disable CARLA rendering:
+
+```yaml
+carla_collector:
+  simulation:
+    no_rendering_mode: true
+```
+
+This skips all camera and LiDAR actors regardless of their individual modality switches. It cannot be combined with
+`ego.controller: model`, whose policy input requires RGB and LiDAR.
+
+Enable model-driven collection with:
 
 ```yaml
 carla_collector:

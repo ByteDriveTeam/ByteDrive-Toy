@@ -39,6 +39,7 @@ class SimulationCfg:
     maps: Dict[str, int]
     fixed_delta_seconds: float
     warmup_ticks: int
+    no_rendering_mode: bool
 
 
 @dataclass
@@ -962,6 +963,10 @@ def validate_config(cfg):
         "simulation.maps 中每张地图的场景数必须是 >= 0 的整数（0 表示遍历全部路线）"
     assert cc.simulation.fixed_delta_seconds > 0, "simulation.fixed_delta_seconds 必须 > 0"
     assert cc.simulation.warmup_ticks >= 0, "simulation.warmup_ticks 必须 >= 0"
+    # 校验对象: simulation.no_rendering_mode / ego.controller —— 无渲染无法提供模型视觉与点云输入
+    if cc.simulation.no_rendering_mode:
+        assert cc.ego.controller != "model", \
+            "simulation.no_rendering_mode=true 时不支持 ego.controller=model"
 
     # 校验对象: route.min_distance_m/max_distance_m/similarity_threshold_m
     assert 0 < cc.route.min_distance_m < cc.route.max_distance_m, \
