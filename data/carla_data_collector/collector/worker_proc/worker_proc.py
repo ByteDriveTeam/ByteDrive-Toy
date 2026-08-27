@@ -7,9 +7,9 @@
     - WorkerProcess(python_exe)
         .init(config_dict, arena_name, arena_size_bytes, live=None) -> dict
         .query_spawn_points(map_name) -> list[list[6]]
-        .start_scene(map_name, seed, weather, route) -> dict  # 一次行驶首段（含内外参/静态框）
+        .start_scene(map_name, seed, weather, route, traffic) -> dict
         .continue_scene() -> dict                       # 复用存活世界续采下一段
-        .start_model_scene(map_name, seed, weather, route) -> dict
+        .start_model_scene(map_name, seed, weather, route, traffic) -> dict
         .model_step(control) / .flush_model_segment() -> dict
         .shutdown() -> None
         .close() -> None
@@ -64,18 +64,19 @@ class WorkerProcess:
     def query_spawn_points(self, map_name):
         return self._request(P.CMD_QUERY_SPAWN_POINTS, map=map_name)["spawn_points"]
 
-    def start_scene(self, map_name, seed, weather, route):
+    def start_scene(self, map_name, seed, weather, route, traffic):
         return self._request(
-            P.CMD_START_SCENE, map=map_name, seed=seed, weather=weather, route=route)
+            P.CMD_START_SCENE, map=map_name, seed=seed, weather=weather, route=route,
+            traffic=traffic)
 
     def continue_scene(self):
         return self._request(P.CMD_CONTINUE_SCENE)
 
-    def start_model_scene(self, map_name, seed, weather, route):
+    def start_model_scene(self, map_name, seed, weather, route, traffic):
         """创建模型闭环场景并取得首个模型观测与采集帧。"""
         return self._request(
             P.CMD_START_MODEL_SCENE, map=map_name, seed=seed,
-            weather=weather, route=route)
+            weather=weather, route=route, traffic=traffic)
 
     def model_step(self, control):
         """应用由 Winner 轨迹生成的控制，推进一个 10Hz tick。"""

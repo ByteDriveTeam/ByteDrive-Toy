@@ -57,6 +57,12 @@ def _resolve_output(path):
     return output
 
 
+def _traffic_profile(cc, map_name, route_index):
+    """按地图路线序号选取该场景专属交通流；遍历全部路线时允许复用末项。"""
+    profiles = cc.simulation.traffic_profiles[map_name]
+    return asdict(profiles[min(route_index, len(profiles) - 1)])
+
+
 def _blob_array(arena, blob):
     """按 blob 描述从 arena 零拷贝读出 ndarray（lidar 用结构化 dtype 还原）。"""
     buf = arena.read(blob[P.BLOB_OFFSET], blob[P.BLOB_SIZE])
@@ -174,7 +180,7 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
     return scene_dir
 
 
-def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_names, rng,
+def _collect_route(worker, map_name, route, route_index, saved, cc, arena, output_root, cam_names, rng,
                    weather_presets):
     """采集单条路线：一次行驶随 arena 反复写满被切成多段，逐段落盘。返回本路线落盘的段数。
 
@@ -196,7 +202,8 @@ def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_n
         print("[collector] {} 开始行驶 map={} {} seed={} attempt={}/{}".format(
             next_scene, map_name, route_tag, seed, attempt + 1, retries + 1))
         r = worker.start_scene(
-            map_name, seed, weather, {"start": route["start"], "end": route["end"]})
+            map_name, seed, weather, {"start": route["start"], "end": route["end"]},
+            _traffic_profile(cc, map_name, route_index))
         status = r["status"]
         if status == P.STATUS_UNREACHABLE:
             print("[collector] {} 不可达，跳过".format(route_tag))
@@ -354,7 +361,7 @@ def _finalize_model_segments(records, terminal_status, route_geometry, all_world
 
 
 def _collect_model_route(worker, shared, shared_lidar, policy, controller, map_name,
-                         route, saved, cc, arena, output_root, cam_names, rng,
+                         route, route_index, saved, cc, arena, output_root, cam_names, rng,
                          weather_presets, cfg):
     """采集一条模型闭环路线，所有失败状态均保留并完成离线代价回填。"""
     seed = scenarios.random_seed(rng)
@@ -367,7 +374,8 @@ def _collect_model_route(worker, shared, shared_lidar, policy, controller, map_n
     controller.reset()
     response = worker.start_model_scene(
         map_name, seed, weather,
-        {"start": route["start"], "end": route["end"]})
+        {"start": route["start"], "end": route["end"]},
+        _traffic_profile(cc, map_name, route_index))
     if response["status"] == P.STATUS_UNREACHABLE:
         print("[collector] 模型闭环路线 {}->{} 不可达，跳过".format(
             route["start_idx"], route["end_idx"]))
@@ -541,16 +549,16 @@ def run(cfg, max_scenes_override=None):
                 print("[collector] 地图 {} 断点续采：按 {} 条已采路线剔除重复或相似候选".format(
                     map_name, len(done_routes)))
 
-            for route in queue:
+            for route_index, route in enumerate(queue):
                 # 一条路线（一次行驶）可能切成多段落盘，saved 据返回段数推进
                 if cc.ego.controller == "model":
                     saved += _collect_model_route(
                         worker, shared, shared_lidar, policy, controller,
-                        map_name, route, saved, cc, arena, output_root, cam_names,
+                        map_name, route, route_index, saved, cc, arena, output_root, cam_names,
                         master_rng, weather_presets, cfg)
                 else:
                     saved += _collect_route(
-                        worker, map_name, route, saved, cc, arena, output_root,
+                        worker, map_name, route, route_index, saved, cc, arena, output_root,
                         cam_names, master_rng, weather_presets)
         print("[collector] 完成，成功落盘场景段数:", saved)
     finally:

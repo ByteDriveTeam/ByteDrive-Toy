@@ -2,7 +2,7 @@
 
 模块: worker/main.py
 依赖: carla, numpy, config.schema, common.protocol, common.shm, clone_loop.shared_frame, worker.*
-读取配置: 不读 config 文件；配置由 collector 经 init 命令下发（遵守「config 单一来源」）
+读取配置: 不读 config 文件；配置由 collector 经 init/start_scene 命令下发（遵守「config 单一来源」）
 对外接口:
     - main() -> None     # 进程入口；处理专家分段命令、模型闭环逐步命令与 shutdown
 说明: 只在 py37_venv 下运行。stdout 仅承载协议消息，故启动即把 print 重定向到 stderr，
@@ -111,6 +111,7 @@ def _run_chunk(state):
 def _handle_start_scene(state, args):
     """重载地图→布景→预热→采首段；partial 时保活世界供 continue_scene 续采。"""
     cc = state["cc"]
+    traffic = args["traffic"]
     client = state["client"]
     map_name = args.get("map")
     check_map_name(map_name, cc.simulation.maps)
@@ -119,7 +120,7 @@ def _handle_start_scene(state, args):
     np.random.seed(seed % (2 ** 32))  # 让蓝图/颜色等随机选择也随 seed 复现
 
     world, tm = session.load_scene_world(
-        client, map_name, cc.simulation.fixed_delta_seconds, cc.traffic.tm_port, seed,
+        client, map_name, cc.simulation.fixed_delta_seconds, traffic["tm_port"], seed,
         cc.simulation.no_rendering_mode)
     state["world"], state["tm"] = world, tm
     session.apply_weather(world, args["weather"])
@@ -132,10 +133,10 @@ def _handle_start_scene(state, args):
         ego, agent = actors.spawn_ego(world, cc.ego.vehicle_filter, cc.ego.behavior,
                                       args["route"]["start"])
         vehicle_ids = actors.spawn_traffic_vehicles(
-            client, world, tm, cc.traffic.num_vehicles, cc.traffic.vehicle_filter)
+            client, world, tm, traffic["num_vehicles"], traffic["vehicle_filter"])
         crowd = actors.spawn_walkers(
-            client, world, cc.traffic.num_walkers, cc.traffic.walker_filter,
-            cc.traffic.walker_running_pct, cc.traffic.walker_arrival_radius_m)
+            client, world, traffic["num_walkers"], traffic["walker_filter"],
+            traffic["walker_running_pct"], traffic["walker_arrival_radius_m"])
         rig = SensorRig(world, ego, cc.cameras, cc.lidar,
                         rendering_enabled=not cc.simulation.no_rendering_mode)
         state["allocator"].reset()
@@ -195,7 +196,7 @@ def _handle_start_model_scene(state, args):
     map_name = args.get("map")
     check_map_name(map_name, state["cc"].simulation.maps)
     result = state["model_runtime"].start(
-        map_name, int(args["seed"]), args.get("weather"), args["route"])
+        map_name, int(args["seed"]), args.get("weather"), args["route"], args["traffic"])
     result["used_bytes"] = state["allocator"].used
     return result
 

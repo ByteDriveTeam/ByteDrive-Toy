@@ -5,6 +5,20 @@
 本目录从 Carla 收集合成驾驶数据。采用**异构双进程**架构：Carla 相关代码跑在 Python 3.7（Carla 0.9.15
 仅兼容 3.7），其余处理（H.265 编码、LMDB 写入）跑在 Python 3.12；两进程经**控制管道 + 共享内存**协作。
 
+### 按场景配置交通流
+
+交通流参数位于 `carla_collector.simulation.traffic_profiles`，按地图保存列表，列表下标与该地图路线队列中的场景对应。每项可独立设置车辆/行人数量、蓝图过滤器、行人奔跑比例、到达半径和 TrafficManager 端口。超出列表长度的路线复用最后一项，便于为大量场景设置统一基线并只覆盖少数场景。
+
+```yaml
+carla_collector:
+  simulation:
+    maps: {Town10HD_Opt: 2}
+    traffic_profiles:
+      Town10HD_Opt:
+        - {num_vehicles: 20, num_walkers: 5, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.0, walker_arrival_radius_m: 2.0, tm_port: 8000}
+        - {num_vehicles: 80, num_walkers: 30, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.2, walker_arrival_radius_m: 2.0, tm_port: 8000}
+```
+
 ---
 
 ## 1. 需求与落地映射
@@ -229,4 +243,17 @@ carla_collector:
     maps:
       Town01_Opt: 3
       Town05_Opt: 8
+```
+### 按场景配置交通流
+
+交通流参数位于 `carla_collector.simulation.traffic_profiles`，按地图保存列表，列表下标与该地图路线队列中的场景一一对应。每项可独立设置 `num_vehicles`、`num_walkers`、蓝图过滤器、行人奔跑比例、到达半径和 `tm_port`。当地图的场景数配置为 `0`（遍历全部路线）时，超出列表长度的路线复用最后一项；配置了明确场景数时，列表长度必须覆盖场景数。
+
+```yaml
+carla_collector:
+  simulation:
+    maps: {Town10HD_Opt: 2}
+    traffic_profiles:
+      Town10HD_Opt:
+        - {num_vehicles: 20, num_walkers: 5, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.0, walker_arrival_radius_m: 2.0, tm_port: 8000}
+        - {num_vehicles: 80, num_walkers: 30, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.2, walker_arrival_radius_m: 2.0, tm_port: 8000}
 ```

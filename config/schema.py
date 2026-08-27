@@ -37,6 +37,7 @@ class IpcCfg:
 @dataclass
 class SimulationCfg:
     maps: Dict[str, int]
+    traffic_profiles: Dict[str, List["TrafficCfg"]]
     fixed_delta_seconds: float
     warmup_ticks: int
     no_rendering_mode: bool
@@ -197,7 +198,6 @@ class CarlaCollectorCfg:
     ipc: IpcCfg
     simulation: SimulationCfg
     route: RouteCfg
-    traffic: TrafficCfg
     weather: WeatherCfg
     ego: EgoCfg
     cameras: CamerasCfg
@@ -918,6 +918,14 @@ def _from_dict(cls, data):
 
     之所以手写而非用第三方(dacite)：避免给双解释器再引入依赖；结构固定、规模小。
     """
+    origin = getattr(cls, "__origin__", None)
+    if origin in (list, List):
+        (elem_type,) = cls.__args__
+        return [_from_dict(elem_type, value) for value in data]
+    if origin in (dict, Dict):
+        key_type, value_type = cls.__args__
+        return {_from_dict(key_type, key): _from_dict(value_type, value)
+                for key, value in data.items()}
     if not is_dataclass(cls):
         return data
     hints = get_type_hints(cls)
@@ -925,12 +933,7 @@ def _from_dict(cls, data):
     for f in fields(cls):
         ftype = hints[f.name]
         value = data[f.name]  # 缺键即 KeyError，等价于「配置不完整」的硬失败
-        origin = getattr(ftype, "__origin__", None)
-        if origin in (list, List):
-            (elem_type,) = ftype.__args__
-            kwargs[f.name] = [_from_dict(elem_type, v) for v in value]
-        else:
-            kwargs[f.name] = _from_dict(ftype, value)
+        kwargs[f.name] = _from_dict(ftype, value)
     return cls(**kwargs)
 
 
@@ -956,7 +959,7 @@ def validate_config(cfg):
     assert cc.ipc.arena_size_mb > 0, "ipc.arena_size_mb 必须 > 0"
     assert cc.ipc.slot_count > 0, "ipc.slot_count 必须 > 0"
 
-    # 校验对象: simulation.maps / fixed_delta_seconds / warmup_ticks
+    # 校验对象: simulation.maps / simulation.traffic_profiles / fixed_delta_seconds / warmup_ticks
     assert cc.simulation.maps, "simulation.maps 至少需要配置一张地图"
     assert all(isinstance(name, str) and name.endswith("_Opt")
                for name in cc.simulation.maps), \
@@ -977,13 +980,18 @@ def validate_config(cfg):
     assert cc.route.similarity_threshold_m >= 0, \
         "route.similarity_threshold_m 必须 >= 0（0 表示关闭相似路线剔除）"
 
-    # 校验对象: traffic 数量与奔跑比例
-    assert cc.traffic.num_vehicles >= 0 and cc.traffic.num_walkers >= 0, \
-        "traffic.num_vehicles / num_walkers 必须 >= 0"
-    assert 0.0 <= cc.traffic.walker_running_pct <= 1.0, \
-        "traffic.walker_running_pct 必须在 [0,1]"
-    # 校验对象: traffic.walker_arrival_radius_m —— 到达判定半径必须为正
-    assert cc.traffic.walker_arrival_radius_m > 0, "traffic.walker_arrival_radius_m 必须 > 0"
+    # 校验对象: simulation.traffic_profiles —— 每张地图必须有按场景顺序排列的交通流配置
+    assert set(cc.simulation.traffic_profiles) == set(cc.simulation.maps), \
+        "simulation.traffic_profiles 必须为每张地图配置交通流列表"
+    for profiles in cc.simulation.traffic_profiles.values():
+        assert profiles, "simulation.traffic_profiles 的列表不能为空"
+        for traffic in profiles:
+            assert traffic.num_vehicles >= 0 and traffic.num_walkers >= 0, \
+                "traffic_profiles 中车辆/行人数量必须 >= 0"
+            assert 0.0 <= traffic.walker_running_pct <= 1.0, \
+                "traffic_profiles.walker_running_pct 必须在 [0,1]"
+            assert traffic.walker_arrival_radius_m > 0, \
+                "traffic_profiles.walker_arrival_radius_m 必须 > 0"
 
     # 校验对象: ego.controller / behavior —— 双控制模式及专家风格枚举
     assert cc.ego.controller in ("behavior_agent", "model"), \

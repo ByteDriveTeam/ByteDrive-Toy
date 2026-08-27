@@ -5,7 +5,7 @@
       common.protocol, worker.actors/annotations/collect/session/traffic_control
 读取配置:
     carla_collector.worker.command_timeout_s / simulation.fixed_delta_seconds / warmup_ticks /
-        traffic.* / ego.vehicle_filter / cameras.* / lidar.* / collection.capture_every_n_ticks /
+        simulation.traffic_profiles / ego.vehicle_filter / cameras.* / lidar.* / collection.capture_every_n_ticks /
         collection.max_frames_per_scene / model_collection.*
     clone_loop.route.* / safety.max_route_deviation_m
     data.driving.cameras
@@ -62,27 +62,24 @@ class ModelCollectionRuntime:
         self._pending = None
         self._cleanup_after_flush = False
 
-    def start(self, map_name, seed, weather, route):
+    def start(self, map_name, seed, weather, route, traffic):
         """重载场景并返回第一份 10Hz 观测、世界真值和 2Hz 传感器帧。"""
         self._destroy_episode()
         random.seed(int(seed))
         np.random.seed(int(seed) % (2 ** 32))
         world, tm = session.load_scene_world(
             self._client, map_name, self._cc.simulation.fixed_delta_seconds,
-            self._cc.traffic.tm_port, int(seed), self._cc.simulation.no_rendering_mode)
+            traffic["tm_port"], int(seed), self._cc.simulation.no_rendering_mode)
         self._world, self._tm = world, tm
         session.apply_weather(world, weather)
         try:
             self._ego = actors.spawn_ego_vehicle(
                 world, self._cc.ego.vehicle_filter, route["start"])
             self._vehicle_ids = actors.spawn_traffic_vehicles(
-                self._client, world, tm, self._cc.traffic.num_vehicles,
-                self._cc.traffic.vehicle_filter)
+                self._client, world, tm, traffic["num_vehicles"], traffic["vehicle_filter"])
             self._crowd = actors.spawn_walkers(
-                self._client, world, self._cc.traffic.num_walkers,
-                self._cc.traffic.walker_filter,
-                self._cc.traffic.walker_running_pct,
-                self._cc.traffic.walker_arrival_radius_m)
+                self._client, world, traffic["num_walkers"], traffic["walker_filter"],
+                traffic["walker_running_pct"], traffic["walker_arrival_radius_m"])
             try:
                 self._navigator = RouteNavigator(
                     world.get_map(), route["start"], route["end"],

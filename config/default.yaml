@@ -23,10 +23,33 @@ carla_collector:
   # 仿真世界
   simulation:
     maps:                    # 要采集的 Opt 地图及各自本次运行的场景数；0 表示遍历该地图全部合法路线
-      Town10HD_Opt: 1000
+      Town03_Opt: 384
+      Town05_Opt: 256
+      Town10HD_Opt: 192
+      Town02_Opt: 32
+      Town04_Opt: 128
+      Town06_Opt: 32
+      Town07_Opt: 32
+
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
     no_rendering_mode: true   # 仅采集状态数据时关闭 CARLA 渲染并跳过视觉/LiDAR 传感器
+    # 每张地图按路线队列顺序配置交通流；列表末项会用于超出列表长度的场景。
+    traffic_profiles:
+      Town03_Opt:
+        - {num_vehicles: 50, num_walkers: 25, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town05_Opt:
+        - {num_vehicles: 50, num_walkers: 25, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town10HD_Opt:
+        - {num_vehicles: 50, num_walkers: 25, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town02_Opt:
+        - {num_vehicles: 25, num_walkers: 10, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town04_Opt:
+        - {num_vehicles: 50, num_walkers: 25, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town06_Opt:
+        - {num_vehicles: 50, num_walkers: 0, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
+      Town07_Opt:
+        - {num_vehicles: 15, num_walkers: 5, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.1, walker_arrival_radius_m: 2.0, tm_port: 8000}
 
   # 路线队列：可达点两两组合，按直线距离过滤后剔除相似路线
   route:
@@ -34,16 +57,6 @@ carla_collector:
     max_distance_m: 300.0
     similarity_threshold_m: 20.0  # 两路线起点、终点的平面距离均不超过此值时只保留一条；0 关闭
     queue_seed: 20260617       # 组合随机排序的种子（保证队列可复现）
-
-  # 交通流（TrafficManager 控制）
-  traffic:
-    num_vehicles: 25
-    num_walkers: 20
-    vehicle_filter: vehicle.*
-    walker_filter: walker.pedestrian.*
-    walker_running_pct: 0.1          # 行人奔跑比例
-    walker_arrival_radius_m: 2.0     # 行人到目标点的判定半径，进入即重派新目标（持续漫游）
-    tm_port: 8000
 
   # 天气
   weather:
@@ -90,7 +103,7 @@ carla_collector:
   # 单次行驶采集控制
   collection:
     max_frames_per_scene: 512   # 整次行驶的总帧上限（跨多段累计）；达到即结束行驶。单段大小由 ipc.arena_size_mb 决定
-    capture_every_n_ticks: 5     # 图像/Lidar/标注每多少个仿真步存一帧（默认 2Hz）
+    capture_every_n_ticks: 1     # 图像/Lidar/标注每多少个仿真步存一帧（默认 10Hz）
     kinematics_every_n_ticks: 1  # 运动学独立时间轴的采样间隔（默认每 tick，即 10Hz）
     model_every_n_ticks: 1       # 模型推理与预测轨迹时间轴（默认 10Hz）
     world_state_every_n_ticks: 1 # GT Box/灯态/路线状态时间轴（默认 10Hz）
@@ -136,7 +149,7 @@ carla_collector:
     lmdb_map_size_gb: 64       # 单场景 LMDB 的增长上限（按需增长，初始仅 64MB；非全量上限）
     video_codec: libx265       # H.265
     video_crf: 23
-    video_fps: 2               # 必须等于 1/(fixed_delta_seconds*capture_every_n_ticks)
+    video_fps: 10               # 必须等于 1/(fixed_delta_seconds*capture_every_n_ticks)
 
 # ============================================================
 # multiframe_pointcloud_fusion —— 多帧语义 LiDAR 融合与动态对象重建
