@@ -23,7 +23,7 @@ carla_collector:
   # 仿真世界
   simulation:
     maps:                    # 要采集的 Opt 地图及各自本次运行的场景数；0 表示遍历该地图全部合法路线
-      Town02_Opt: 200
+      Town10HD_Opt: 1000
     fixed_delta_seconds: 0.1  # 同步模式固定步长（10Hz）
     warmup_ticks: 30           # 场景正式采集前空转帧，待物理/交通稳定
     no_rendering_mode: true   # 仅采集状态数据时关闭 CARLA 渲染并跳过视觉/LiDAR 传感器
@@ -89,7 +89,7 @@ carla_collector:
 
   # 单次行驶采集控制
   collection:
-    max_frames_per_scene: 2048   # 整次行驶的总帧上限（跨多段累计）；达到即结束行驶。单段大小由 ipc.arena_size_mb 决定
+    max_frames_per_scene: 512   # 整次行驶的总帧上限（跨多段累计）；达到即结束行驶。单段大小由 ipc.arena_size_mb 决定
     capture_every_n_ticks: 5     # 图像/Lidar/标注每多少个仿真步存一帧（默认 2Hz）
     kinematics_every_n_ticks: 1  # 运动学独立时间轴的采样间隔（默认每 tick，即 10Hz）
     model_every_n_ticks: 1       # 模型推理与预测轨迹时间轴（默认 10Hz）
@@ -127,6 +127,8 @@ carla_collector:
   collision:
     max_retries_per_route: 0   # 同一路线换种子重试上限；超限则跳过该路线
     save_failed_samples: true  # 是否保存碰撞等失败 attempt；开启后失败样本也计入场景数
+    followup_steps: 25         # 碰撞后继续 tick 的观察窗口；窗口内无新碰撞则恢复，否则终止
+    recovery_speed_mps: 0.2    # 观察窗口结束时达到该速度才视为已恢复
 
   # 落盘输出（每个场景一个自包含目录 scenes/scene_XXXXXX/：7 个 mp4 + 独立 lmdb/）
   output:

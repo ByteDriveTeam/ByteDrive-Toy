@@ -188,7 +188,7 @@ Py37 仿真端 `worker/`
 - [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — 场景读取器：合并单场景的 LMDB 与 mp4 为逐帧数据，探测各模态可用性
 - [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — 纯 numpy 复刻 CARLA 坐标变换与 3D->2D 投影
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — CARLA 语义标签到颜色的调色板与向量化映射
-- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、lidar+框 鸟瞰图、多面板合成与 HUD
+- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、LiDAR/状态轨迹鸟瞰图、多面板合成与 HUD
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
 
 ### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）

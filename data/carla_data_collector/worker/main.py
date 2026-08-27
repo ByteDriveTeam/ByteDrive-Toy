@@ -98,7 +98,7 @@ def _run_chunk(state):
         status, frames, kinematics = collect.collect_chunk(
             drive["world"], drive["ego"], drive["agent"], drive["rig"], drive["crowd"],
             drive["traffic_lights"], drive["traffic_light_metadata"],
-            state["allocator"], cc.collection,
+            state["allocator"], cc.collection, cc.collision,
             cc.worker.command_timeout_s, drive["counters"])
     except Exception:
         _cleanup_drive(state)  # 采集中途异常也要销毁 actor，避免泄漏
@@ -158,7 +158,8 @@ def _handle_start_scene(state, args):
                 for camera in cc.cameras.rig
             },
             "extrinsics": rig.extrinsics, "lidar_extrinsic": rig.lidar_extrinsic,
-            "counters": {"total": 0, "tick_idx": 0},
+            "counters": {"total": 0, "tick_idx": 0,
+                         "collision_events": 0, "collision_followup": 0},
         }
     except Exception:
         _destroy_actors(client, world, ego, vehicle_ids, crowd, rig)

@@ -59,6 +59,10 @@ def main():
 
     reader = SceneReader(scene_dir)
     try:
+        if reader.num_frames == 0:
+            print("[vis] 场景没有可视化帧：failed={} status={}，可从 LMDB 的运动学时间轴读取状态".format(
+                reader.failed, reader.failure_status))
+            return
         Viewer(reader, cfg.data_vis).run()
     finally:
         reader.close()

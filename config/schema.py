@@ -178,6 +178,8 @@ class CostCfg:
 class CollisionCfg:
     max_retries_per_route: int
     save_failed_samples: bool
+    followup_steps: int
+    recovery_speed_mps: float
 
 
 @dataclass
@@ -996,10 +998,11 @@ def validate_config(cfg):
         "cameras.rig 中每个相机的 fov 必须在 (0,180)"
     rig_names = [c.name for c in cc.cameras.rig]
     assert len(rig_names) == len(set(rig_names)), "cameras.rig 相机 name 必须唯一"
-    # 校验对象: cameras.modalities + lidar.enabled —— 至少启用一种传感器，否则一帧无任何数据可采
+    # 校验对象: cameras.modalities + lidar.enabled —— 常规模式至少启用一种传感器
     mods = cc.cameras.modalities
-    assert any((mods.rgb, mods.depth, mods.semantic, mods.optical_flow, cc.lidar.enabled)), \
-        "至少需启用一种传感器（cameras.modalities.* 或 lidar.enabled）"
+    if not cc.simulation.no_rendering_mode:
+        assert any((mods.rgb, mods.depth, mods.semantic, mods.optical_flow, cc.lidar.enabled)), \
+            "至少需启用一种传感器（cameras.modalities.* 或 lidar.enabled）"
 
     # 校验对象: lidar —— 关键参数为正、FOV 上沿高于下沿
     assert cc.lidar.channels > 0 and cc.lidar.points_per_second > 0, \
@@ -1026,6 +1029,9 @@ def validate_config(cfg):
 
     # 校验对象: collision.max_retries_per_route
     assert cc.collision.max_retries_per_route >= 0, "collision.max_retries_per_route 必须 >= 0"
+    # 校验对象: collision.followup_steps —— 碰撞后观察窗口必须为正
+    assert cc.collision.followup_steps > 0, "collision.followup_steps 必须 > 0"
+    assert cc.collision.recovery_speed_mps >= 0, "collision.recovery_speed_mps 必须 >= 0"
 
     # 校验对象: output —— LMDB 容量、CRF、帧率为正
     assert cc.output.lmdb_map_size_gb > 0, "output.lmdb_map_size_gb 必须 > 0"

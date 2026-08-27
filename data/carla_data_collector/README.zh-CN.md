@@ -210,6 +210,9 @@ carla_collector:
 专家采集的失败 attempt 默认丢弃。设置 `carla_collector.collision.save_failed_samples: true` 后，碰撞 attempt
 会单独写入 LMDB，并显式记录 `status`、`failed: true` 和 `failure_status`；每个已保存失败样本都会计入场景数。
 
+碰撞后专家采集会继续 `collision.followup_steps` 个 tick（默认 25 帧）。观察窗口结束时若自车速度达到
+`collision.recovery_speed_mps` 则恢复采集，否则终止 attempt 并标记为失败。
+
 启用模型泛化采集只需覆盖：
 
 ```yaml

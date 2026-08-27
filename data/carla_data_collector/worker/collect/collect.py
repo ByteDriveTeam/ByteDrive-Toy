@@ -137,7 +137,7 @@ def prepare_drive(world, agent, sim_cfg, destination):
 
 
 def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
-                  allocator, collection_cfg, timeout_s, counters):
+                  allocator, collection_cfg, collision_cfg, timeout_s, counters):
     """采集一段（填满一次 arena 为止）。counters 跨段累计，使总帧上限/采样节拍按整次行驶统计。
 
     参数:
@@ -147,6 +147,7 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         traffic_light_metadata: 原生受控车道与停止点等场景级交通灯元数据
         allocator: 写入共享内存的顺序分配器（调用前须已 reset，本段写满即返回 partial）
         collection_cfg: collection 配置片段（max_frames_per_scene 为整次行驶总帧上限 / capture_every_n_ticks）
+        collision_cfg: 碰撞观察窗口配置（followup_steps）
         timeout_s: 单次 gather 等待传感器的超时
         counters:  {"total": 已落帧数, "tick_idx": 已 tick 数}，由调用方跨段持有并就地更新
     返回:
@@ -157,6 +158,8 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
     kinematics = []
     capture_stride = collection_cfg.capture_every_n_ticks
     kinematics_stride = collection_cfg.kinematics_every_n_ticks
+    collision_events = counters.get("collision_events", rig.collision_events)
+    collision_followup = counters.get("collision_followup", 0)
 
     while counters["total"] < collection_cfg.max_frames_per_scene and not agent.done():
         crowd.retarget_arrived()  # 到达目标的行人重派新目标，避免后半程站住不动
@@ -168,8 +171,21 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         kinematics_due = (counters["tick_idx"] - 1) % kinematics_stride == 0
         sample = rig.gather(frame_id, timeout_s) if capture_due else None
 
-        if rig.collided:
-            return P.STATUS_COLLISION, frames, kinematics
+        if rig.collision_events > collision_events:
+            collision_events = rig.collision_events
+            collision_followup = collision_cfg.followup_steps + 1
+        if collision_followup:
+            collision_followup -= 1
+            if collision_followup == 0:
+                velocity = ego.get_velocity()
+                recovered = (velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2
+                             ) ** 0.5 >= collision_cfg.recovery_speed_mps
+                if not recovered:
+                    counters["collision_events"] = collision_events
+                    counters["collision_followup"] = 0
+                    return P.STATUS_COLLISION, frames, kinematics
+        counters["collision_events"] = collision_events
+        counters["collision_followup"] = collision_followup
         snapshot_time = world.get_snapshot().timestamp.elapsed_seconds
         ego_state = _ego_state(ego) if capture_due or kinematics_due else None
         if kinematics_due:

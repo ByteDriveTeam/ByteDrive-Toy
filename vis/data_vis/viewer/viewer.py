@@ -40,11 +40,15 @@ class Viewer:
                        "show_rgb": True, "show_depth": True, "show_semantic": True,
                        "show_flow": True, "show_bev": True,
                        "available": reader.available, "playing": False,
-                       "idx": 0, "num_frames": reader.num_frames}
+                       "idx": 0, "num_frames": reader.num_frames,
+                       "failed": reader.failed, "failure_status": reader.failure_status,
+                       "trajectory": [item["ego"]["transform"] for item in reader.kinematics()],
+                       "actor_trajectories": reader.actor_trajectories()}
 
     def run(self):
         """进入事件循环；窗口关闭或按 q/Esc 返回。"""
-        cv2.namedWindow(self._win, cv2.WINDOW_NORMAL)
+        # KEEPRATIO 防止用户拖拽窗口后 OpenCV 对 BEV/轨迹画布做非等比拉伸。
+        cv2.namedWindow(self._win, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.createTrackbar("frame", self._win, 0, max(1, self._reader.num_frames - 1),
                            self._on_track)
         interval = 1.0 / self._vcfg.display.play_fps

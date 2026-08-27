@@ -8,10 +8,10 @@
           selected_line_thickness/selected_point_radius)
 对外接口:
     - render_frame(frame, meta, vcfg, state) -> np.ndarray   # 合成单帧的完整 BGR 画布（未缩放）
-说明: 投影约定见 vis/data_vis/geometry。每行一种相机模态、每列一个相机：RGB 行叠投影框，其后按存在且开启的
-      模态依次排深度、语义、光流；右侧为以主车为中心的 BEV。仅渲染 state["available"] 为真且对应开关开启的层，
-      故任意采集开关组合都自适应（RGB 关则无 RGB 行、lidar 关则无 BEV）。面板间留间隔、HUD 半透明叠加并只列
-      可用模态的开关，提升可读性。点云用向量化散点（规范 §9），逐物体绘框因含 cv2 副作用而用循环。
+说明: 投影约定见 vis/data_vis/geometry。每行一种相机模态、每列一个相机；无视觉层时改用状态 BEV 绘制自车、
+      车辆/行人轨迹与 Box。仅渲染 state["available"] 为真且对应开关开启的层，故任意采集开关组合都自适应。
+      面板间留间隔、HUD 半透明叠加并只列可用模态的开关，提升可读性。点云用向量化散点（规范 §9），逐物体
+      绘框因含 cv2 副作用而用循环。
 """
 
 import cv2
@@ -64,7 +64,9 @@ def render_frame(frame, meta, vcfg, state):
     if avail["optical_flow"] and state["show_flow"]:
         rows.append(_modality_row(cams, "flow ", lambda c: _colorize_flow(frame["optical_flow"][c],
                                                                           vcfg.optical_flow)))
-    left = _stack_rows(rows) if rows else _placeholder(meta, cams)
+    left = _stack_rows(rows) if rows else _state_bev(
+        boxes, ego_pose, state.get("trajectory", []), state.get("actor_trajectories", {}),
+        frame["meta"].get("relevant_traffic_control"), vcfg)
 
     canvas = left
     if avail["lidar"] and state["show_bev"]:
@@ -116,6 +118,44 @@ def _placeholder(meta, cams):
     """所有相机层均关闭时的占位面板（保证画布非空，BEV 仍可拼接其右）。"""
     h, w = _panel_hw(meta, cams)
     return _titled(np.full((h, w, 3), _BG, np.uint8), "(camera layers off)")
+
+
+def _state_bev(boxes, ego_pose, trajectory, actor_trajectories, relevant_control, vcfg):
+    """无视觉传感器时用 Agent 轨迹与 Box 生成可读的状态鸟瞰图。"""
+    bev = vcfg.bev
+    size, rng = bev.size_px, bev.range_m
+    canvas = np.full((size, size, 3), bev.bg, dtype=np.uint8)
+    scale, center = size / (2.0 * rng), size * 0.5
+    w2e = g.world_to_ego(ego_pose)
+    if trajectory:
+        points = g.transform_points(np.asarray([[pose[0], pose[1], 0.0] for pose in trajectory]), w2e)
+        _draw_track(canvas, points, center, scale, rng, (80, 220, 255), 2)
+    box_colors = {int(box["id"]): tuple(vcfg.bbox.colors.get(box["semantic"], _DEFAULT_BGR))
+                  for box in boxes if box.get("id") is not None}
+    for actor_id, locations in actor_trajectories.items():
+        points = g.transform_points(np.asarray(locations, dtype=np.float64), w2e)
+        _draw_track(canvas, points, center, scale, rng,
+                    box_colors.get(int(actor_id), (150, 150, 150)), 1)
+    for box in boxes:
+        _draw_box_bev(canvas, box, w2e, center, scale, rng, vcfg.bbox)
+    _draw_relevant_control(canvas, relevant_control, w2e, center, scale, rng, vcfg.traffic_lights)
+    _draw_ego_marker(canvas, center)
+    return _titled(canvas, "agent trajectory / state BEV")
+
+
+def _draw_track(canvas, points, center, scale, rng, color, thickness):
+    """先连接完整轨迹，再由画布裁剪显示范围，避免进出视窗时断线。"""
+    if len(points) < 2:
+        return
+    pixels = np.stack((center + points[:, 1] * scale,
+                       center - points[:, 0] * scale), axis=1).astype(np.int32)
+    jumps = np.linalg.norm(np.diff(points[:, :2], axis=0), axis=1) > max(20.0, rng * 0.5)
+    breaks = np.flatnonzero(jumps)
+    starts = np.r_[0, breaks + 1]
+    ends = np.r_[breaks, len(points) - 1]
+    for start, end in zip(starts, ends):
+        if end - start >= 1:
+            cv2.polylines(canvas, [pixels[start:end + 1]], False, color, thickness, cv2.LINE_AA)
 
 
 # ---------- RGB 面板与 3D 框投影 ----------
@@ -337,6 +377,8 @@ def _put_hud(canvas, fmeta, state, traffic_light_lines, avail):
             speed, ctrl["throttle"], ctrl["steer"], ctrl["brake"]),
         _toggle_line(state, avail),
     ] + traffic_light_lines
+    if state.get("failed"):
+        lines.insert(0, "FAILED: {}".format(state.get("failure_status") or "unknown"))
 
     text_width = max(cv2.getTextSize(t, _HUD_FONT, _HUD_SCALE, 1)[0][0] for t in lines)
     hud_w = min(canvas.shape[1] - 1, text_width + 16)

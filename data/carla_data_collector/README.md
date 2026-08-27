@@ -178,6 +178,9 @@ Failed expert attempts are discarded by default. Set `carla_collector.collision.
 collision attempts to their own LMDB; each records `status`, `failed: true`, and `failure_status`, and each saved
 failure increments the scene count.
 
+After a collision, the expert collector continues for `collision.followup_steps` ticks (25 by default). If the ego
+vehicle reaches `collision.recovery_speed_mps`, collection resumes; otherwise the attempt terminates and is marked failed.
+
 Enable model-driven collection with:
 
 ```yaml

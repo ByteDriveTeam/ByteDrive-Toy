@@ -188,7 +188,7 @@ Python 3.7 simulation worker:
 - [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — Per-scene LMDB/MP4 reader and modality discovery
 - [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — NumPy CARLA transforms and 3D-to-2D projection
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette
-- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR BEV, composite panels, and HUD rendering
+- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR/state trajectory BEV, composite panels, and HUD rendering
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
 
 ### Perception predictions

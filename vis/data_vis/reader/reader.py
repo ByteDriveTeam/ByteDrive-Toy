@@ -9,12 +9,15 @@
         .num_frames -> int
         .num_kinematics -> int
         .camera_names -> list[str]
+        .failed -> bool                 # 场景是否为失败样本
+        .failure_status -> str | None   # 失败终止状态
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
         .lidar(i) -> np.ndarray | None # 只读取语义 LiDAR，不解码 RGB/其他大数组
         .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .kinematics() -> list[dict]   # 独立高频运动学时间序列；旧数据回退逐帧 ego
+        .actor_trajectories() -> dict[int,list[list[float]]]  # 动态车辆/行人/自车世界坐标轨迹
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
 说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）；
@@ -88,6 +91,8 @@ class SceneReader:
                 msgpack.unpackb(count_blob) if count_blob is not None else self.num_frames)
             self._has_kinematics = count_blob is not None
         self.camera_names = self.meta["camera_names"]
+        self.failed = bool(self.meta.get("failed", False))
+        self.failure_status = self.meta.get("failure_status")
         # RGB 仅在采集开启时落 mp4；video_files 为空即该场景无 RGB，不建解码器
         video_files = self.meta.get("video_files", {})
         self._videos = {cam: _Mp4Reader(scene_dir / video_files[cam])
@@ -139,6 +144,18 @@ class SceneReader:
                     for i in range(self.num_frames)
                 )
             ]
+
+    def actor_trajectories(self):
+        """从逐帧 Box 汇总动态 actor 的世界坐标轨迹，供无渲染状态视图绘制。"""
+        trajectories = {}
+        with self._env.begin() as txn:
+            for index in range(self.num_frames):
+                frame = msgpack.unpackb(txn.get(self._key(index, "meta")), raw=False)
+                for box in frame.get("bboxes", []):
+                    actor_id = box.get("id")
+                    if actor_id is not None:
+                        trajectories.setdefault(int(actor_id), []).append(box["location"])
+        return trajectories
 
     def rgb(self, i, camera):
         """只读取指定帧/相机的 RGB，供时序模型避免为历史帧解码全部监督模态。"""
