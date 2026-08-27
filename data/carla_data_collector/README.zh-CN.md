@@ -207,6 +207,9 @@ carla_collector:
 该模式无论相机模态和 LiDAR 的单项开关如何配置，都会跳过全部相机与 LiDAR actor；不能与
 `ego.controller: model` 同时使用，因为模型输入需要 RGB 与 LiDAR。
 
+专家采集的失败 attempt 默认丢弃。设置 `carla_collector.collision.save_failed_samples: true` 后，碰撞 attempt
+会单独写入 LMDB，并显式记录 `status`、`failed: true` 和 `failure_status`；每个已保存失败样本都会计入场景数。
+
 启用模型泛化采集只需覆盖：
 
 ```yaml

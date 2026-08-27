@@ -143,6 +143,10 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
 
     scene_meta = {
         "scene_id": scene_id, "seed": seed, "weather": weather, "status": status,
+        "failed": status not in (P.STATUS_OK, P.STATUS_MAX_FRAMES, P.STATUS_PARTIAL),
+        "failure_status": (status if status not in
+                           (P.STATUS_OK, P.STATUS_MAX_FRAMES, P.STATUS_PARTIAL)
+                           else None),
         "num_frames": len(frames), "num_kinematics": len(kinematics),
         "map": map_name, "fps": cc.output.video_fps,
         "sensor_dt_s": cc.simulation.fixed_delta_seconds * cc.collection.capture_every_n_ticks,
@@ -210,7 +214,16 @@ def _collect_route(worker, map_name, route, saved, cc, arena, output_root, cam_n
 
         while True:
             if status == P.STATUS_COLLISION:
-                print("[collector] {}（{}）碰撞，丢弃当前未落盘段，结束行驶".format(drive_id, route_tag))
+                if cc.collision.save_failed_samples:
+                    scene_id = "scene_{:06d}".format(saved + segs_total)
+                    _persist(scene_id, map_name, route, seed, weather, frames, kinematics, status,
+                             static_meta, drive_id, seg_idx, cc, arena, output_root, cam_names)
+                    print("[collector] {} 落盘失败样本（{}帧, status={}）".format(
+                        scene_id, len(frames), status))
+                    segs_total += 1
+                else:
+                    print("[collector] {}（{}）碰撞，丢弃当前未落盘段，结束行驶".format(
+                        drive_id, route_tag))
                 break
             if frames:  # partial/ok/max_frames 段均落盘
                 scene_id = "scene_{:06d}".format(saved + segs_total)

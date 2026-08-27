@@ -174,6 +174,10 @@ carla_collector:
 This skips all camera and LiDAR actors regardless of their individual modality switches. It cannot be combined with
 `ego.controller: model`, whose policy input requires RGB and LiDAR.
 
+Failed expert attempts are discarded by default. Set `carla_collector.collision.save_failed_samples: true` to write
+collision attempts to their own LMDB; each records `status`, `failed: true`, and `failure_status`, and each saved
+failure increments the scene count.
+
 Enable model-driven collection with:
 
 ```yaml

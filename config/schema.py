@@ -177,6 +177,7 @@ class CostCfg:
 @dataclass
 class CollisionCfg:
     max_retries_per_route: int
+    save_failed_samples: bool
 
 
 @dataclass
