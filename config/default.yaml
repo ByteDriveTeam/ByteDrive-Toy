@@ -4,6 +4,40 @@
 # ============================================================
 # carla_collector —— Carla 合成数据采集模块
 # ============================================================
+trajectory_vocabulary:
+  scene_root: data/carla_data_collector/dataset/scenes
+  output_dir: data/carla_data_collector/dataset/vocabulary
+  geometry_size: 64
+  speed_size: 64
+  geometry_horizon_m: 8.0
+  geometry_interval_m: 0.1
+  speed_horizon_s: 1.0
+  speed_hz: 10.0
+  motion_resample_s: 0.5
+  window_stride_s: 0.5
+  algorithm: kmeans
+  random_seed: 17
+  kmeans_batch_size: 2048
+  kmeans_iterations: 100
+  max_samples: 250000
+  sample_block_size: 4096
+  stationary_speed_mps: 0.2
+  auto_min_size: 16
+  auto_max_size: 128
+  auto_step: 16
+  coverage_target: 0.95
+  save_assignments: false
+  geometry_output: trajectory_geometry_vocab.npy
+  speed_output: trajectory_speed_vocab.npy
+  png_size_px: 1200
+  max_curves: 256
+  max_motion_step_m: 4.0
+  max_geometry_heading_change_deg: 100.0
+  spline_enabled: true
+  spline_smoothing: 0.15
+  spline_dense_step_m: 0.1
+  spline_fit_extra_m: 5.0
+
 carla_collector:
 
   # Py37 worker 子进程与 Carla 服务端连接

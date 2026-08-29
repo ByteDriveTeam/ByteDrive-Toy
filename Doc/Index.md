@@ -183,6 +183,11 @@ Python 3.7 simulation worker:
 
 ### Raw data
 
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 流式构造并聚类 CARLA ego 几何轨迹与速度词表
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹词表生成 CLI
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 几何/速度词表与覆盖度 PNG 渲染
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 词表可视化 CLI
+
 - [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — Raw dataset visualization package marker
 - [vis/data_vis/run.py](../vis/data_vis/run.py) — Configuration, scene location, and interactive-window CLI
 - [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — Per-scene LMDB/MP4 reader and modality discovery

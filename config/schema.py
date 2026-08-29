@@ -895,6 +895,42 @@ class CloneLoopCfg:
 
 
 @dataclass
+class TrajectoryVocabularyCfg:
+    scene_root: str
+    output_dir: str
+    geometry_size: object
+    speed_size: object
+    geometry_horizon_m: float
+    geometry_interval_m: float
+    speed_horizon_s: float
+    speed_hz: float
+    motion_resample_s: float
+    window_stride_s: float
+    algorithm: str
+    random_seed: int
+    kmeans_batch_size: int
+    kmeans_iterations: int
+    max_samples: int
+    sample_block_size: int
+    stationary_speed_mps: float
+    auto_min_size: int
+    auto_max_size: int
+    auto_step: int
+    coverage_target: float
+    save_assignments: bool
+    geometry_output: str
+    speed_output: str
+    png_size_px: int
+    max_curves: int
+    max_motion_step_m: float
+    max_geometry_heading_change_deg: float
+    spline_enabled: bool
+    spline_smoothing: float
+    spline_dense_step_m: float
+    spline_fit_extra_m: float
+
+
+@dataclass
 class Config:
     carla_collector: CarlaCollectorCfg
     multiframe_pointcloud_fusion: MultiframePointcloudFusionCfg
@@ -909,6 +945,9 @@ class Config:
     pred_vis: PredVisCfg
     driving_vis: DrivingVisCfg
     clone_loop: CloneLoopCfg
+    trajectory_vocabulary: TrajectoryVocabularyCfg
+
+
 
 
 # ---------- 由 dict 构造 ----------
@@ -1065,6 +1104,25 @@ def validate_config(cfg):
     _validate_clone_loop(
         cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar,
         cc.simulation, cc.collection)
+    _validate_trajectory_vocabulary(cfg.trajectory_vocabulary)
+
+
+def _validate_trajectory_vocabulary(v):
+    """校验对象: cfg.trajectory_vocabulary —— 词表窗口、算法与规模。"""
+    assert v.geometry_horizon_m > 0 and v.geometry_interval_m > 0
+    assert v.speed_horizon_s > 0 and v.speed_hz > 0
+    assert v.motion_resample_s > 0 and v.window_stride_s > 0
+    assert v.max_motion_step_m > 0 and 0 < v.max_geometry_heading_change_deg <= 180
+    assert v.spline_smoothing >= 0 and v.spline_dense_step_m > 0 and v.spline_fit_extra_m >= 0
+    assert v.algorithm in ("kmeans", "fts"), "trajectory_vocabulary.algorithm 仅支持 kmeans/fts"
+    assert v.kmeans_batch_size > 0 and v.kmeans_iterations > 0
+    assert v.max_samples > 0 and v.sample_block_size > 0
+    assert 0 <= v.coverage_target <= 1
+    assert v.auto_min_size > 0 and v.auto_max_size >= v.auto_min_size and v.auto_step > 0
+    for name in ("geometry_size", "speed_size"):
+        value = getattr(v, name)
+        assert value == "auto" or (isinstance(value, int) and value > 0), \
+            "trajectory_vocabulary.{} 必须为正整数或 auto".format(name)
 
 
 def _validate_multiframe_pointcloud_fusion(fusion):
