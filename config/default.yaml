@@ -518,6 +518,40 @@ model:
     behavior:
       num_classes: 8             # 障碍停车/红灯停车/加速/直行/左转/右转/减速/静止
 
+  # BEV 栅格世界模型：掩码补全自监督预训练（密集残差 Transformer + EMA Teacher）
+  # 输入为离线生成的 10 图层二值栅格：红绿灯 3（绑定停止线）/车辆 1/行人 1/可行驶 1/车道线 4
+  world_model:
+
+    # 栅格几何（数据侧栅格化与模型侧 Token 化的唯一来源）；自车居中
+    grid:
+      front_m: 32.0              # 前向量程（米）
+      rear_m: 32.0               # 后向量程
+      left_m: 32.0               # 左向量程
+      right_m: 32.0              # 右向量程
+      cell_size_m: 0.25          # 单格精度 → 64m/0.25 = 256×256
+      layer_names: [traffic_light_red, traffic_light_yellow, traffic_light_green,
+                    vehicle, pedestrian, drivable,
+                    lane_centerline, lane_separator, lane_boundary, lane_other]
+
+    num_frames: 5                # 历史帧数（10Hz → 0.4s）
+    frame_rate_hz: 10.0
+    patch_size: 16               # 16×16 卷积、步长 16 → 下采样 16 倍（256→16，每帧 256 Token）
+    encoder:
+      dim: 512
+      num_layers: 12             # Transformer Block 数（SDPA 与 FFN 各算一层 → 24 个密集残差子层）
+      num_heads: 16              # 每头 32 维
+      mlp_ratio: 4               # FFN: Linear(D→4D) → SwiGLU(4D→2D) → Linear(2D→D)
+      rope_theta: 100.0          # 3D RoPE 基频
+      rope_axis_dims: [12, 12, 8]  # 3D RoPE 三轴 rotary 通道数；和须 ≤ 每头维数 32
+    predictor:
+      dim: 256
+      num_layers: 6
+      num_heads: 8               # 每头 32 维
+      mlp_ratio: 4
+      teacher_layer_indices: [3, 6, 9, 12]  # 取骨干第 3/6/9/12 个 Block 输出做回归目标（须 4 个）
+    mask_ratio: 0.75             # 掩码率（单帧采样后按时序一致广播）
+    ema_rate: 0.00075            # Teacher（EMA Encoder）更新率
+
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
 # ============================================================
@@ -525,6 +559,33 @@ data:
 
   # 每个 DataLoader worker 的场景资源上限；SceneReader/驾驶状态均采用有界 LRU，防止全量数据集线性涨内存
   scene_cache_size: 2
+
+  # BEV 栅格离线生成：消费 carla_data_collector 场景特权数据 → 10 图层二值栅格（LMDB）
+  bev_grid_generation:
+    scene_root: data/carla_data_collector/dataset/scenes
+    output_dir: data/bev_grid_generation/output
+    map_dir: data/map
+    map_name_template: "{map}_HD_map.npz"
+    lane_half_width_m: 1.75       # 可行驶区域：车道折线缓冲半宽
+    lane_line_width_m: 0.25       # 道路线栅格线宽
+    stop_line_width_m: 0.50       # 停止线（红绿灯状态绑定）栅格线宽
+    lane_type_to_layer:           # HD Map 原始 Type → 10 图层下标；未列出的线进入 lane_other
+      Center: 6
+      Broken: 7
+      "NONE": 8
+      Solid: 8
+      SolidSolid: 8
+    agent_semantics: {vehicle: 3, pedestrian: 4}  # 动态 Agent 语义 → 图层下标（ego 不在其中）
+    max_scenes: 0                 # 0=处理 scene_root 下全部场景
+    num_workers: 4                # 场景级并行进程数
+    lmdb_map_size_gb: 8           # 单场景 LMDB 增长上限
+    compress_level: 1             # zlib 压缩级别（作用于位压缩后的栅格）
+
+  # 世界模型数据集：直接加载离线生成的栅格并组装历史帧窗口
+  world_model_dataset:
+    root: data/bev_grid_generation/output  # 生成产物根（含 scene_XXXXXX/）
+    history_stride: 1                      # 窗口内相邻帧间隔（1=连续 10Hz）
+    scene_cache_size: 2                    # 每 worker 有界 LMDB 句柄缓存
 
   # 感知模型的单帧数据集：只读消费 carla_collector 落盘的场景，逐帧独立成样本（采用所有帧）
   dataset:
@@ -628,6 +689,71 @@ train:
     traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green
     stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
 
+  # 世界模型掩码补全预训练（三阶段：掩码补全 → VISReg → 掩码补全 + 小学习率 VISReg）
+  world_model:
+    seed: 20260830
+    batch_size: 8
+    grad_accum_steps: 4          # 有效 batch = batch_size × 本值
+    num_workers: 4
+    prefetch_factor: 2
+    in_order: false
+    shuffle: true
+    drop_last: true
+    pin_memory: true
+    persistent_workers: true
+    compile: false               # 密集残差含逐层 Python 循环，默认不编译
+    amp_dtype: bfloat16           # CUDA 混精；none / bfloat16（BF16 无需 GradScaler）
+    lr: 0.0001
+    weight_decay: 0.00001
+    adam_betas: [0.9, 0.95]
+    adam_eps: 1.0e-8
+    grad_clip_norm: 1.0
+    log_every: 20
+    ckpt_dir: train/ckpt
+    resume: true
+
+    # 掩码补全损失：被掩码区权重恒为 1，无掩码区按时空距离衰减并从 0 线性升温
+    unmasked_distance_scale_m: 4.0       # 无掩码 Token 到最近掩码 Token 的空间距离衰减尺度
+    unmasked_time_decay_per_frame: 0.15  # 每远离最新帧一帧的指数衰减率
+    unmasked_ramp_steps: 2000            # 无掩码区总权重由 0 线性升到 1 的优化步数
+
+    # VISReg（Variance-Invariance-Sketching Regularization），作用于编码器 GAP 全局特征
+    visreg:
+      tradeoff: 0.5              # λ：L = (1-λ)·视图不变性 + λ·(中心 + 尺度 + 形状)
+      slices: 64                 # K：切片 Wasserstein 随机投影方向数
+      center_weight: 1.0
+      scale_weight: 1.0
+      shape_weight: 1.0
+
+    # 梯度监控：捕获爆炸/消失/NaN 等异常
+    grad_monitor:
+      enabled: true
+      log_every: 20
+      explosion_norm: 100.0      # 全局梯度范数超过即告警
+      vanishing_norm: 1.0e-6     # 低于即告警
+      top_k: 3                   # 打印范数最大的 k 个参数
+
+    # 三阶段训练计划；阶段 3 由 Student 重新初始化 Teacher，VISReg 以小学习率保留
+    stages:
+      - name: mask_completion
+        epochs: 20
+        reconstruction_weight: 1.0
+        visreg_weight: 0.0
+        visreg_lr_scale: 1.0
+        reinit_teacher_from_student: false
+      - name: visreg
+        epochs: 10
+        reconstruction_weight: 0.0
+        visreg_weight: 1.0
+        visreg_lr_scale: 1.0
+        reinit_teacher_from_student: false
+      - name: mask_completion_visreg
+        epochs: 20
+        reconstruction_weight: 1.0
+        visreg_weight: 1.0
+        visreg_lr_scale: 0.1       # 相对主 lr 的缩放 → 阶段 3 的 VISReg 小学习率
+        reinit_teacher_from_student: true
+
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
 # ============================================================
@@ -672,6 +798,32 @@ driving_vis:
     unknown_color: [255, 255, 255] # 已知停止线但灯态无效时使用白色
     line_threshold: 0.5            # 预测停止线显示阈值；零初始化旧权重恰为 0.5，不会误显示
     overlay_alpha: 0.85            # 停止线叠加到轨迹 BEV 时的混合强度
+
+# ============================================================
+# bev_grid_vis —— 离线生成 BEV 栅格可视化（彩色合成图 + 10 图层分块 + 时序播放）
+# ============================================================
+bev_grid_vis:
+  root: data/bev_grid_generation/output
+  scene: ''                    # 指定场景目录名（如 scene_000000）；空=取 root 下第一个
+  frame: 0                     # 起始帧（历史窗口的最后一帧）
+  play_fps: 5.0
+  window_name: ByteDrive BEV 栅格可视化
+  cell_px: 2                   # 单格显示边长（256 格 → 512px 面板）
+  display_scale: 1.0
+  background_rgb: [18, 20, 24]
+  # BGR，顺序须与 model.world_model.grid.layer_names 一致
+  layer_colors:
+    - [60, 60, 255]            # traffic_light_red
+    - [60, 200, 255]           # traffic_light_yellow
+    - [60, 255, 120]           # traffic_light_green
+    - [255, 130, 40]           # vehicle
+    - [220, 80, 220]           # pedestrian
+    - [85, 85, 85]             # drivable
+    - [255, 220, 120]          # lane_centerline
+    - [200, 200, 200]          # lane_separator
+    - [255, 90, 90]            # lane_boundary
+    - [160, 160, 255]          # lane_other
+  save_dir: vis/bev_grid_vis/out
 
 # ============================================================
 # clone_loop —— CARLA 0.9.15 行为克隆闭环（Py37 仿真 + 主环境推理）

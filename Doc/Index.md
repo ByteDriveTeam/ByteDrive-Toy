@@ -10,6 +10,7 @@ This is the single navigation entry for project documentation and source files. 
 - [README.zh-CN.md](../README.zh-CN.md) — Complete Simplified Chinese project overview
 - [Doc/DevelopmentGuidelines.md](DevelopmentGuidelines.md) — English primary development rules for documentation, comments, config, validation, and code structure
 - [Doc/开发规范.md](开发规范.md) — Simplified Chinese development guidelines
+- [Doc/WorldModel.md](WorldModel.md) — Privileged BEV world-model data contract, architecture, VISReg accumulation, and PowerShell usage
 - [Doc/Index.md](Index.md) — English primary file and documentation index
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — Simplified Chinese file and documentation index
 - [site/index.html](../site/index.html) — English primary project website
@@ -29,8 +30,13 @@ This is the single navigation entry for project documentation and source files. 
 - [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — Scene-aware batch sampler that groups consecutive frames and shuffles batches to reduce random video seeks
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, fast lane classes, stop lines, and boundary supervision
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Two-frame, three-camera + LiDAR dataset with voxel statistics, temporal transforms, and multitask supervision
+- [data/bev_grid_generation/__init__.py](../data/bev_grid_generation/__init__.py) — Public offline privileged BEV grid-generation API
+- [data/bev_grid_generation/bev_grid_generation.py](../data/bev_grid_generation/bev_grid_generation.py) — Vectorized CARLA state rasterization and packed per-scene LMDB writing
+- [data/bev_grid_generation/run.py](../data/bev_grid_generation/run.py) — Offline 10-layer BEV grid generation CLI
+- [data/world_model_dataset/__init__.py](../data/world_model_dataset/__init__.py) — Public world-model grid dataset API
+- [data/world_model_dataset/world_model_dataset.py](../data/world_model_dataset/world_model_dataset.py) — Packed LMDB decoding, compact scene indexing, and five-frame loading
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — Public API for multi-frame semantic-LiDAR fusion and dynamic-object reconstruction
 - [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — Static fusion, object-level dynamic reconstruction, scene checkpoints, and batch processing
@@ -104,6 +110,8 @@ Python 3.12 collector:
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Two-frame three-camera + LiDAR model combining image geometry, voxel statistics, and aligned historical BEV
+- [model/world_model/__init__.py](../model/world_model/__init__.py) — Public masked BEV world-model API
+- [model/world_model/world_model.py](../model/world_model/world_model.py) — Dense-history QKNorm/3D-RoPE Encoder, EMA Teacher, and masked Predictor
 
 ## train/ — training and evaluation
 
@@ -112,6 +120,11 @@ Python 3.12 collector:
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
+- [train/run_world_model.py](../train/run_world_model.py) — Three-stage world-model training, resume, and checkpoint CLI
+- [train/visreg/visreg.py](../train/visreg/visreg.py) — FP32 invariance, center, scale, and sliced-Wasserstein regularization
+- [train/world_model_loss/world_model_loss.py](../train/world_model_loss/world_model_loss.py) — Four-layer Teacher MSE with masked and warmed spatiotemporal visible weights
+- [train/gradient_monitor/gradient_monitor.py](../train/gradient_monitor/gradient_monitor.py) — Global and top-parameter gradient health monitoring
+- [train/world_model_loop/world_model_loop.py](../train/world_model_loop/world_model_loop.py) — Reconstruction accumulation and exact two-pass VISReg gradient caching
 
 ## clone_loop/ — behavior-cloning closed loop
 
@@ -150,6 +163,10 @@ Python 3.7 simulation worker:
 - [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — CARLA world, traffic, ego, route, and stepwise closed-loop lifecycle
 
 ## vis/ — visualization and log rendering
+
+- [vis/bev_grid_vis/__init__.py](../vis/bev_grid_vis/__init__.py) — Public offline BEV grid visualization API
+- [vis/bev_grid_vis/bev_grid_vis.py](../vis/bev_grid_vis/bev_grid_vis.py) — Streaming LMDB reader and composite/per-layer BEV renderer
+- [vis/bev_grid_vis/run.py](../vis/bev_grid_vis/run.py) — Offline BEV grid save and playback CLI
 
 ### Reconstructed mesh
 

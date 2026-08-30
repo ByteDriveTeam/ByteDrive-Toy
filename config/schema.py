@@ -601,12 +601,55 @@ class PhysicsCfg:
 
 
 @dataclass
+class WorldModelGridCfg:
+    """BEV 栅格几何与图层契约：世界模型输入栅格的唯一来源（数据侧栅格化与模型侧共用）。"""
+    front_m: float
+    rear_m: float
+    left_m: float
+    right_m: float
+    cell_size_m: float
+    layer_names: List[str]
+
+
+@dataclass
+class WorldModelEncoderCfg:
+    dim: int
+    num_layers: int
+    num_heads: int
+    mlp_ratio: int
+    rope_theta: float
+    rope_axis_dims: List[int]
+
+
+@dataclass
+class WorldModelPredictorCfg:
+    dim: int
+    num_layers: int
+    num_heads: int
+    mlp_ratio: int
+    teacher_layer_indices: List[int]
+
+
+@dataclass
+class WorldModelCfg:
+    grid: WorldModelGridCfg
+    num_frames: int
+    frame_rate_hz: float
+    patch_size: int
+    encoder: WorldModelEncoderCfg
+    predictor: WorldModelPredictorCfg
+    mask_ratio: float
+    ema_rate: float
+
+
+@dataclass
 class ModelCfg:
     dinov3_backbone: DinoV3BackboneCfg
     feature_trunk: FeatureTrunkCfg
     heads: HeadsCfg
     physics: PhysicsCfg
     driving: DrivingCfg
+    world_model: WorldModelCfg
 
 
 @dataclass
@@ -667,10 +710,36 @@ class DrivingDatasetCfg:
 
 
 @dataclass
+class BevGridGenerationCfg:
+    scene_root: str
+    output_dir: str
+    map_dir: str
+    map_name_template: str
+    lane_half_width_m: float
+    lane_line_width_m: float
+    stop_line_width_m: float
+    lane_type_to_layer: Dict[str, int]
+    agent_semantics: Dict[str, int]
+    max_scenes: int
+    num_workers: int
+    lmdb_map_size_gb: int
+    compress_level: int
+
+
+@dataclass
+class WorldModelDatasetCfg:
+    root: str
+    history_stride: int
+    scene_cache_size: int
+
+
+@dataclass
 class DataCfg:
     scene_cache_size: int
     dataset: DatasetCfg
     driving: DrivingDatasetCfg
+    bev_grid_generation: BevGridGenerationCfg
+    world_model_dataset: WorldModelDatasetCfg
 
 
 @dataclass
@@ -729,6 +798,80 @@ class TrainCfg:
     perception_lr_scale: float     # 驾驶训练时感知子模块（融合+trunk+双头）相对 lr 的缩放（DINOv3 仍冻结）
     loss_weights: LossWeightsCfg
     driving_loss_weights: DrivingLossWeightsCfg
+    world_model: "WorldModelTrainCfg"
+
+
+@dataclass
+class VisRegCfg:
+    """VISReg 正则：中心/尺度/切片 Wasserstein 形状 + 视图不变性的平衡系数。"""
+    tradeoff: float
+    slices: int
+    center_weight: float
+    scale_weight: float
+    shape_weight: float
+
+
+@dataclass
+class GradMonitorCfg:
+    enabled: bool
+    log_every: int
+    explosion_norm: float
+    vanishing_norm: float
+    top_k: int
+
+
+@dataclass
+class WorldModelStageCfg:
+    name: str
+    epochs: int
+    reconstruction_weight: float
+    visreg_weight: float
+    visreg_lr_scale: float           # VISReg 项相对主 lr 的步长缩放（阶段 3 用小学习率）
+    reinit_teacher_from_student: bool
+
+
+@dataclass
+class WorldModelTrainCfg:
+    seed: int
+    batch_size: int
+    grad_accum_steps: int
+    num_workers: int
+    prefetch_factor: int
+    in_order: bool
+    shuffle: bool
+    drop_last: bool
+    pin_memory: bool
+    persistent_workers: bool
+    compile: bool
+    amp_dtype: str
+    lr: float
+    weight_decay: float
+    adam_betas: List[float]
+    adam_eps: float
+    grad_clip_norm: float
+    log_every: int
+    ckpt_dir: str
+    resume: bool
+    unmasked_distance_scale_m: float
+    unmasked_time_decay_per_frame: float
+    unmasked_ramp_steps: int
+    visreg: VisRegCfg
+    grad_monitor: GradMonitorCfg
+    stages: List[WorldModelStageCfg]
+
+
+@dataclass
+class BevGridVisCfg:
+    root: str
+    scene: str
+    frame: int
+    play_fps: float
+    window_name: str
+    cell_px: int
+    display_scale: float
+    background_rgb: List[int]
+    layer_colors: List[List[int]]
+    save_dir: str
 
 
 @dataclass
@@ -944,6 +1087,7 @@ class Config:
     train: TrainCfg
     pred_vis: PredVisCfg
     driving_vis: DrivingVisCfg
+    bev_grid_vis: BevGridVisCfg
     clone_loop: CloneLoopCfg
     trajectory_vocabulary: TrajectoryVocabularyCfg
 
@@ -986,6 +1130,14 @@ def build_config(raw):
 # 默认设计约定的视角集合与分辨率/FOV，用于「与 Design 默认一致性」软校验
 EXPECTED_RIG_NAMES = {"front", "back", "left", "right", "front_left", "front_right"}
 DRIVING_CAMERA_ORDER = ["front", "front_left", "front_right"]
+
+# 世界模型输入栅格的图层总数：红绿灯 3 + 车辆/行人 2 + 可行驶 1 + 车道线 4
+WORLD_MODEL_LAYER_NAMES = (
+    "traffic_light_red", "traffic_light_yellow", "traffic_light_green",
+    "vehicle", "pedestrian", "drivable",
+    "lane_centerline", "lane_separator", "lane_boundary", "lane_other",
+)
+WORLD_MODEL_LAYER_COUNT = len(WORLD_MODEL_LAYER_NAMES)
 
 
 def validate_config(cfg):
@@ -1101,6 +1253,8 @@ def validate_config(cfg):
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
+    _validate_world_model(cfg)
+    _validate_bev_grid_vis(cfg.bev_grid_vis, cfg.model.world_model.grid)
     _validate_clone_loop(
         cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar,
         cc.simulation, cc.collection)
@@ -1702,6 +1856,140 @@ def _validate_lidar_fusion(dv):
 
 # data_vis 着色支持的 OpenCV colormap 名（须与 vis/data_vis/draw.py 的映射表一致）
 _DATA_VIS_COLORMAPS = {"turbo", "jet", "magma", "viridis", "plasma", "inferno"}
+
+
+def _validate_world_model(cfg):
+    """校验对象: cfg.model.world_model / cfg.data / cfg.train.world_model —— 世界模型全链路一致性。"""
+    wm = cfg.model.world_model
+    grid = wm.grid
+    # 校验对象: model.world_model.grid —— 量程须被格宽整除、图层名唯一
+    assert grid.cell_size_m > 0, "model.world_model.grid.cell_size_m 必须 > 0"
+    for name, value in (("front_m", grid.front_m), ("rear_m", grid.rear_m),
+                        ("left_m", grid.left_m), ("right_m", grid.right_m)):
+        assert value > 0, "model.world_model.grid.{} 必须 > 0".format(name)
+        assert _is_positive_multiple(value, grid.cell_size_m), \
+            "model.world_model.grid.{} 必须能被 cell_size_m 整除".format(name)
+    assert tuple(grid.layer_names) == WORLD_MODEL_LAYER_NAMES, \
+        "model.world_model.grid.layer_names 须严格按 3 灯态/车辆/行人/可行驶/4 车道线排序"
+
+    # 校验对象: model.world_model —— 帧数/帧率/下采样与 Token 网格
+    assert wm.num_frames > 0, "model.world_model.num_frames 必须 > 0"
+    assert wm.frame_rate_hz > 0, "model.world_model.frame_rate_hz 必须 > 0"
+    assert wm.patch_size > 0, "model.world_model.patch_size 必须 > 0"
+    grid_height = int(round((grid.front_m + grid.rear_m) / grid.cell_size_m))
+    grid_width = int(round((grid.left_m + grid.right_m) / grid.cell_size_m))
+    assert grid_height % wm.patch_size == 0 and grid_width % wm.patch_size == 0, \
+        "model.world_model.patch_size 必须整除栅格边长 {}×{}".format(grid_height, grid_width)
+
+    # 校验对象: model.world_model.encoder / predictor —— 维度、头数、FFN 膨胀率与 RoPE 通道。
+    # RoPE 配置（theta/axis_dims）只声明在 encoder：两级 Token 是同一套时空网格且每头维数一致，
+    # 重复声明会制造两份必须同步的默认值，故 predictor 直接复用。
+    assert wm.encoder.rope_theta > 0, "model.world_model.encoder.rope_theta 必须 > 0"
+    assert len(wm.encoder.rope_axis_dims) == 3 and all(
+        isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 and dim % 2 == 0
+        for dim in wm.encoder.rope_axis_dims), \
+        "model.world_model.encoder.rope_axis_dims 须为 3 个正偶数"
+    rope_channels = sum(wm.encoder.rope_axis_dims)
+    for name, stage, teacher_layers in (("encoder", wm.encoder, None),
+                                        ("predictor", wm.predictor,
+                                         wm.predictor.teacher_layer_indices)):
+        assert stage.dim > 0 and stage.num_layers > 0 and stage.num_heads > 0, \
+            "model.world_model.{}.dim/num_layers/num_heads 必须 > 0".format(name)
+        assert stage.dim % stage.num_heads == 0, \
+            "model.world_model.{}.dim 必须能被 num_heads 整除".format(name)
+        assert stage.mlp_ratio >= 2 and stage.mlp_ratio % 2 == 0, \
+            "model.world_model.{}.mlp_ratio 必须为 >=2 的偶数（SwiGLU 需二等分）".format(name)
+        head_dim = stage.dim // stage.num_heads
+        assert rope_channels <= head_dim, \
+            "model.world_model.{} 的每头维数 {} 不足以容纳 {} 路 rotary 通道".format(
+                name, head_dim, rope_channels)
+        if teacher_layers is not None:
+            # 校验对象: predictor.teacher_layer_indices —— 须为 4 个升序且落在骨干层数内
+            assert len(teacher_layers) == 4 and teacher_layers == sorted(set(teacher_layers)), \
+                "model.world_model.predictor.teacher_layer_indices 须为 4 个升序不重复层号"
+            assert all(1 <= index <= wm.encoder.num_layers for index in teacher_layers), \
+                "teacher_layer_indices 须落在 [1, encoder.num_layers] 内"
+
+    # 校验对象: model.world_model.mask_ratio / ema_rate
+    assert 0.0 < wm.mask_ratio < 1.0, "model.world_model.mask_ratio 必须在 (0,1)"
+    assert 0.0 < wm.ema_rate < 1.0, "model.world_model.ema_rate 必须在 (0,1)"
+
+    # 校验对象: data.bev_grid_generation —— 线宽/半宽为正，Agent 语义图层下标在界内
+    gen = cfg.data.bev_grid_generation
+    assert gen.lane_half_width_m > 0 and gen.lane_line_width_m > 0 \
+        and gen.stop_line_width_m > 0, \
+        "data.bev_grid_generation 的车道半宽/道路线宽/停止线宽必须 > 0"
+    assert gen.max_scenes >= 0 and gen.num_workers >= 1 and gen.lmdb_map_size_gb > 0, \
+        "data.bev_grid_generation 的场景上限/并行数/LMDB 容量取值非法"
+    assert 0 <= gen.compress_level <= 9, "data.bev_grid_generation.compress_level 须在 [0,9]"
+    assert gen.agent_semantics == {"vehicle": 3, "pedestrian": 4}, \
+        "data.bev_grid_generation.agent_semantics 必须为 vehicle:3 / pedestrian:4"
+    assert gen.lane_type_to_layer and all(
+        isinstance(index, int) and 6 <= index < WORLD_MODEL_LAYER_COUNT
+        for index in gen.lane_type_to_layer.values()), \
+        "data.bev_grid_generation.lane_type_to_layer 只能指向 4 个车道线图层 [6,10)"
+    assert "{map}" in gen.map_name_template, \
+        "data.bev_grid_generation.map_name_template 必须含 {map} 占位"
+    assert cfg.data.world_model_dataset.history_stride > 0, \
+        "data.world_model_dataset.history_stride 必须 > 0"
+    assert cfg.data.world_model_dataset.scene_cache_size > 0, \
+        "data.world_model_dataset.scene_cache_size 必须 > 0"
+
+    # 校验对象: train.world_model —— 优化/累积/损失权重与三阶段计划
+    tw = cfg.train.world_model
+    assert isinstance(tw.seed, int) and not isinstance(tw.seed, bool), \
+        "train.world_model.seed 必须为整数"
+    assert tw.batch_size > 0 and tw.grad_accum_steps > 0 and tw.num_workers >= 0, \
+        "train.world_model 的 batch_size/grad_accum_steps/num_workers 取值非法"
+    assert tw.amp_dtype in ("none", "bfloat16"), \
+        "train.world_model.amp_dtype 仅支持 none/bfloat16"
+    assert tw.lr > 0 and tw.weight_decay >= 0 and tw.grad_clip_norm >= 0, \
+        "train.world_model 的 lr/weight_decay/grad_clip_norm 取值非法"
+    assert len(tw.adam_betas) == 2 and 0 <= tw.adam_betas[0] < 1 \
+        and 0 <= tw.adam_betas[1] < 1 and tw.adam_eps > 0, \
+        "train.world_model.adam_betas 须为两个 [0,1) 数且 adam_eps > 0"
+    assert tw.unmasked_distance_scale_m > 0 and tw.unmasked_time_decay_per_frame >= 0 \
+        and tw.unmasked_ramp_steps > 0, \
+        "train.world_model 的无掩码区距离尺度/时间衰减/升温步数取值非法"
+    vr = tw.visreg
+    assert 0.0 <= vr.tradeoff <= 1.0, "train.world_model.visreg.tradeoff 必须在 [0,1]"
+    assert vr.slices > 0, "train.world_model.visreg.slices 必须 > 0"
+    assert vr.center_weight >= 0 and vr.scale_weight >= 0 and vr.shape_weight >= 0, \
+        "train.world_model.visreg 的三项权重必须 >= 0"
+    gm = tw.grad_monitor
+    assert gm.log_every >= 0 and gm.top_k >= 0, \
+        "train.world_model.grad_monitor 的 log_every/top_k 必须 >= 0"
+    assert 0 <= gm.vanishing_norm < gm.explosion_norm, \
+        "train.world_model.grad_monitor 需满足 0 <= vanishing_norm < explosion_norm"
+    assert tw.stages, "train.world_model.stages 至少需要一个阶段"
+    names = [stage.name for stage in tw.stages]
+    assert len(set(names)) == len(names), "train.world_model.stages 的阶段名不能重复"
+    for stage in tw.stages:
+        assert stage.epochs > 0, "阶段 {} 的 epochs 必须 > 0".format(stage.name)
+        assert stage.reconstruction_weight >= 0 and stage.visreg_weight >= 0, \
+            "阶段 {} 的损失权重必须 >= 0".format(stage.name)
+        assert stage.visreg_lr_scale >= 0, "阶段 {} 的 visreg_lr_scale 必须 >= 0".format(stage.name)
+        if stage.visreg_weight > 0:
+            assert stage.visreg_lr_scale > 0, \
+                "阶段 {} 启用 VISReg 时 visreg_lr_scale 必须 > 0".format(stage.name)
+
+
+def _validate_bev_grid_vis(v, grid):
+    """校验对象: cfg.bev_grid_vis —— 栅格可视化的显示参数与图层配色。"""
+    assert v.frame >= 0, "bev_grid_vis.frame 必须 >= 0"
+    assert v.play_fps > 0, "bev_grid_vis.play_fps 必须 > 0"
+    assert v.cell_px >= 1, "bev_grid_vis.cell_px 必须 >= 1"
+    assert v.display_scale > 0, "bev_grid_vis.display_scale 必须 > 0"
+    assert _is_rgb(v.background_rgb), "bev_grid_vis.background_rgb 须是 0..255 的 RGB 三元组"
+    assert len(v.layer_colors) == len(grid.layer_names) \
+        and all(_is_bgr(color) for color in v.layer_colors), \
+        "bev_grid_vis.layer_colors 须与栅格图层等长，且每项为合法 BGR 颜色"
+
+
+def _is_positive_multiple(value: float, step: float) -> bool:
+    """是否为 step 的正整数倍（容差 1e-6，吸收浮点误差）。"""
+    quotient = value / step
+    return abs(quotient - round(quotient)) < 1e-6 and round(quotient) > 0
 
 
 def _validate_data_vis(dv):

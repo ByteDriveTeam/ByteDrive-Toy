@@ -9,6 +9,11 @@
         .drivable_bev(ego_pose6, bev, lane_half_width_m) -> (H,W) float32   # 1=地图可行驶
         .lane_map_bev(ego_pose6, bev, line_width_m, type_to_class, unknown_class)
             -> (class_map[H,W], direction[2,H,W])
+        .lane_classes_bev(ego_pose6, bev, line_width_m, type_to_class, unknown_class)
+            -> class_map[H,W]                                           # 仅类别的快速路径
+        .drivable_lane_classes_bev(ego_pose6, bev, lane_half_width_m, line_width_m,
+                                   type_to_class, unknown_class)
+            -> (drivable[H,W], class_map[H,W])                          # 离线联合快速路径
         .gt_centerline_distance_bev(ego_pose6, gt_xy, gt_valid, bev, centerline_types,
                                     match_radius_m)
             -> (distance[H,W], valid[T])
@@ -88,18 +93,18 @@ class HdMap:
     def drivable_bev(self, ego_pose6, bev: BevParams, lane_half_width_m: float) -> np.ndarray:
         """按 ego 世界位姿栅格化 BEV 可行驶掩码 `(H, W)`（1=可行驶）。"""
         mask = np.zeros((bev.height, bev.width), dtype=np.uint8)
-        near = self._nearby_indices(ego_pose6, bev)
+        near = self._nearby_indices(ego_pose6, bev, margin_m=lane_half_width_m)
         if near.size == 0:
             return mask.astype(np.float32)
 
         w2e = world_to_ego(ego_pose6)
         px_per_m = bev.width / (bev.y_max - bev.y_min)               # 方形 BEV：x/y 每米像素数一致
         thickness = max(int(round(2.0 * lane_half_width_m * px_per_m)), 1)
-        for i in near:
-            ego_xyz = transform_points(self._polylines[i], w2e)     # 世界→ego
-            rows, cols = ego_xy_to_pixel(ego_xyz[:, :2], bev)
-            pts = np.stack((cols, rows), axis=1).round().astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(mask, [pts], isClosed=False, color=1, thickness=thickness)
+        curves = [
+            _polyline_pixels(transform_points(self._polylines[index], w2e)[:, :2], bev)
+            for index in near
+        ]
+        cv2.polylines(mask, curves, isClosed=False, color=1, thickness=thickness)
         return mask.astype(np.float32)
 
     def lane_map_bev(self, ego_pose6, bev: BevParams, line_width_m: float,
@@ -107,7 +112,7 @@ class HdMap:
         """按 ego 位姿生成道路线类别 `(H,W)` 与有向单位切向量 `(2,H,W)`。"""
         class_map = np.zeros((bev.height, bev.width), dtype=np.int64)
         direction = np.zeros((2, bev.height, bev.width), dtype=np.float32)
-        near = self._nearby_indices(ego_pose6, bev)
+        near = self._nearby_indices(ego_pose6, bev, margin_m=0.5 * line_width_m)
         if near.size == 0:
             return class_map, direction
 
@@ -124,6 +129,58 @@ class HdMap:
                 class_map, direction, rows, cols, ego_direction,
                 type_to_class.get(self._line_types[index], unknown_class), thickness)
         return class_map, direction
+
+    def lane_classes_bev(self, ego_pose6, bev: BevParams, line_width_m: float,
+                         type_to_class, unknown_class: int):
+        """只生成道路线类别图；离线二值栅格不需要方向时跳过方向滤波和额外分配。"""
+        class_map = np.zeros((bev.height, bev.width), dtype=np.uint8)
+        near = self._nearby_indices(ego_pose6, bev, margin_m=0.5 * line_width_m)
+        if near.size == 0:
+            return class_map
+        w2e = world_to_ego(ego_pose6)
+        px_per_m = bev.width / (bev.y_max - bev.y_min)
+        thickness = max(int(round(line_width_m * px_per_m)), 1)
+        class_ids = np.array(
+            [type_to_class.get(self._line_types[index], unknown_class) for index in near],
+            dtype=np.uint8)
+        curves = [
+            _polyline_pixels(transform_points(self._polylines[index], w2e)[:, :2], bev)
+            for index in near
+        ]
+        for class_id in np.unique(class_ids):
+            selected = [curve for curve, value in zip(curves, class_ids) if value == class_id]
+            cv2.polylines(class_map, selected, isClosed=False, color=int(class_id),
+                          thickness=thickness)
+        return class_map
+
+    def drivable_lane_classes_bev(self, ego_pose6, bev: BevParams, lane_half_width_m: float,
+                                  line_width_m: float, type_to_class, unknown_class: int):
+        """联合生成离线可行驶区和车道类别；同一折线只查询、变换一次并批量绘制。"""
+        drivable = np.zeros((bev.height, bev.width), dtype=np.uint8)
+        class_map = np.zeros((bev.height, bev.width), dtype=np.uint8)
+        margin = max(float(lane_half_width_m), 0.5 * float(line_width_m))
+        near = self._nearby_indices(ego_pose6, bev, margin_m=margin)
+        if near.size == 0:
+            return drivable, class_map
+
+        w2e = world_to_ego(ego_pose6)
+        curves = [
+            _polyline_pixels(transform_points(self._polylines[index], w2e)[:, :2], bev)
+            for index in near
+        ]
+        px_per_m = bev.width / (bev.y_max - bev.y_min)
+        road_thickness = max(int(round(2.0 * lane_half_width_m * px_per_m)), 1)
+        line_thickness = max(int(round(line_width_m * px_per_m)), 1)
+        cv2.polylines(drivable, curves, isClosed=False, color=1, thickness=road_thickness)
+
+        class_ids = np.array(
+            [type_to_class.get(self._line_types[index], unknown_class) for index in near],
+            dtype=np.uint8)
+        for class_id in np.unique(class_ids):
+            selected = [curve for curve, value in zip(curves, class_ids) if value == class_id]
+            cv2.polylines(class_map, selected, isClosed=False, color=int(class_id),
+                          thickness=line_thickness)
+        return drivable, class_map
 
     def gt_centerline_distance_bev(self, ego_pose6, gt_xy, gt_valid, bev: BevParams,
                                    centerline_types, match_radius_m: float):
@@ -200,10 +257,13 @@ class HdMap:
         owners = np.unique(self._segment_owners[segment_ids[intersects]])
         return owners[np.fromiter((owner in allowed for owner in owners), dtype=bool)]
 
-    def _nearby_indices(self, ego_pose6, bev, line_types=None):
+    def _nearby_indices(self, ego_pose6, bev, line_types=None, margin_m=0.0):
         """用折线外接圆筛出与当前 BEV 相交的地图折线索引。"""
         ego_xy = np.asarray(ego_pose6[:2], dtype=np.float64)
-        reach = math.hypot(bev.x_max - bev.x_min, bev.y_max - bev.y_min)
+        # ego 原点到 BEV 最远角点，而非整幅宽高的对角线；额外膨胀保证粗线边缘不漏选。
+        reach = math.hypot(
+            max(abs(bev.x_min), abs(bev.x_max)),
+            max(abs(bev.y_min), abs(bev.y_max))) + float(margin_m)
         nearby = np.linalg.norm(self._centers - ego_xy, axis=1) - self._radii < reach
         if line_types is not None:
             nearby &= np.isin(self._line_types, tuple(line_types))
