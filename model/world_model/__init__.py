@@ -6,9 +6,8 @@
 对外接口:
     - WorldModel(cfg) -> nn.Module
     - sample_consistent_mask(batch_size, cfg, device, generator=None) -> Tensor
-    - sample_mask_pair(batch_size, cfg, device, generator=None) -> tuple[Tensor,Tensor]
 """
 
-from model.world_model.world_model import WorldModel, sample_consistent_mask, sample_mask_pair
+from model.world_model.world_model import WorldModel, sample_consistent_mask
 
-__all__ = ["WorldModel", "sample_consistent_mask", "sample_mask_pair"]
+__all__ = ["WorldModel", "sample_consistent_mask"]

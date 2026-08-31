@@ -10,7 +10,6 @@
 对外接口:
     - WorldModel(cfg) -> nn.Module
     - sample_consistent_mask(batch_size, cfg, device, generator=None) -> Tensor
-    - sample_mask_pair(batch_size, cfg, device, generator=None) -> tuple[Tensor,Tensor]
 说明: 每个 Transformer Block 含两个独立密集混合子层；SDPA 与 FFN 各自学习一列历史权重，
       Softmax 后先融合全部历史输出，再执行 Pre-Norm 残差分支。Student 物理删除 75% 空间位置并
       沿 5 帧一致广播；Teacher 保留全 Token。Predictor 仅在降到 256 维后补 MaskToken。
@@ -31,7 +30,7 @@ from model.swiglu import SwiGLU
 from model.world_model.checks.world_model_checks import check_grid_input, check_spatial_mask
 
 
-__all__ = ["WorldModel", "sample_consistent_mask", "sample_mask_pair"]
+__all__ = ["WorldModel", "sample_consistent_mask"]
 
 
 def sample_consistent_mask(batch_size, cfg, device, generator=None) -> torch.Tensor:
@@ -45,16 +44,6 @@ def sample_consistent_mask(batch_size, cfg, device, generator=None) -> torch.Ten
     order = torch.rand(batch_size, patch_count, device=device, generator=generator).argsort(dim=1)
     mask = torch.zeros(batch_size, patch_count, dtype=torch.bool, device=device)
     return mask.scatter_(1, order[:, :masked_count], True)
-
-
-def sample_mask_pair(batch_size, cfg, device, generator=None):
-    """为同一 batch 生成两个掩码不同的时序一致视图。"""
-    first = sample_consistent_mask(batch_size, cfg, device, generator)
-    second = sample_consistent_mask(batch_size, cfg, device, generator)
-    equal = torch.all(first == second, dim=1)
-    if bool(equal.any()):
-        second[equal] = second[equal].roll(1, dims=1)
-    return first, second
 
 
 class WorldModel(nn.Module):
@@ -112,12 +101,6 @@ class WorldModel(nn.Module):
         torch._foreach_add_(teacher_params, student_params, alpha=self._ema_rate)
         for teacher_buffer, student_buffer in zip(self.teacher.buffers(), self.student.buffers()):
             teacher_buffer.copy_(student_buffer)
-
-    @torch.no_grad()
-    def reset_teacher(self) -> None:
-        """用当前 Student 精确重置 Teacher，供第三阶段初始化。"""
-        self.teacher.load_state_dict(self.student.state_dict())
-        self.teacher.eval()
 
     def train(self, mode: bool = True):
         super().train(mode)

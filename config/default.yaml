@@ -689,9 +689,10 @@ train:
     traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green
     stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
 
-  # 世界模型掩码补全预训练（三阶段：掩码补全 → VISReg → 掩码补全 + 小学习率 VISReg）
+  # 世界模型单阶段联合预训练（掩码补全 + Student GAP VISReg）
   world_model:
     seed: 20260830
+    epochs: 50                  # 保留原三阶段合计的总训练预算
     batch_size: 8
     grad_accum_steps: 4          # 有效 batch = batch_size × 本值
     num_workers: 4
@@ -717,9 +718,12 @@ train:
     unmasked_time_decay_per_frame: 0.15  # 每远离最新帧一帧的指数衰减率
     unmasked_ramp_steps: 2000            # 无掩码区总权重由 0 线性升到 1 的优化步数
 
-    # VISReg（Variance-Invariance-Sketching Regularization），作用于编码器 GAP 全局特征
+    # 联合目标：重建使 Predictor 对齐 EMA Teacher，VISReg 解耦 Student 末端 GAP
+    reconstruction_weight: 1.0
+    visreg_weight: 1.0
+
+    # VISReg 只保留分布正则；重建目标已提供不变性约束
     visreg:
-      tradeoff: 0.5              # λ：L = (1-λ)·视图不变性 + λ·(中心 + 尺度 + 形状)
       slices: 64                 # K：切片 Wasserstein 随机投影方向数
       center_weight: 1.0
       scale_weight: 1.0
@@ -732,27 +736,6 @@ train:
       explosion_norm: 100.0      # 全局梯度范数超过即告警
       vanishing_norm: 1.0e-6     # 低于即告警
       top_k: 3                   # 打印范数最大的 k 个参数
-
-    # 三阶段训练计划；阶段 3 由 Student 重新初始化 Teacher，VISReg 以小学习率保留
-    stages:
-      - name: mask_completion
-        epochs: 20
-        reconstruction_weight: 1.0
-        visreg_weight: 0.0
-        visreg_lr_scale: 1.0
-        reinit_teacher_from_student: false
-      - name: visreg
-        epochs: 10
-        reconstruction_weight: 0.0
-        visreg_weight: 1.0
-        visreg_lr_scale: 1.0
-        reinit_teacher_from_student: false
-      - name: mask_completion_visreg
-        epochs: 20
-        reconstruction_weight: 1.0
-        visreg_weight: 1.0
-        visreg_lr_scale: 0.1       # 相对主 lr 的缩放 → 阶段 3 的 VISReg 小学习率
-        reinit_teacher_from_student: true
 
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）

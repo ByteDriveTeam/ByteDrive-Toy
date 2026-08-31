@@ -803,8 +803,7 @@ class TrainCfg:
 
 @dataclass
 class VisRegCfg:
-    """VISReg 正则：中心/尺度/切片 Wasserstein 形状 + 视图不变性的平衡系数。"""
-    tradeoff: float
+    """VISReg 正则：Student GAP 的中心、尺度与切片 Wasserstein 形状。"""
     slices: int
     center_weight: float
     scale_weight: float
@@ -821,18 +820,9 @@ class GradMonitorCfg:
 
 
 @dataclass
-class WorldModelStageCfg:
-    name: str
-    epochs: int
-    reconstruction_weight: float
-    visreg_weight: float
-    visreg_lr_scale: float           # VISReg 项相对主 lr 的步长缩放（阶段 3 用小学习率）
-    reinit_teacher_from_student: bool
-
-
-@dataclass
 class WorldModelTrainCfg:
     seed: int
+    epochs: int
     batch_size: int
     grad_accum_steps: int
     num_workers: int
@@ -855,9 +845,10 @@ class WorldModelTrainCfg:
     unmasked_distance_scale_m: float
     unmasked_time_decay_per_frame: float
     unmasked_ramp_steps: int
+    reconstruction_weight: float
+    visreg_weight: float
     visreg: VisRegCfg
     grad_monitor: GradMonitorCfg
-    stages: List[WorldModelStageCfg]
 
 
 @dataclass
@@ -1935,12 +1926,15 @@ def _validate_world_model(cfg):
     assert cfg.data.world_model_dataset.scene_cache_size > 0, \
         "data.world_model_dataset.scene_cache_size 必须 > 0"
 
-    # 校验对象: train.world_model —— 优化/累积/损失权重与三阶段计划
+    # 校验对象: train.world_model —— 单阶段联合训练的优化/累积/损失权重
     tw = cfg.train.world_model
     assert isinstance(tw.seed, int) and not isinstance(tw.seed, bool), \
         "train.world_model.seed 必须为整数"
+    assert tw.epochs > 0, "train.world_model.epochs 必须 > 0"
     assert tw.batch_size > 0 and tw.grad_accum_steps > 0 and tw.num_workers >= 0, \
         "train.world_model 的 batch_size/grad_accum_steps/num_workers 取值非法"
+    assert tw.batch_size * tw.grad_accum_steps >= 2, \
+        "train.world_model 的 batch_size*grad_accum_steps 必须 >= 2，以计算 VISReg batch 统计"
     assert tw.amp_dtype in ("none", "bfloat16"), \
         "train.world_model.amp_dtype 仅支持 none/bfloat16"
     assert tw.lr > 0 and tw.weight_decay >= 0 and tw.grad_clip_norm >= 0, \
@@ -1951,8 +1945,9 @@ def _validate_world_model(cfg):
     assert tw.unmasked_distance_scale_m > 0 and tw.unmasked_time_decay_per_frame >= 0 \
         and tw.unmasked_ramp_steps > 0, \
         "train.world_model 的无掩码区距离尺度/时间衰减/升温步数取值非法"
+    assert tw.reconstruction_weight > 0 and tw.visreg_weight > 0, \
+        "train.world_model 的 reconstruction_weight/visreg_weight 必须 > 0"
     vr = tw.visreg
-    assert 0.0 <= vr.tradeoff <= 1.0, "train.world_model.visreg.tradeoff 必须在 [0,1]"
     assert vr.slices > 0, "train.world_model.visreg.slices 必须 > 0"
     assert vr.center_weight >= 0 and vr.scale_weight >= 0 and vr.shape_weight >= 0, \
         "train.world_model.visreg 的三项权重必须 >= 0"
@@ -1961,17 +1956,6 @@ def _validate_world_model(cfg):
         "train.world_model.grad_monitor 的 log_every/top_k 必须 >= 0"
     assert 0 <= gm.vanishing_norm < gm.explosion_norm, \
         "train.world_model.grad_monitor 需满足 0 <= vanishing_norm < explosion_norm"
-    assert tw.stages, "train.world_model.stages 至少需要一个阶段"
-    names = [stage.name for stage in tw.stages]
-    assert len(set(names)) == len(names), "train.world_model.stages 的阶段名不能重复"
-    for stage in tw.stages:
-        assert stage.epochs > 0, "阶段 {} 的 epochs 必须 > 0".format(stage.name)
-        assert stage.reconstruction_weight >= 0 and stage.visreg_weight >= 0, \
-            "阶段 {} 的损失权重必须 >= 0".format(stage.name)
-        assert stage.visreg_lr_scale >= 0, "阶段 {} 的 visreg_lr_scale 必须 >= 0".format(stage.name)
-        if stage.visreg_weight > 0:
-            assert stage.visreg_lr_scale > 0, \
-                "阶段 {} 启用 VISReg 时 visreg_lr_scale 必须 > 0".format(stage.name)
 
 
 def _validate_bev_grid_vis(v, grid):

@@ -120,11 +120,11 @@ Python 3.12 collector:
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
-- [train/run_world_model.py](../train/run_world_model.py) — Three-stage world-model training, resume, and checkpoint CLI
-- [train/visreg/visreg.py](../train/visreg/visreg.py) — FP32 invariance, center, scale, and sliced-Wasserstein regularization
+- [train/run_world_model.py](../train/run_world_model.py) — Single-stage joint world-model training, resume, and checkpoint CLI
+- [train/visreg/visreg.py](../train/visreg/visreg.py) — FP32 center, scale, and sliced-Wasserstein regularization on Student GAP features
 - [train/world_model_loss/world_model_loss.py](../train/world_model_loss/world_model_loss.py) — Four-layer Teacher MSE with masked and warmed spatiotemporal visible weights
 - [train/gradient_monitor/gradient_monitor.py](../train/gradient_monitor/gradient_monitor.py) — Global and top-parameter gradient health monitoring
-- [train/world_model_loop/world_model_loop.py](../train/world_model_loop/world_model_loop.py) — Reconstruction accumulation and exact two-pass VISReg gradient caching
+- [train/world_model_loop/world_model_loop.py](../train/world_model_loop/world_model_loop.py) — Joint reconstruction accumulation and exact effective-batch VISReg gradient caching
 
 ## clone_loop/ — behavior-cloning closed loop
 

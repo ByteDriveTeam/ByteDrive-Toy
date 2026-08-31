@@ -1,4 +1,4 @@
-"""世界模型三阶段训练 CLI：数据装配、AdamW、断点续训、阶段切换与检查点保存。
+"""世界模型单阶段联合训练 CLI：数据装配、AdamW、断点续训与检查点保存。
 
 模块: train/run_world_model.py
 依赖: argparse, pathlib, random, numpy, torch, config.load_config, data.world_model_dataset,
@@ -7,7 +7,7 @@
     train.device / fused_optimizer / float32_matmul_precision
     train.world_model.seed / batch_size / num_workers / prefetch_factor / in_order / shuffle /
         drop_last / pin_memory / persistent_workers / compile / amp_dtype / lr / weight_decay /
-        adam_betas / adam_eps / ckpt_dir / resume / stages
+        adam_betas / adam_eps / ckpt_dir / resume / epochs
 对外接口:
     - main(argv=None) -> None
 """
@@ -30,7 +30,7 @@ from train.world_model_loop import train_world_model_epoch
 
 
 def main(argv=None) -> None:
-    """执行配置定义的三阶段世界模型训练。"""
+    """执行配置定义的单阶段重建与 VISReg 联合训练。"""
     parser = argparse.ArgumentParser(description="训练 ByteDrive 掩码 BEV 世界模型")
     parser.add_argument("--config", default=None, help="主配置文件路径")
     parser.add_argument("--env", default=None, help="config/<env>.yaml 覆盖名")
@@ -53,24 +53,14 @@ def main(argv=None) -> None:
     state = _resume(model, optimizer, ckpt_dir, train_cfg.resume, args.resume)
     _maybe_compile(model, train_cfg, device)
 
-    for stage_index in range(state["stage_index"], len(train_cfg.stages)):
-        stage = train_cfg.stages[stage_index]
-        start_epoch = state["epoch_in_stage"] if stage_index == state["stage_index"] else 0
-        if start_epoch == 0 and stage.reinit_teacher_from_student:
-            model.reset_teacher()
-            print("[world-model] 阶段 {}：Teacher 已由 Student 重置".format(stage.name))
-        for epoch in range(start_epoch, stage.epochs):
-            epoch_seed = train_cfg.seed + stage_index * 100000 + epoch
-            stats, state["global_step"] = train_world_model_epoch(
-                model, loader, optimizer, cfg, device, stage, state["global_step"], epoch_seed)
-            print("[world-model:{}] epoch {}/{} {}".format(
-                stage.name, epoch + 1, stage.epochs,
-                "  ".join("{}={:.5g}".format(name, value) for name, value in stats.items())))
-            next_stage, next_epoch = (stage_index, epoch + 1)
-            if next_epoch == stage.epochs:
-                next_stage, next_epoch = stage_index + 1, 0
-            _save(model, optimizer, ckpt_dir, next_stage, next_epoch, state["global_step"])
-        state["epoch_in_stage"] = 0
+    for epoch in range(state["epoch"], train_cfg.epochs):
+        epoch_seed = train_cfg.seed + epoch
+        stats, state["global_step"] = train_world_model_epoch(
+            model, loader, optimizer, cfg, device, state["global_step"], epoch_seed)
+        print("[world-model] epoch {}/{} {}".format(
+            epoch + 1, train_cfg.epochs,
+            "  ".join("{}={:.5g}".format(name, value) for name, value in stats.items())))
+        _save(model, optimizer, ckpt_dir, epoch + 1, state["global_step"])
     dataset.close()
 
 
@@ -89,11 +79,11 @@ def _loader(dataset, cfg, device):
     return DataLoader(dataset, **kwargs)
 
 
-def _save(model, optimizer, directory, stage_index, epoch_in_stage, global_step):
+def _save(model, optimizer, directory, epoch, global_step):
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "model": model.state_dict(), "optimizer": optimizer.state_dict(),
-        "stage_index": stage_index, "epoch_in_stage": epoch_in_stage, "global_step": global_step,
+        "epoch": epoch, "global_step": global_step,
     }
     temporary = directory / "latest.tmp.pt"
     torch.save(payload, temporary)
@@ -102,15 +92,18 @@ def _save(model, optimizer, directory, stage_index, epoch_in_stage, global_step)
 
 def _resume(model, optimizer, directory, enabled, explicit):
     path = Path(explicit) if explicit else (directory / "latest.pt" if enabled else None)
-    state = {"stage_index": 0, "epoch_in_stage": 0, "global_step": 0}
+    state = {"epoch": 0, "global_step": 0}
     if path is None or not path.is_file():
         return state
     checkpoint = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    if "epoch" not in checkpoint:
+        raise ValueError("检查点来自旧三阶段流程，不能推断其在新单阶段预算中的 epoch；"
+                         "请关闭 resume 或显式提供新格式检查点")
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     state.update({name: int(checkpoint[name]) for name in state})
-    print("[world-model] 从 {} 恢复：stage={} epoch={} step={}".format(
-        path, state["stage_index"], state["epoch_in_stage"], state["global_step"]))
+    print("[world-model] 从 {} 恢复：epoch={} step={}".format(
+        path, state["epoch"], state["global_step"]))
     return state
 
 

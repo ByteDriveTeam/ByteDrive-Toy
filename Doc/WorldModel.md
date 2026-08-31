@@ -1,4 +1,4 @@
-# BEV 世界模型与三阶段训练
+# BEV 世界模型与联合训练
 
 ## 数据契约
 
@@ -44,16 +44,18 @@ Predictor 取 Student 第 3/6/9/12 个完整 Block 输出，分别 RMSNorm 后�
 掩码位置权重恒为 1。可见位置按到最近空间掩码的米制距离和距最新帧的时间距离指数衰减，
 并在配置的优化步数内从 0 线性升温。
 
-三阶段由 `train.world_model.stages` 定义：
+训练不再划分阶段。每个优化步同时执行掩码补全和 VISReg：重建目标驱动 Predictor 对齐 EMA
+Teacher 的滞后状态，并向 Student 提供掩码不变性约束；VISReg 直接作用于 Student 骨干末端输出
+对全部可见时空 Token 做 GAP 后的 `[B,D]` 特征，用 center、scale 和 sliced-Wasserstein shape
+三项约束特征分布，不再生成第二掩码视图或计算 invariance 项。默认单阶段训练 50 epoch，保持
+原三阶段合计的训练预算。
 
-1. 掩码补全。
-2. VISReg；同一数据样本产生两个不同掩码视图，正则作用于 Student 全局 GAP。
-3. 用 Student 重置 Teacher 后继续掩码补全，同时以缩小的有效步长保留 VISReg。
-
-VISReg 使用论文的 invariance、center、scale 与 sliced-Wasserstein shape 项。为让其 batch
-统计覆盖梯度累计后的有效 batch，训练循环采用两遍梯度缓存：第一遍无梯度汇总整个累计窗口的
-两视图 GAP，并计算 VISReg 对 GAP 的梯度；第二遍以相同掩码逐微批重放 Encoder，将缓存梯度注入。
-因此无需跨微批保留 Encoder 计算图。每个优化步在裁剪前监控全局/逐参数梯度范数和 NaN/Inf。
+为让 VISReg 的 batch 统计覆盖梯度累计后的有效 batch，训练循环采用两遍梯度缓存。第一遍固定
+每个样本的重建掩码，在无梯度模式下逐微批收集 GAP，拼成有效 batch 后计算 VISReg 对 GAP 的
+梯度；第二遍以相同样本和掩码逐微批重放，在一次反传中同时加入 Predictor/Teacher 重建损失和
+缓存的 GAP 梯度。因此 `batch_size=1` 时可通过 `grad_accum_steps>=2` 获得有效的 VISReg 统计，
+且无需跨微批保留 Encoder 计算图。若数据尾部只剩一个样本，该优化步仍执行重建并明确记录
+`visreg_skipped_small_batch=1`。每个优化步在裁剪前监控全局/逐参数梯度范数和 NaN/Inf。
 
 ## PowerShell 命令
 
@@ -64,7 +66,7 @@ VISReg 使用论文的 invariance、center、scale 与 sliced-Wasserstein shape 
 # 保存一帧可视化；加 --show 可播放
 .\.venv\Scripts\python.exe -m vis.bev_grid_vis.run --scene scene_000000 --frame 0
 
-# 按配置执行三阶段训练
+# 按配置执行单阶段联合训练
 .\.venv\Scripts\python.exe -m train.run_world_model
 ```
 
