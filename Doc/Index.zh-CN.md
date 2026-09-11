@@ -106,6 +106,8 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
+- [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 与显式增量状态。
+- [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 支持训练并行扫描与逐 token 推理的单层 Mamba-3。
 
 ## train/ — 训练 / 评估循环
 
