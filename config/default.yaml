@@ -518,9 +518,7 @@ model:
     behavior:
       num_classes: 8             # 障碍停车/红灯停车/加速/直行/左转/右转/减速/静止
 
-# ============================================================
-# data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
-# ============================================================
+# BEVSeg 压缩器：时序语义栅格的分层词表与重建结构
   bevseg:
     in_layers: 12
     history_frames: 5
@@ -539,6 +537,9 @@ model:
     sharpening_start: 0.0
     sharpening_end: 1.0
 
+# ============================================================
+# data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
+# ============================================================
 data:
 
   # 每个 DataLoader worker 的场景资源上限；SceneReader/驾驶状态均采用有界 LRU，防止全量数据集线性涨内存
@@ -591,9 +592,7 @@ data:
       traffic_light_seg_margin_px: 6      # 远距小目标投影框向外扩张像素，吸收标定/栅格取整误差
       traffic_light_min_pixels: 1         # 投影框内至少命中多少个 Seg 交通灯像素才算可见
 
-# ============================================================
-# train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
-# ============================================================
+# BEVSeg 训练数据栅格化参数
   bevseg:
     scene_root: data/carla_data_collector/dataset/scenes
     map_dir: data/map
@@ -613,6 +612,9 @@ data:
     box_layers: {vehicle: vehicle, pedestrian: pedestrian}
     state_layers: {red: stop_line_red, yellow: stop_line_yellow, green: stop_line_green}
 
+# ============================================================
+# train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
+# ============================================================
 train:
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
