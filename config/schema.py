@@ -581,10 +581,10 @@ class BevSegModelCfg:
     subword_dim: int
     decoder_channels: List[int]
     anneal_fraction: float
-    topk_start: int
-    temperature_start: float
-    temperature_end: float
-    gumbel_noise: bool
+    candidate_topk: int
+    sample_topk: int
+    sharpening_start: float
+    sharpening_end: float
 
 
 @dataclass
@@ -613,6 +613,8 @@ class BevSegLossWeightsCfg:
     semantic: float
     direction: float
     entropy: float
+    sharpening: float
+    usage: float
     positive_weight: float
 
 
@@ -1508,10 +1510,10 @@ def _validate_bevseg_model(model):
         and model.subword_dim == 32, "model.bevseg 词表必须为 64×16×32"
     assert model.decoder_channels and all(c > 0 for c in model.decoder_channels), \
         "model.bevseg.decoder_channels 必须为正整数列表"
-    assert 0 < model.anneal_fraction <= 1 and 1 <= model.topk_start <= model.codebook_size, \
-        "model.bevseg 退火参数非法"
-    assert model.temperature_start > 0 and 0 < model.temperature_end <= model.temperature_start, \
-        "model.bevseg 温度必须递减且 > 0"
+    assert 0 <= model.sharpening_start <= model.sharpening_end <= 1, \
+        "model.bevseg sharpening range must be within [0,1]"
+    assert model.candidate_topk == 8 and 1 < model.sample_topk <= model.candidate_topk, \
+        "model.bevseg candidate/sample Top-k must be 8 and in 2..8"
 
 
 def _validate_bevseg_data(data):
@@ -1533,7 +1535,8 @@ def _validate_bevseg_data(data):
 
 def _validate_bevseg_loss(weights):
     """鏍￠獙瀵硅薄: cfg.train.bevseg_loss_weights 鈥斺€?BEVSeg 损失权重。"""
-    assert weights.semantic > 0 and weights.direction >= 0 and weights.entropy >= 0, \
+    assert weights.semantic > 0 and weights.direction >= 0 and weights.entropy >= 0 \
+        and weights.sharpening >= 0 and weights.usage >= 0, \
         "train.bevseg_loss_weights 权重非法"
     assert weights.positive_weight >= 1, \
         "train.bevseg_loss_weights.positive_weight 必须 >= 1"

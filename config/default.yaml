@@ -534,10 +534,10 @@ model:
     subword_dim: 32
     decoder_channels: [256, 192, 128, 96, 64, 32]
     anneal_fraction: 0.20
-    topk_start: 4
-    temperature_start: 1.0
-    temperature_end: 0.15
-    gumbel_noise: true
+    candidate_topk: 8
+    sample_topk: 4
+    sharpening_start: 0.0
+    sharpening_end: 1.0
 
 data:
 
@@ -665,14 +665,17 @@ train:
     traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green
     stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
 
-# ============================================================
-# pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
-# ============================================================
   bevseg_loss_weights:
     semantic: 1.0
     direction: 0.25
     entropy: 0.001
+    sharpening: 0.01
+    usage: 0.01
     positive_weight: 2.0
+
+# ============================================================
+# pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
+# ============================================================
 
 pred_vis:
   checkpoint: train/ckpt/perception/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from model.residual_block import ResidualBlock
 from model.bevseg_compressor.checks.bevseg_compressor_checks import (
@@ -74,10 +73,10 @@ class BEVSegCompressor(nn.Module):
         self.vocab_size = model_cfg.codebook_size
         self.subword_dim = model_cfg.subword_dim
         self.anneal_fraction = model_cfg.anneal_fraction
-        self.topk_start = model_cfg.topk_start
-        self.temperature_start = model_cfg.temperature_start
-        self.temperature_end = model_cfg.temperature_end
-        self.gumbel_noise = model_cfg.gumbel_noise
+        self.candidate_topk = model_cfg.candidate_topk
+        self.sample_topk = model_cfg.sample_topk
+        self.sharpening_start = model_cfg.sharpening_start
+        self.sharpening_end = model_cfg.sharpening_end
         self.total_epochs = max(int(cfg.train.epochs), 1)
 
         self.patch = nn.Conv2d(self.in_channels, self.dim,
@@ -115,32 +114,54 @@ class BEVSegCompressor(nn.Module):
         return (parameter for parameter in self.parameters() if parameter.requires_grad)
 
     def _schedule(self, epoch):
+        """返回线性退火进度和 Top4 到 Top1 的锐化系数。"""
         progress = 1.0 if epoch is None else min(max(float(epoch), 0.0) /
                                                   (self.total_epochs * self.anneal_fraction), 1.0)
-        topk = int(torch.ceil(torch.tensor(
-            self.topk_start - (self.topk_start - 1) * progress)).item())
-        temperature = self.temperature_start + progress * (
-            self.temperature_end - self.temperature_start)
-        return max(topk, 1), max(temperature, 1e-4)
+        sharpening = self.sharpening_start + progress * (
+            self.sharpening_end - self.sharpening_start)
+        return progress, min(max(sharpening, 0.0), 1.0)
 
     def _sample_codes(self, logits, epoch, sample):
-        topk, temperature = self._schedule(epoch)
-        values, indices = logits.topk(topk, dim=-1)
-        if sample and self.training and self.gumbel_noise:
-            noise = -torch.empty_like(values).exponential_().log()
-            values = values + noise
-        probs = torch.softmax(values / temperature, dim=-1)
+        """逐子词表执行 Top8 随机 Top4 和可微的 Top1 锐化。"""
+        _, sharpening = self._schedule(epoch)
+        base_probabilities = torch.softmax(logits, dim=-1)
+        top8_probabilities, top8_indices = base_probabilities.topk(
+            self.candidate_topk, dim=-1)
         if sample and self.training:
-            draw = torch.multinomial(probs.reshape(-1, topk), 1).reshape(*probs.shape[:-1])
-            hard = torch.zeros_like(probs).scatter_(-1, draw.unsqueeze(-1), 1.0)
-            soft = probs
-            selected = hard + soft - soft.detach()
+            # 保留原始 Top1，再按 Top8 原始概率无放回随机抽取其余候选。
+            top1_indices = top8_indices[..., :1]
+            top1_probabilities = top8_probabilities[..., :1]
+            rest_probabilities = top8_probabilities[..., 1:]
+            rest_sampling_probabilities = rest_probabilities.clamp_min(1e-8)
+            rest_sampling_probabilities = rest_sampling_probabilities / (
+                rest_sampling_probabilities.sum(-1, keepdim=True).clamp_min(1e-8))
+            rest_indices = top8_indices[..., 1:]
+            draw = torch.multinomial(
+                rest_sampling_probabilities.reshape(
+                    -1, rest_sampling_probabilities.shape[-1]),
+                self.sample_topk - 1, replacement=False,
+            ).view(*rest_probabilities.shape[:-1], self.sample_topk - 1)
+            sampled_indices = rest_indices.gather(-1, draw)
+            sampled_probabilities = rest_probabilities.gather(-1, draw)
+            indices = torch.cat((top1_indices, sampled_indices), dim=-1)
+            values = torch.cat((top1_probabilities, sampled_probabilities), dim=-1)
+            probabilities = values / values.sum(-1, keepdim=True).clamp_min(1e-8)
+
+            hard = torch.zeros_like(probabilities).scatter_(
+                -1, probabilities.argmax(-1, keepdim=True), 1.0)
+            hard_st = hard + probabilities - probabilities.detach()
+            selected = (1.0 - sharpening) * probabilities + sharpening * hard_st
         else:
-            selected = F.one_hot(probs.argmax(-1), num_classes=topk).to(probs.dtype)
-        full_probs = torch.zeros_like(logits).scatter(-1, indices, probs)
+            indices = logits.argmax(-1, keepdim=True)
+            probabilities = torch.ones_like(indices, dtype=logits.dtype)
+            selected = probabilities
+        full_probs = torch.zeros_like(logits).scatter(-1, indices, selected)
         full_selected = torch.zeros_like(logits).scatter(-1, indices, selected)
         code = torch.einsum("bpgv,gvd->bpgd", full_selected, self.codebook)
-        return code.flatten(-2), full_probs, indices.gather(-1, selected.argmax(-1, keepdim=True)).squeeze(-1), topk, temperature
+        selected_indices = indices.gather(
+            -1, selected.argmax(-1, keepdim=True)).squeeze(-1)
+        return (code.flatten(-2), full_probs, selected_indices,
+                probabilities, base_probabilities, sharpening)
 
     def encode(self, x: torch.Tensor, epoch=None, sample=True):
         """编码输入并返回 logits、离散索引、2048 维码字和 latent。"""
@@ -150,10 +171,13 @@ class BEVSegCompressor(nn.Module):
         latent = self.blocks4(self.down4(self.blocks8(self.down8(self.blocks16(self.patch(x))))))
         logits = self.logit_head(latent).flatten(2).transpose(1, 2)
         logits = logits.view(x.shape[0], 16, self.groups, self.vocab_size)
-        codes, probabilities, indices, topk, temperature = self._sample_codes(logits, epoch, sample)
+        (codes, probabilities, indices, sampling_probabilities,
+         base_probabilities, sharpening) = self._sample_codes(logits, epoch, sample)
         return {"logits": logits, "indices": indices, "codes": codes,
                 "probabilities": probabilities, "latent": latent,
-                "topk": topk, "temperature": temperature}
+                "sampling_probabilities": sampling_probabilities,
+                "base_probabilities": base_probabilities,
+                "sharpening": sharpening}
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         """把 2048 维 Patch code 通过 PixelShuffle 恢复为 256×256 logits。"""

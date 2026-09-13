@@ -23,6 +23,8 @@ The final three channels are a fused stop-line/control representation. No standa
 
 ## Compression path
 
-The encoder uses a 16×16 stride-16 projection to 384 channels, residual blocks at 16×16, 8×8, and 4×4, and grouped logits with 64 independent 16-entry subword vocabularies of dimension 32. Gumbel categorical sampling uses a straight-through estimator. During the first 20% of training, the active candidate set anneals from Top-4 to Top-1 while temperature decreases.
+Training also applies entropy regularization to the processed categorical distribution, a per-subword concentration loss to each complete 16-way probability distribution before Top-8 sampling, and a usage-balance loss that maximizes the batch-and-spatial marginal entropy of each 16-entry subword vocabulary.
+
+The encoder uses a 16×16 stride-16 projection to 384 channels, residual blocks at 16×16, 8×8, and 4×4, and grouped logits with 64 independent 16-entry subword vocabularies of dimension 32. During training, each subword vocabulary first takes its probability-ranked Top-8 candidates, keeps the global Top-1, and samples three additional candidates without replacement from the Top-8 probabilities. The sampled Top-4 probabilities are linearly normalized and linearly sharpened toward a straight-through Top-1 one-hot selection over the first 20% of training. The resulting per-vocabulary probabilities are used to form a weighted codebook vector; inference always uses deterministic Top-1 hard selection.
 
 The decoder expands 4×4 codes to 256×256 through six 2× PixelShuffle stages. Expand convolutions use ICNR initialization; spatial convolutions and residual channel mixing retain capacity while avoiding interpolation blur and reducing initial checkerboard artifacts.

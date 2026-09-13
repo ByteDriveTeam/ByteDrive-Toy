@@ -35,8 +35,20 @@ def compute_bevseg_losses(outputs, batch, cfg):
     direction = direction / lane_mask.expand_as(direction_pred).sum().clamp_min(1.0)
     probability = outputs["probabilities"].clamp_min(1e-8)
     entropy = -(probability * probability.log()).sum(-1).mean()
-    total = weights.semantic * semantic + weights.direction * direction + weights.entropy * entropy
-    return total, {"semantic": semantic, "direction": direction, "entropy": entropy, "total": total}
+    base_probability = outputs["base_probabilities"]
+    # 尖锐度作用于每个独立子词表的完整 16-way 分布，而非抽出的 Top4 子集。
+    sharpening = 1.0 - base_probability.pow(2).sum(-1).mean()
+    # 汇总 batch 和空间位置，但保留 64 个子词表分别统计其 16-way 使用率。
+    usage = outputs["base_probabilities"].mean(dim=(0, 1))
+    usage_entropy = -(usage * usage.clamp_min(1e-8).log()).sum(-1).mean()
+    usage_loss = -usage_entropy
+    total = (weights.semantic * semantic + weights.direction * direction +
+             weights.entropy * entropy + weights.sharpening * sharpening +
+             weights.usage * usage_loss)
+    return total, {"semantic": semantic, "direction": direction,
+                   "entropy": entropy, "sharpening": sharpening,
+                   "usage_entropy": usage_entropy, "usage": usage_loss,
+                   "total": total}
 
 
 def train_bevseg_epoch(model, loader, optimizer, cfg, device, epoch=0):
