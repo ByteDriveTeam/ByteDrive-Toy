@@ -30,12 +30,15 @@ from torch.utils.data import DataLoader, default_collate
 
 from config import load_config
 from data.driving_dataset import DrivingDataset
+from data.bevseg_dataset import BevSegDataset
 from data.perception_dataset import PerceptionDataset
 from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
 from model.perception_model import PerceptionModel
+from model.bevseg_compressor import BEVSegCompressor
 from train.checks.run_checks import check_runtime
 from train.loop import train_driving_epoch, train_one_epoch
+from train.bevseg import train_bevseg_epoch
 from train.optimizer import build_optimizer
 
 _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
@@ -44,6 +47,7 @@ _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
 _TASKS = {
     "perception": (PerceptionModel, PerceptionDataset, train_one_epoch),
     "driving": (DrivingModel, DrivingDataset, train_driving_epoch),
+    "bevseg": (BEVSegCompressor, BevSegDataset, train_bevseg_epoch),
 }
 
 
@@ -259,7 +263,7 @@ def main(argv=None) -> None:
     """训练主流程（感知或驾驶）。"""
     parser = argparse.ArgumentParser(description="ByteDrive 训练（感知 / 驾驶）")
     parser.add_argument("--task", default="perception", choices=sorted(_TASKS),
-                        help="训练目标：perception（默认）或 driving")
+                        help="训练目标：perception、driving 或 bevseg（BEVSeg 压缩器）")
     parser.add_argument("--config", default=None, help="主配置文件路径（缺省用 config/default.yaml）")
     parser.add_argument("--env", default=None, help="环境覆盖名（叠加 config/<env>.yaml）")
     parser.add_argument("--resume", default=None, help="显式指定要恢复的检查点路径（覆盖自动续训）")
@@ -299,7 +303,9 @@ def main(argv=None) -> None:
     _compile_for_cuda(model, cfg, device)
 
     for epoch in range(start_epoch, cfg.train.epochs):
-        stats = epoch_fn(model, loader, optimizer, cfg, device)
+        stats = (epoch_fn(model, loader, optimizer, cfg, device, epoch=epoch)
+                 if args.task == "bevseg"
+                 else epoch_fn(model, loader, optimizer, cfg, device))
         print("[train:{}] epoch {}/{} {}".format(
             args.task, epoch + 1, cfg.train.epochs,
             "  ".join("{}={:.4f}".format(k, v) for k, v in stats.items())))

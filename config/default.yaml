@@ -521,6 +521,24 @@ model:
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
 # ============================================================
+  bevseg:
+    in_layers: 12
+    history_frames: 5
+    encoder_dim: 384
+    patch_kernel: 16
+    residual_blocks_16: 3
+    residual_blocks_8: 3
+    residual_blocks_4: 1
+    codebook_groups: 64
+    codebook_size: 16
+    subword_dim: 32
+    decoder_channels: [256, 192, 128, 96, 64, 32]
+    anneal_fraction: 0.20
+    topk_start: 4
+    temperature_start: 1.0
+    temperature_end: 0.15
+    gumbel_noise: true
+
 data:
 
   # 每个 DataLoader worker 的场景资源上限；SceneReader/驾驶状态均采用有界 LRU，防止全量数据集线性涨内存
@@ -576,6 +594,25 @@ data:
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
 # ============================================================
+  bevseg:
+    scene_root: data/carla_data_collector/dataset/scenes
+    map_dir: data/map
+    map_name_template: "{map}_HD_map.npz"
+    extent_m: 64.0
+    resolution: 256
+    history_frames: 5
+    lane_half_width_m: 1.75
+    line_width_m: 0.25
+    stop_line_width_m: 0.50
+    layers: [drivable, lane_centerline, lane_divider, road_boundary, pedestrian_crossing,
+             vehicle, pedestrian, stop_line_red, stop_line_yellow, stop_line_green]
+    lane_types: {Center: 1, Broken: 2, Solid: 2, NONE: 3, Crosswalk: 4}
+    lane_layer_map: {1: lane_centerline, 2: lane_divider, 3: road_boundary,
+                     4: pedestrian_crossing}
+    unknown_lane_class: 0
+    box_layers: {vehicle: vehicle, pedestrian: pedestrian}
+    state_layers: {red: stop_line_red, yellow: stop_line_yellow, green: stop_line_green}
+
 train:
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
@@ -631,6 +668,12 @@ train:
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
 # ============================================================
+  bevseg_loss_weights:
+    semantic: 1.0
+    direction: 0.25
+    entropy: 0.001
+    positive_weight: 2.0
+
 pred_vis:
   checkpoint: train/ckpt/perception/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）
   scene: ''                  # 指定场景目录名（如 scene_000000）；空=取 scene_root 下第一个

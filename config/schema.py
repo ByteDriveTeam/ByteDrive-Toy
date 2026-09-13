@@ -567,6 +567,56 @@ class DrivingCfg:
 
 
 @dataclass
+class BevSegModelCfg:
+    """BEVSeg 压缩器网络与分层词表参数。"""
+    in_layers: int
+    history_frames: int
+    encoder_dim: int
+    patch_kernel: int
+    residual_blocks_16: int
+    residual_blocks_8: int
+    residual_blocks_4: int
+    codebook_groups: int
+    codebook_size: int
+    subword_dim: int
+    decoder_channels: List[int]
+    anneal_fraction: float
+    topk_start: int
+    temperature_start: float
+    temperature_end: float
+    gumbel_noise: bool
+
+
+@dataclass
+class BevSegDataCfg:
+    """BEVSeg 场景、坐标和语义图层参数。"""
+    scene_root: str
+    map_dir: str
+    map_name_template: str
+    extent_m: float
+    resolution: int
+    history_frames: int
+    lane_half_width_m: float
+    line_width_m: float
+    stop_line_width_m: float
+    layers: List[str]
+    lane_types: Dict[str, int]
+    lane_layer_map: Dict[int, str]
+    unknown_lane_class: int
+    box_layers: Dict[str, str]
+    state_layers: Dict[str, str]
+
+
+@dataclass
+class BevSegLossWeightsCfg:
+    """BEVSeg 重建、方向和熵正则权重。"""
+    semantic: float
+    direction: float
+    entropy: float
+    positive_weight: float
+
+
+@dataclass
 class DinoV3BackboneCfg:
     model_dir: str
     patch_size: int
@@ -607,6 +657,7 @@ class ModelCfg:
     heads: HeadsCfg
     physics: PhysicsCfg
     driving: DrivingCfg
+    bevseg: BevSegModelCfg
 
 
 @dataclass
@@ -671,6 +722,7 @@ class DataCfg:
     scene_cache_size: int
     dataset: DatasetCfg
     driving: DrivingDatasetCfg
+    bevseg: BevSegDataCfg
 
 
 @dataclass
@@ -729,6 +781,7 @@ class TrainCfg:
     perception_lr_scale: float     # 驾驶训练时感知子模块（融合+trunk+双头）相对 lr 的缩放（DINOv3 仍冻结）
     loss_weights: LossWeightsCfg
     driving_loss_weights: DrivingLossWeightsCfg
+    bevseg_loss_weights: BevSegLossWeightsCfg
 
 
 @dataclass
@@ -1096,8 +1149,11 @@ def validate_config(cfg):
     _validate_reconstructed_udf_vis(cfg.reconstructed_udf_vis)
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
+    _validate_bevseg_model(cfg.model.bevseg)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
+    _validate_bevseg_data(cfg.data.bevseg)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
+    _validate_bevseg_loss(cfg.train.bevseg_loss_weights)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
@@ -1439,6 +1495,49 @@ def _validate_model_collection(cc, cfg):
 
 
 # ---------- model 侧加载期校验（枚举与形状推导的单一来源，规范 §7.3）----------
+
+def _validate_bevseg_model(model):
+    """鏍￠獙瀵硅薄: cfg.model.bevseg 鈥斺€?BEVSeg 缂栬В鐮佸櫒涓庡垎灞傝瘝琛ㄣ€?"""
+    assert model.in_layers == 12 and model.history_frames == 5, \
+        "model.bevseg.in_layers/history_frames 必须为 12/5"
+    assert model.encoder_dim == 384 and model.patch_kernel == 16, \
+        "model.bevseg.encoder_dim/patch_kernel 必须为 384/16"
+    assert model.residual_blocks_16 == 3 and model.residual_blocks_8 == 3 \
+        and model.residual_blocks_4 == 1, "model.bevseg 残差层数必须为 3/3/1"
+    assert model.codebook_groups == 64 and model.codebook_size == 16 \
+        and model.subword_dim == 32, "model.bevseg 词表必须为 64×16×32"
+    assert model.decoder_channels and all(c > 0 for c in model.decoder_channels), \
+        "model.bevseg.decoder_channels 必须为正整数列表"
+    assert 0 < model.anneal_fraction <= 1 and 1 <= model.topk_start <= model.codebook_size, \
+        "model.bevseg 退火参数非法"
+    assert model.temperature_start > 0 and 0 < model.temperature_end <= model.temperature_start, \
+        "model.bevseg 温度必须递减且 > 0"
+
+
+def _validate_bevseg_data(data):
+    """鏍￠獙瀵硅薄: cfg.data.bevseg 鈥斺€?坐标和驾驶语义层契约。"""
+    assert data.extent_m > 0 and data.resolution > 0 and data.history_frames == 5, \
+        "data.bevseg 范围、分辨率和历史帧数非法"
+    expected = ["drivable", "lane_centerline", "lane_divider", "road_boundary",
+                "pedestrian_crossing", "vehicle", "pedestrian", "stop_line_red",
+                "stop_line_yellow", "stop_line_green"]
+    assert data.layers == expected, "data.bevseg.layers 必须遵守驾驶语义顺序"
+    assert data.line_width_m > 0 and data.stop_line_width_m > 0, \
+        "data.bevseg 线宽必须 > 0"
+    assert data.lane_half_width_m > 0, "data.bevseg.lane_half_width_m 必须 > 0"
+    assert set(data.state_layers) == {"red", "yellow", "green"}, \
+        "data.bevseg.state_layers 必须包含 red/yellow/green"
+    assert all(name in data.layers for name in data.state_layers.values()), \
+        "data.bevseg.state_layers 目标层必须存在"
+
+
+def _validate_bevseg_loss(weights):
+    """鏍￠獙瀵硅薄: cfg.train.bevseg_loss_weights 鈥斺€?BEVSeg 损失权重。"""
+    assert weights.semantic > 0 and weights.direction >= 0 and weights.entropy >= 0, \
+        "train.bevseg_loss_weights 权重非法"
+    assert weights.positive_weight >= 1, \
+        "train.bevseg_loss_weights.positive_weight 必须 >= 1"
+
 
 def _validate_model(model):
     """校验对象: cfg.model —— 网络结构参数。"""

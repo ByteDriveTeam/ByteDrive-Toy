@@ -12,6 +12,7 @@ This is the single navigation entry for project documentation and source files. 
 - [Doc/开发规范.md](开发规范.md) — Simplified Chinese development guidelines
 - [Doc/Index.md](Index.md) — English primary file and documentation index
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — Simplified Chinese file and documentation index
+- [Doc/BEVSeg.md](BEVSeg.md) — BEVSeg coordinate, semantic-channel, grouped-codebook, and PixelShuffle reconstruction contract
 - [site/index.html](../site/index.html) — English primary project website
 - [site/index.zh-CN.html](../site/index.zh-CN.html) — Simplified Chinese project website
 
@@ -45,6 +46,8 @@ This is the single navigation entry for project documentation and source files. 
 - [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — Coverage-based dynamic reconstruction with same-object, similar-object, and box fallbacks
 - [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — Public sparse TUDF API for the static world and local dynamic objects
 - [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — Sparse regular-tensor construction of static and dynamic truncated unsigned distance fields
+- [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — Driving-relevant HDMap, box, and fused stop-line-state rasterization under the X-right/Y-front BEV contract
+- [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — Five-frame ego-aligned BEVSeg dataset assembled from CARLA collector LMDB metadata
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection
 
@@ -106,6 +109,7 @@ Python 3.12 collector:
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Two-frame three-camera + LiDAR model combining image geometry, voxel statistics, and aligned historical BEV
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
+- [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — 384-dimensional residual BEVSeg encoder, grouped discrete codebook sampling, and ICNR-initialized PixelShuffle decoder
 
 ## train/ — training and evaluation
 
@@ -114,6 +118,7 @@ Python 3.12 collector:
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
+- [train/bevseg/bevseg.py](../train/bevseg/bevseg.py) — Weighted semantic reconstruction, direction, entropy regularization, and BEVSeg epoch loop
 
 ## clone_loop/ — behavior-cloning closed loop
 
@@ -197,6 +202,8 @@ Python 3.7 simulation worker:
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette
 - [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR/state trajectory BEV, composite panels, and HUD rendering
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
+- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg temporal/layer composite renderer with lane-direction arrows and ego-center marker
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — Real CARLA LMDB + HDMap BEVSeg visualization CLI
 
 ### Perception predictions
 
