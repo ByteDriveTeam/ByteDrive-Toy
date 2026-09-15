@@ -600,6 +600,7 @@ data:
     extent_m: 64.0
     resolution: 256
     history_frames: 5
+    window_stride_s: 1.0       # 相邻五帧窗口终点的时间间隔；按场景实际 sensor_dt_s 换算为帧步长
     lane_half_width_m: 1.75
     line_width_m: 0.25
     stop_line_width_m: 0.50
@@ -623,7 +624,7 @@ train:
   num_workers: 4
   prefetch_factor: 1         # 每个 worker 预取 batch 数；驾驶 batch 很大，默认 1 避免过量锁页内存
   in_order: false            # false=先完成的 worker batch 可先返回，减少慢样本造成的队首阻塞
-  shuffle: true              # 按同场景连续帧成批后打乱 batch，兼顾随机性与顺序解码吞吐
+  shuffle: true              # 按同场景顺序样本成批后打乱 batch，兼顾随机性与顺序解码吞吐
   drop_last: true            # 丢弃不足 batch_size 的最终尾批
   pin_memory: true           # CUDA 训练锁页内存，加速 non_blocking 主机到设备传输；CPU 回退时自动关闭
   persistent_workers: true   # 跨 epoch 复用 worker；场景缓存有界后不会随 epoch 增长

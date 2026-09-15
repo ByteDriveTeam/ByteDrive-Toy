@@ -2,7 +2,7 @@
 
 模块: data/bevseg_dataset/bevseg_dataset.py
 依赖: torch, numpy, data.single_frame_base, data.bevseg_synthesis
-读取配置: data.bevseg, data.scene_cache_size
+读取配置: data.bevseg.scene_root/history_frames/window_stride_s, data.scene_cache_size
 对外接口:
     - BevSegDataset(cfg) -> Dataset
       __getitem__(index) -> dict[str, Tensor]
@@ -64,9 +64,14 @@ class BevSegDataset(Dataset):
         for scene in list_scenes(self._root):
             reader = SceneReader(scene)
             try:
-                if reader.failed or reader.num_frames < history:
+                # failed 只描述驾驶结果，不代表 BEV 标签损坏；压缩学习保留所有完整窗口。
+                if reader.num_frames < history:
                     continue
-                index.extend((scene, frame) for frame in range(history - 1, reader.num_frames))
+                # 不同场景可采用不同落盘频率，按场景元数据保持统一的时间步长。
+                sensor_dt_s = float(reader.meta["sensor_dt_s"])
+                stride = max(1, int(round(self.data_cfg.window_stride_s / sensor_dt_s)))
+                index.extend((scene, frame)
+                             for frame in range(history - 1, reader.num_frames, stride))
             finally:
                 reader.close()
         return index

@@ -596,6 +596,7 @@ class BevSegDataCfg:
     extent_m: float
     resolution: int
     history_frames: int
+    window_stride_s: float
     lane_half_width_m: float
     line_width_m: float
     stop_line_width_m: float
@@ -1520,6 +1521,8 @@ def _validate_bevseg_data(data):
     """鏍￠獙瀵硅薄: cfg.data.bevseg 鈥斺€?坐标和驾驶语义层契约。"""
     assert data.extent_m > 0 and data.resolution > 0 and data.history_frames == 5, \
         "data.bevseg 范围、分辨率和历史帧数非法"
+    assert math.isfinite(data.window_stride_s) and data.window_stride_s > 0, \
+        "data.bevseg.window_stride_s 必须为有限正数"
     expected = ["drivable", "lane_centerline", "lane_divider", "road_boundary",
                 "pedestrian_crossing", "vehicle", "pedestrian", "stop_line_red",
                 "stop_line_yellow", "stop_line_green"]

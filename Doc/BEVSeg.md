@@ -2,6 +2,10 @@
 
 The BEVSeg task consumes only driving-relevant labels produced from CARLA collector metadata and the HD map. It does not consume LiDAR.
 
+## Dataset windows
+
+Each sample contains five consecutive stored frames ordered from oldest to current, all rasterized in the current frame's ego coordinate system. Window endpoints are sampled once per `data.bevseg.window_stride_s` using each scene's recorded `sensor_dt_s`; the default one-second stride is therefore ten stored frames for 10 Hz scenes. Windows never cross scene boundaries, and only scenes with fewer than five stored frames are excluded. A scene-level `failed` flag does not exclude otherwise complete windows because compressor training benefits from the additional state diversity.
+
 ## Coordinate and raster contract
 
 - Public BEV axes: `X` is right-positive, `Y` is front-positive, `Z` is up.

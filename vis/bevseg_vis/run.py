@@ -1,4 +1,12 @@
-"""BEVSeg 真实 LMDB 可视化 CLI。"""
+"""从真实 CARLA LMDB 栅格化并保存五帧 BEVSeg 可视化。
+
+模块: vis/bevseg_vis/run.py
+依赖: config, data.bevseg_synthesis, vis.bevseg_vis, vis.data_vis.reader
+读取配置: data.bevseg
+对外接口:
+    - main(argv=None) -> None
+说明: failed 仅代表驾驶结果；只要场景包含完整五帧，就允许检查其压缩监督标签。
+"""
 
 from __future__ import annotations
 
@@ -53,8 +61,8 @@ def main(argv=None):
     scene_dir = _pick_scene(args.scene, scene_root)
     reader = SceneReader(scene_dir)
     try:
-        if reader.failed or reader.num_frames < data_cfg.history_frames:
-            raise ValueError("场景不可用或不足五帧: {}".format(scene_dir))
+        if reader.num_frames < data_cfg.history_frames:
+            raise ValueError("场景不足五帧: {}".format(scene_dir))
         frame = reader.num_frames - 1 if args.frame is None else args.frame
         if frame < data_cfg.history_frames - 1 or frame >= reader.num_frames:
             raise ValueError("frame 必须位于 [{}, {})".format(
