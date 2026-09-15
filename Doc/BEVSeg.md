@@ -6,6 +6,8 @@ The BEVSeg task consumes only driving-relevant labels produced from CARLA collec
 
 Each sample contains five consecutive stored frames ordered from oldest to current, all rasterized in the current frame's ego coordinate system. Window endpoints are sampled once per `data.bevseg.window_stride_s` using each scene's recorded `sensor_dt_s`; the default one-second stride is therefore ten stored frames for 10 Hz scenes. Windows never cross scene boundaries, and only scenes with fewer than five stored frames are excluded. A scene-level `failed` flag does not exclude otherwise complete windows because compressor training benefits from the additional state diversity.
 
+Because all five frames share that current-frame coordinate system, the HD-map drivable mask, lane classes, lane directions, and static boxes are projected once per window and copied before frame-varying dynamic boxes and traffic controls are drawn. The batched path is pixel-equivalent to independently rasterizing the five frames.
+
 ## Coordinate and raster contract
 
 - Public BEV axes: `X` is right-positive, `Y` is front-positive, `Z` is up.

@@ -2,10 +2,14 @@
 
 模块: data/bevseg_synthesis/bevseg_synthesis.py
 依赖: cv2, numpy, data.hd_map, data.driving_targets, vis.data_vis.geometry
-读取配置: data.bevseg.extent_m / data.bevseg.layers / data.bevseg.map_dir
+读取配置: data.bevseg.extent_m/resolution/layers/map_dir/map_name_template/lane_types/
+          lane_layer_map/box_layers/state_layers/lane_half_width_m/line_width_m/
+          unknown_lane_class/stop_line_width_m
 对外接口:
     - BevSegRasterizer(cfg) -> object
       .rasterize_frame(scene_meta, frame_meta, map_obj, current_pose, reference_pose=None)
+        -> dict[str, ndarray]
+      .rasterize_frames(scene_meta, frame_metas, map_obj, current_pose, reference_pose=None)
         -> dict[str, ndarray]
 说明: 公共坐标契约为 X=右、Y=前；内部复用项目既有 world_to_ego 数值变换，避免改变 DrivingModel。
 """
@@ -58,20 +62,33 @@ class BevSegRasterizer:
     def rasterize_frame(self, scene_meta, frame_meta, map_obj, current_pose,
                         reference_pose=None):
         """生成一帧二值语义层与车道 sin/cos 方向。"""
+        batch = self.rasterize_frames(
+            scene_meta, [frame_meta], map_obj, current_pose, reference_pose)
+        return {name: value[0] for name, value in batch.items()}
+
+    def rasterize_frames(self, scene_meta, frame_metas, map_obj, current_pose,
+                         reference_pose=None):
+        """批量生成同一 ego 坐标系下的多帧栅格，并复用静态 HDMap 投影。"""
         pose = np.asarray(current_pose, dtype=np.float64)
         reference = pose if reference_pose is None else np.asarray(reference_pose, dtype=np.float64)
-        semantic = np.zeros((len(self.layers), self.bev.height, self.bev.width), dtype=np.float32)
-        direction = np.zeros((2, self.bev.height, self.bev.width), dtype=np.float32)
-        semantic[self.layer_index["drivable"]] = map_obj.drivable_bev(
-            pose.tolist(), self.bev, self.cfg.lane_half_width_m)
-        lane_class, lane_direction = map_obj.lane_map_bev(
-            pose.tolist(), self.bev, self.cfg.line_width_m, self.lane_types,
-            self.cfg.unknown_lane_class)
-        self._copy_lane_layers(semantic, direction, lane_class, lane_direction)
-        self._rasterize_boxes(semantic, frame_meta.get("bboxes", []), reference, exclude_ego=True)
-        self._rasterize_boxes(semantic, scene_meta.get("static_bboxes", []), reference, exclude_ego=False)
-        self._rasterize_control(semantic, frame_meta, scene_meta, map_obj, reference)
-        semantic[semantic > 0] = 1.0
+        drivable, lane_class, lane_direction = map_obj.drivable_lane_bev(
+            pose.tolist(), self.bev, self.cfg.lane_half_width_m, self.cfg.line_width_m,
+            self.lane_types, self.cfg.unknown_lane_class)
+        semantic_base = np.zeros(
+            (len(self.layers), self.bev.height, self.bev.width), dtype=np.float32)
+        direction_base = np.zeros((2, self.bev.height, self.bev.width), dtype=np.float32)
+        semantic_base[self.layer_index["drivable"]] = drivable
+        self._copy_lane_layers(
+            semantic_base, direction_base, lane_class, lane_direction)
+        self._rasterize_boxes(
+            semantic_base, scene_meta.get("static_bboxes", []), reference, exclude_ego=False)
+        semantic = np.repeat(semantic_base[None], len(frame_metas), axis=0)
+        direction = np.repeat(direction_base[None], len(frame_metas), axis=0)
+        for frame_semantic, frame_meta in zip(semantic, frame_metas):
+            self._rasterize_boxes(
+                frame_semantic, frame_meta.get("bboxes", []), reference, exclude_ego=True)
+            self._rasterize_control(
+                frame_semantic, frame_meta, scene_meta, map_obj, reference)
         return {"semantic": semantic, "direction": direction}
 
     def _copy_lane_layers(self, semantic, direction, lane_class, lane_direction):

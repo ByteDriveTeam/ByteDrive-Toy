@@ -9,6 +9,9 @@
         .drivable_bev(ego_pose6, bev, lane_half_width_m) -> (H,W) float32   # 1=地图可行驶
         .lane_map_bev(ego_pose6, bev, line_width_m, type_to_class, unknown_class)
             -> (class_map[H,W], direction[2,H,W])
+        .drivable_lane_bev(ego_pose6, bev, lane_half_width_m, line_width_m,
+                           type_to_class, unknown_class)
+            -> (drivable[H,W], class_map[H,W], direction[2,H,W])
         .gt_centerline_distance_bev(ego_pose6, gt_xy, gt_valid, bev, centerline_types,
                                     match_radius_m)
             -> (distance[H,W], valid[T])
@@ -124,6 +127,38 @@ class HdMap:
                 class_map, direction, rows, cols, ego_direction,
                 type_to_class.get(self._line_types[index], unknown_class), thickness)
         return class_map, direction
+
+    def drivable_lane_bev(self, ego_pose6, bev: BevParams, lane_half_width_m: float,
+                          line_width_m: float, type_to_class, unknown_class: int):
+        """一次投影生成可行驶区、道路线类别与方向，供同姿态多目标栅格复用。"""
+        drivable = np.zeros((bev.height, bev.width), dtype=np.uint8)
+        class_map = np.zeros((bev.height, bev.width), dtype=np.int64)
+        direction = np.zeros((2, bev.height, bev.width), dtype=np.float32)
+        near = self._nearby_indices(ego_pose6, bev)
+        if near.size == 0:
+            return drivable.astype(np.float32), class_map, direction
+
+        w2e = world_to_ego(ego_pose6)
+        px_per_m = bev.width / (bev.y_max - bev.y_min)
+        drivable_thickness = max(int(round(2.0 * lane_half_width_m * px_per_m)), 1)
+        line_thickness = max(int(round(line_width_m * px_per_m)), 1)
+        class_ids = np.array(
+            [type_to_class.get(self._line_types[i], unknown_class) for i in near], dtype=np.int64)
+        ordered = near[np.argsort(class_ids)]
+        curves = []
+        for index in ordered:
+            points = self._polylines[index]
+            ego_xy = points @ w2e[:2, :3].T + w2e[:2, 3]
+            rows, cols = ego_xy_to_pixel(ego_xy, bev)
+            ego_direction = self._directions[index] @ w2e[:2, :2].T
+            _rasterize_lane(
+                class_map, direction, rows, cols, ego_direction,
+                type_to_class.get(self._line_types[index], unknown_class), line_thickness)
+            curves.append(np.stack((cols, rows), axis=1).round().astype(
+                np.int32).reshape(-1, 1, 2))
+        cv2.polylines(
+            drivable, curves, isClosed=False, color=1, thickness=drivable_thickness)
+        return drivable.astype(np.float32), class_map, direction
 
     def gt_centerline_distance_bev(self, ego_pose6, gt_xy, gt_valid, bev: BevParams,
                                    centerline_types, match_radius_m: float):
@@ -319,6 +354,13 @@ def _rasterize_lane(class_map, direction, rows, cols, vectors, class_id, thickne
     sums = np.zeros((len(unique), 2), dtype=np.float32)
     np.add.at(sums, inverse, vectors[valid].astype(np.float32))
     sums /= np.linalg.norm(sums, axis=1, keepdims=True).clip(1e-6)
+
+    if thickness == 1:
+        norm = np.hypot(sums[:, 0], sums[:, 1]).clip(1e-6)
+        class_map.flat[unique] = class_id
+        direction[0].flat[unique] = sums[:, 0] / norm
+        direction[1].flat[unique] = sums[:, 1] / norm
+        return
 
     seed = np.zeros((h, w), dtype=np.float32)
     vx = np.zeros_like(seed)

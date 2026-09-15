@@ -105,13 +105,14 @@ class BevSegDataset(Dataset):
         scene_meta = reader.meta
         map_obj = self._map(scene, scene_meta)
         start = frame_idx - self.data_cfg.history_frames + 1
-        outputs = [
-            self._rasterizer.rasterize_frame(
-                scene_meta, reader.frame_meta(i), map_obj, current_pose)
-            for i in range(start, frame_idx + 1)
-        ]
-        semantic = np.stack([item["semantic"] for item in outputs], axis=0)
-        direction = np.stack([item["direction"] for item in outputs], axis=0)
+        outputs = self._rasterizer.rasterize_frames(
+            scene_meta,
+            [reader.frame_meta(i) for i in range(start, frame_idx + 1)],
+            map_obj,
+            current_pose,
+        )
+        semantic = outputs["semantic"]
+        direction = outputs["direction"]
         bevseg = np.concatenate((semantic, direction), axis=1)
         return {
             "bevseg": torch.from_numpy(np.ascontiguousarray(bevseg)).float(),
