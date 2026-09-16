@@ -1,7 +1,7 @@
 """BEVSeg 编码、分层离散采样与 PixelShuffle 解码网络。
 
 模块: model/bevseg_compressor/bevseg_compressor.py
-依赖: torch, model.residual_block
+依赖: torch, model.attention, model.residual_block
 读取配置: model.bevseg, data.bevseg
 对外接口:
     - BEVSegCompressor(cfg) -> nn.Module
@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from model.attention import RMSNormTokens
 from model.residual_block import ResidualBlock
 from model.bevseg_compressor.checks.bevseg_compressor_checks import (
     check_bevseg_input,
@@ -94,6 +95,7 @@ class BEVSegCompressor(nn.Module):
         self.codebook = nn.Parameter(torch.randn(self.groups, self.vocab_size,
                                                  self.subword_dim) * 0.02)
         decoder_in = self.groups * self.subword_dim
+        self.code_norm = RMSNormTokens(decoder_in)
         channels = list(model_cfg.decoder_channels)
         self.decoder_stem = nn.Conv2d(decoder_in, channels[0], kernel_size=1)
         stages = []
@@ -173,6 +175,7 @@ class BEVSegCompressor(nn.Module):
         logits = logits.view(x.shape[0], 16, self.groups, self.vocab_size)
         (codes, probabilities, indices, sampling_probabilities,
          base_probabilities, sharpening) = self._sample_codes(logits, epoch, sample)
+        codes = self.code_norm(codes)
         return {"logits": logits, "indices": indices, "codes": codes,
                 "probabilities": probabilities, "latent": latent,
                 "sampling_probabilities": sampling_probabilities,
