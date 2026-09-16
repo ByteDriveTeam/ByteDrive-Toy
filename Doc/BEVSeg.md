@@ -26,6 +26,10 @@ The command uses `train.num_workers`, `train.prefetch_factor`, and `train.in_ord
 
 During training, BEVSeg prints the current epoch, step, percentage, and every loss component at step 1, every `train.log_every` steps, and the final step. The epoch-end line remains a sample-weighted aggregate. Loss accumulation stays on the training device between log points to avoid a device synchronization for every component on every batch.
 
+`model.bevseg.stochastic_sampling` controls training-time stochastic code selection and defaults to `false`. With sampling disabled, every one of the 64 independent 16-entry subword tables selects its deterministic Top-1 entry. With sampling enabled, each table first keeps the highest-probability entry, then samples three additional entries without replacement from the other seven entries in its Top-8 candidate set, weighted by their original softmax probabilities. The selected Top-4 distribution is normalized and linearly sharpened toward straight-through Top-1 over `anneal_fraction`. Evaluation always uses deterministic Top-1 regardless of this training switch; this path does not add Gumbel noise to logits.
+
+The loss log reports `top1_usage_count`, the number of distinct Top-1 entries used by all patches in the current batch for each independent subword table, averaged across the 64 tables. Its range is 1–16, and values near 1 expose codebook mode collapse. When `train.bevseg_gradient_monitor.enabled` is true, logged steps additionally report the pre-clipping `grad_rms`, the fraction `grad_small_frac` whose absolute value is at most `small_abs_threshold`, scalar-element `grad_coverage`, and `grad_nonfinite_frac`. Gradient statistics are collected after backward and before clipping, optimizer update, and zeroing; with gradient accumulation they describe the gradients accumulated through the current micro-step.
+
 ## Coordinate and raster contract
 
 - Public BEV axes: `X` is right-positive, `Y` is front-positive, `Z` is up.

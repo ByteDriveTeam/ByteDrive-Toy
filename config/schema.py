@@ -581,6 +581,7 @@ class BevSegModelCfg:
     subword_dim: int
     decoder_channels: List[int]
     anneal_fraction: float
+    stochastic_sampling: bool
     candidate_topk: int
     sample_topk: int
     sharpening_start: float
@@ -630,6 +631,13 @@ class BevSegLossWeightsCfg:
     sharpening: float
     usage: float
     positive_weight: float
+
+
+@dataclass
+class BevSegGradientMonitorCfg:
+    """BEVSeg 梯度尺度与过小梯度比例监控参数。"""
+    enabled: bool
+    small_abs_threshold: float
 
 
 @dataclass
@@ -795,6 +803,7 @@ class TrainCfg:
     ckpt_dir: str
     resume: bool
     perception_lr_scale: float     # 驾驶训练时感知子模块（融合+trunk+双头）相对 lr 的缩放（DINOv3 仍冻结）
+    bevseg_gradient_monitor: BevSegGradientMonitorCfg
     loss_weights: LossWeightsCfg
     driving_loss_weights: DrivingLossWeightsCfg
     bevseg_loss_weights: BevSegLossWeightsCfg
@@ -1526,6 +1535,8 @@ def _validate_bevseg_model(model):
         "model.bevseg.decoder_channels 必须为正整数列表"
     assert 0 <= model.sharpening_start <= model.sharpening_end <= 1, \
         "model.bevseg sharpening range must be within [0,1]"
+    assert isinstance(model.stochastic_sampling, bool), \
+        "model.bevseg.stochastic_sampling 必须为布尔值"
     assert model.candidate_topk == 8 and 1 < model.sample_topk <= model.candidate_topk, \
         "model.bevseg candidate/sample Top-k must be 8 and in 2..8"
 
@@ -1699,6 +1710,11 @@ def _validate_train(train, model_lane):
     assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
     assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
+    assert isinstance(train.bevseg_gradient_monitor.enabled, bool), \
+        "train.bevseg_gradient_monitor.enabled 必须为布尔值"
+    assert math.isfinite(train.bevseg_gradient_monitor.small_abs_threshold) \
+        and train.bevseg_gradient_monitor.small_abs_threshold >= 0, \
+        "train.bevseg_gradient_monitor.small_abs_threshold 必须为有限非负数"
     assert train.float32_matmul_precision in ("highest", "high", "medium"), \
         "train.float32_matmul_precision 必须为 highest/high/medium"
     assert all(isinstance(getattr(train, name), bool) for name in

@@ -2,7 +2,8 @@
 
 模块: train/bevseg/bevseg.py
 依赖: torch, train.bevseg.checks.bevseg_checks
-读取配置: train.bevseg_loss_weights, train.grad_accum_steps/log_every/grad_clip_norm
+读取配置: model.bevseg.stochastic_sampling, train.bevseg_loss_weights,
+          train.bevseg_gradient_monitor, train.grad_accum_steps/log_every/grad_clip_norm
 对外接口:
     - compute_bevseg_losses(outputs, batch, cfg) -> (Tensor, dict)
     - train_bevseg_epoch(model, loader, optimizer, cfg, device) -> dict
@@ -42,12 +43,17 @@ def compute_bevseg_losses(outputs, batch, cfg):
     usage = outputs["base_probabilities"].mean(dim=(0, 1))
     usage_entropy = -(usage * usage.clamp_min(1e-8).log()).sum(-1).mean()
     usage_loss = -usage_entropy
+    # 每个子词表统计当前 batch 全部 patch 的不同 Top1 码字数，再对 64 组取平均。
+    top1 = base_probability.argmax(-1)
+    top1_used = F.one_hot(top1, num_classes=base_probability.shape[-1]) \
+        .flatten(0, 1).any(0).sum(-1).float().mean()
     total = (weights.semantic * semantic + weights.direction * direction +
              weights.entropy * entropy + weights.sharpening * sharpening +
              weights.usage * usage_loss)
     return total, {"semantic": semantic, "direction": direction,
                    "entropy": entropy, "sharpening": sharpening,
                    "usage_entropy": usage_entropy, "usage": usage_loss,
+                   "top1_usage_count": top1_used,
                    "total": total}
 
 
@@ -58,12 +64,17 @@ def train_bevseg_epoch(model, loader, optimizer, cfg, device, epoch=0):
     sums, count = {}, 0
     steps = len(loader)
     accumulation = cfg.train.grad_accum_steps
+    gradient_cfg = cfg.train.bevseg_gradient_monitor
     for step, batch in enumerate(loader):
         batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
-        outputs = model(batch["bevseg"], epoch=epoch, sample=True)
+        outputs = model(batch["bevseg"], epoch=epoch,
+                        sample=cfg.model.bevseg.stochastic_sampling)
         total, components = compute_bevseg_losses(outputs, batch, cfg)
         window = min(accumulation, steps - (step // accumulation) * accumulation)
         (total / window).backward()
+        should_log = step == 0 or (step + 1) % cfg.train.log_every == 0 or step + 1 == steps
+        gradient_metrics = (_gradient_metrics(model, gradient_cfg.small_abs_threshold)
+                            if gradient_cfg.enabled and should_log else {})
         if (step + 1) % accumulation == 0 or step + 1 == steps:
             if cfg.train.grad_clip_norm > 0:
                 nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.train.grad_clip_norm)
@@ -74,10 +85,11 @@ def train_bevseg_epoch(model, loader, optimizer, cfg, device, epoch=0):
             contribution = value.detach() * batch_size
             sums[name] = sums[name] + contribution if name in sums else contribution
         count += batch_size
-        if step == 0 or (step + 1) % cfg.train.log_every == 0 or step + 1 == steps:
+        if should_log:
+            logged = {**components, **gradient_metrics}
             print("[bevseg] epoch {}/{} step {}/{} ({:.2f}%) {}".format(
                 epoch + 1, cfg.train.epochs, step + 1, steps,
-                (step + 1) * 100.0 / steps, _format_losses(components)), flush=True)
+                (step + 1) * 100.0 / steps, _format_losses(logged)), flush=True)
     return _averages(sums, count)
 
 
@@ -101,7 +113,45 @@ def _averages(sums, count):
     return {name: (value / max(count, 1)).item() for name, value in sums.items()}
 
 
+@torch.no_grad()
+def _gradient_metrics(model, small_abs_threshold):
+    """统计裁剪前梯度的 RMS、过小比例、覆盖率与非有限比例。"""
+    parameters = [parameter for parameter in model.trainable_parameters()
+                  if parameter.requires_grad]
+    gradients = [parameter.grad.detach() for parameter in parameters
+                 if parameter.grad is not None]
+    total_count = sum(parameter.numel() for parameter in parameters)
+    gradient_count = sum(gradient.numel() for gradient in gradients)
+    if not gradients:
+        zero = torch.zeros((), device=parameters[0].device if parameters else "cpu")
+        return {"grad_rms": zero, "grad_small_frac": zero,
+                "grad_coverage": zero, "grad_nonfinite_frac": zero}
+
+    device = gradients[0].device
+    square_sum = torch.zeros((), device=device)
+    small_count = torch.zeros((), device=device)
+    finite_count = torch.zeros((), device=device)
+    nonfinite_count = torch.zeros((), device=device)
+    for gradient in gradients:
+        values = gradient.float()
+        finite = torch.isfinite(values)
+        finite_values = torch.where(finite, values, 0.0)
+        square_sum += finite_values.square().sum()
+        small_count += ((finite_values.abs() <= small_abs_threshold) & finite).sum()
+        finite_count += finite.sum()
+        nonfinite_count += (~finite).sum()
+    finite_denominator = finite_count.clamp_min(1.0)
+    gradient_denominator = max(gradient_count, 1)
+    return {
+        "grad_rms": (square_sum / finite_denominator).sqrt(),
+        "grad_small_frac": small_count / finite_denominator,
+        "grad_coverage": torch.tensor(gradient_count / max(total_count, 1), device=device),
+        "grad_nonfinite_frac": nonfinite_count / gradient_denominator,
+    }
+
+
 def _format_losses(components):
     return "  ".join(
-        "{}={:.4f}".format(name, value.detach().item())
+        ("{}={:.3e}" if name == "grad_rms" else "{}={:.4f}").format(
+            name, value.detach().item())
         for name, value in components.items())

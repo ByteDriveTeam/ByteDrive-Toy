@@ -532,6 +532,7 @@ model:
     subword_dim: 32
     decoder_channels: [256, 192, 128, 96, 64, 32]
     anneal_fraction: 0.20
+    stochastic_sampling: false    # 训练时是否随机抽取候选码字；关闭时使用确定性 Top-1（非 Gumbel 加噪）
     candidate_topk: 8
     sample_topk: 4
     sharpening_start: 0.0
@@ -646,6 +647,12 @@ train:
   ckpt_dir: train/ckpt   # 权重保存目录（相对仓库根）
   resume: true               # 断点续训：为真则自动从 ckpt_dir 下最新检查点恢复（模型+优化器+epoch）
   perception_lr_scale: 0.1   # 驾驶训练：感知子模块（融合+trunk）以下游 lr 的 1/10 慢更新；DINOv3 仍冻结
+
+  # BEVSeg 梯度诊断：仅在损失日志 step、梯度裁剪与参数更新前统计
+  bevseg_gradient_monitor:
+    enabled: true
+    small_abs_threshold: 1.0e-8  # |grad| 不大于该值计为过小；比例包含精确零梯度
+
   # 多任务损失加权求和：语义 CE / 深度 SmoothL1 / 深度梯度 SmoothL1 / 深度范围 BCE
   loss_weights:
     semantic: 0.3
@@ -681,7 +688,7 @@ train:
     direction: 0.25
     entropy: 0.001
     sharpening: 0.01
-    usage: 0.01
+    usage: 0.1
     positive_weight: 2.0
 
 # ============================================================

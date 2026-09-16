@@ -5,9 +5,9 @@
 读取配置: model.bevseg, data.bevseg
 对外接口:
     - BEVSegCompressor(cfg) -> nn.Module
-      encode(x, epoch=None, sample=True) -> dict
+      encode(x, epoch=None, sample=False) -> dict
       decode(codes) -> Tensor
-      forward(x, epoch=None, sample=True) -> dict
+      forward(x, epoch=None, sample=False) -> dict
 说明: PixelShuffle 展开卷积使用 ICNR 初始化，避免随机子像素排列造成初始棋盘格。
 """
 
@@ -165,7 +165,7 @@ class BEVSegCompressor(nn.Module):
         return (code.flatten(-2), full_probs, selected_indices,
                 probabilities, base_probabilities, sharpening)
 
-    def encode(self, x: torch.Tensor, epoch=None, sample=True):
+    def encode(self, x: torch.Tensor, epoch=None, sample=False):
         """编码输入并返回 logits、离散索引、2048 维码字和 latent。"""
         check_bevseg_input(x, self.in_channels)
         if x.ndim == 5:
@@ -191,7 +191,7 @@ class BEVSegCompressor(nn.Module):
             x = stage(x)
         return self.output_head(x)
 
-    def forward(self, x: torch.Tensor, epoch=None, sample=True):
+    def forward(self, x: torch.Tensor, epoch=None, sample=False):
         """执行完整压缩与重建。"""
         encoded = self.encode(x, epoch=epoch, sample=sample)
         encoded["reconstruction_logits"] = self.decode(encoded["codes"])
