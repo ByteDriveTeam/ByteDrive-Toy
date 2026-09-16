@@ -47,6 +47,8 @@ This is the single navigation entry for project documentation and source files. 
 - [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — Public sparse TUDF API for the static world and local dynamic objects
 - [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — Sparse regular-tensor construction of static and dynamic truncated unsigned distance fields
 - [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — Driving-relevant HDMap, box, and fused stop-line-state rasterization under the X-right/Y-front BEV contract
+- [data/bevseg_cache/__init__.py](../data/bevseg_cache/__init__.py) — Public API for the bounded BEVSeg raster cache and offline warmup
+- [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — Bounded, concurrent, lossless compressed NumPy cache with automatic missing-entry detection and warmup progress
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, five-frame ego-aligned BEVSeg windows from all complete CARLA scenes
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection

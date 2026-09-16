@@ -597,6 +597,14 @@ data:
     scene_root: data/carla_data_collector/dataset/scenes
     map_dir: data/map
     map_name_template: "{map}_HD_map.npz"
+    cache:
+      enabled: true               # 命中时跳过 LMDB 元数据读取后的 HDMap/框栅格化
+      prebuild: true              # BEVSeg 训练启动前自动检测并预生成缺失缓存
+      dir: output/bevseg-cache    # 压缩 NumPy 缓存根目录；按栅格配置和实现版本隔离
+      max_size_gb: 32.0           # 所有版本缓存负载的总上限；满后保留已有条目并停止新增
+      write_missing: true         # true=训练中边生成边回填；false=只读消费离线缓存
+      compression_level: 3        # zlib 0~9；3 在稀疏栅格上兼顾预热速度和磁盘占用
+      progress_every: 1000        # 自动检测/预生成每处理多少个样本打印一次进度
     extent_m: 64.0
     resolution: 256
     history_frames: 5

@@ -588,11 +588,24 @@ class BevSegModelCfg:
 
 
 @dataclass
+class BevSegCacheCfg:
+    """BEVSeg 压缩栅格磁盘缓存参数。"""
+    enabled: bool
+    prebuild: bool
+    dir: str
+    max_size_gb: float
+    write_missing: bool
+    compression_level: int
+    progress_every: int
+
+
+@dataclass
 class BevSegDataCfg:
     """BEVSeg 场景、坐标和语义图层参数。"""
     scene_root: str
     map_dir: str
     map_name_template: str
+    cache: BevSegCacheCfg
     extent_m: float
     resolution: int
     history_frames: int
@@ -1523,6 +1536,22 @@ def _validate_bevseg_data(data):
         "data.bevseg 范围、分辨率和历史帧数非法"
     assert math.isfinite(data.window_stride_s) and data.window_stride_s > 0, \
         "data.bevseg.window_stride_s 必须为有限正数"
+    assert data.cache.dir, "data.bevseg.cache.dir 不能为空"
+    assert math.isfinite(data.cache.max_size_gb) and data.cache.max_size_gb > 0, \
+        "data.bevseg.cache.max_size_gb 必须为有限正数"
+    assert isinstance(data.cache.compression_level, int) \
+        and not isinstance(data.cache.compression_level, bool) \
+        and 0 <= data.cache.compression_level <= 9, \
+        "data.bevseg.cache.compression_level 必须在 0..9"
+    assert isinstance(data.cache.progress_every, int) \
+        and not isinstance(data.cache.progress_every, bool) \
+        and data.cache.progress_every > 0, \
+        "data.bevseg.cache.progress_every 必须 > 0"
+    assert all(isinstance(value, bool) for value in
+               (data.cache.enabled, data.cache.prebuild, data.cache.write_missing)), \
+        "data.bevseg.cache.enabled/prebuild/write_missing 必须为布尔值"
+    assert not data.cache.prebuild or (data.cache.enabled and data.cache.write_missing), \
+        "data.bevseg.cache.prebuild=true 要求 enabled/write_missing 同时为 true"
     expected = ["drivable", "lane_centerline", "lane_divider", "road_boundary",
                 "pedestrian_crossing", "vehicle", "pedestrian", "stop_line_red",
                 "stop_line_yellow", "stop_line_green"]

@@ -7,6 +7,7 @@
           unknown_lane_class/stop_line_width_m
 对外接口:
     - BevSegRasterizer(cfg) -> object
+      .map_path(scene_meta) -> Path
       .rasterize_frame(scene_meta, frame_meta, map_obj, current_pose, reference_pose=None)
         -> dict[str, ndarray]
       .rasterize_frames(scene_meta, frame_metas, map_obj, current_pose, reference_pose=None)
@@ -50,14 +51,17 @@ class BevSegRasterizer:
         self.box_layers = dict(cfg.box_layers)
         self.state_layers = dict(cfg.state_layers)
 
-    def load_map(self, scene_meta):
-        """按场景地图名加载 HDMap。"""
+    def map_path(self, scene_meta):
+        """返回场景对应的 HDMap 文件路径。"""
         map_name = scene_meta.get("map")
         if not map_name:
             raise KeyError("scene meta 缺少 map")
         map_name = str(map_name).replace("_Opt", "")
-        path = self.map_dir / str(self.cfg.map_name_template).format(map=map_name)
-        return HdMap(path)
+        return self.map_dir / str(self.cfg.map_name_template).format(map=map_name)
+
+    def load_map(self, scene_meta):
+        """按场景地图名加载 HDMap。"""
+        return HdMap(self.map_path(scene_meta))
 
     def rasterize_frame(self, scene_meta, frame_meta, map_obj, current_pose,
                         reference_pose=None):

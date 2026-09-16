@@ -4,11 +4,12 @@
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
       model.driving_model.DrivingModel, data.perception_dataset.PerceptionDataset,
       data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
-      train.optimizer, train.loop, train.checks.run_checks
+      data.bevseg_cache, train.optimizer, train.loop, train.checks.run_checks
 读取配置:
     train.device / epochs / batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
         shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer /
         float32_matmul_precision / ckpt_dir / resume
+    data.bevseg.cache.prebuild/progress_every
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -16,7 +17,7 @@
       （--task 选择）。设备取 config，CUDA 不可用回退 CPU。检查点只保存非骨干权重（排除任何含 `backbone.`
       的键），故驾驶模型也不落几十 M 的 DINO 权重、可断点续训。驾驶训练可用 --perception-ckpt 以感知预训练权重
       初始化其视觉 fusion/trunk；语义/深度头权重不会加载到 Driving。num_workers>0 时 DataLoader 在 worker 内惰性建 SceneReader，
-      故入口置于 __main__ 守卫下。
+      故入口置于 __main__ 守卫下。BEVSeg 可在构建模型前自动检测并预生成缺失栅格缓存。
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ import torch
 from torch.utils.data import DataLoader, default_collate
 
 from config import load_config
-from data.driving_dataset import DrivingDataset
+from data.bevseg_cache import prepare_bevseg_cache
 from data.bevseg_dataset import BevSegDataset
+from data.driving_dataset import DrivingDataset
 from data.perception_dataset import PerceptionDataset
 from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
@@ -269,15 +271,37 @@ def main(argv=None) -> None:
     parser.add_argument("--resume", default=None, help="显式指定要恢复的检查点路径（覆盖自动续训）")
     parser.add_argument("--perception-ckpt", default=None,
                         help="驾驶训练时用于初始化感知子模块的感知检查点路径")
+    parser.add_argument("--prepare-bevseg-cache", action="store_true",
+                        help="仅预热 BEVSeg 压缩栅格缓存，不构建模型或开始训练")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config, args.env)
+    if args.prepare_bevseg_cache and args.task != "bevseg":
+        parser.error("--prepare-bevseg-cache 仅可与 --task bevseg 一起使用")
+    model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
+    dataset = dataset_cls(cfg) if args.task == "bevseg" else None
+    if args.task == "bevseg" and (args.prepare_bevseg_cache or cfg.data.bevseg.cache.prebuild):
+        try:
+            stats = prepare_bevseg_cache(
+                dataset, cfg.train.num_workers, cfg.train.prefetch_factor,
+                cfg.train.in_order, cfg.data.bevseg.cache.progress_every)
+        except Exception:
+            dataset.close()
+            raise
+        print("[bevseg-cache] namespace={} size={:.3f}/{:.3f} GiB full={} complete={} samples={}".format(
+            stats["namespace"], stats["size_bytes"] / 1024 ** 3,
+            stats["max_size_bytes"] / 1024 ** 3, stats["full"], stats["complete"],
+            stats["samples"]), flush=True)
+        if args.prepare_bevseg_cache:
+            dataset.close()
+            return
+
     device = _resolve_device(cfg.train.device)
     _configure_cuda_math(cfg, device)
-    model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
 
     model = model_cls(cfg).to(device)
-    dataset = dataset_cls(cfg)
+    if dataset is None:
+        dataset = dataset_cls(cfg)
     check_runtime(model, dataset)
     # 驾驶训练：先以感知预训练权重初始化感知子模块（在续训覆盖之前）
     if args.task == "driving" and args.perception_ckpt:

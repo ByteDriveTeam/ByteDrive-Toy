@@ -52,7 +52,7 @@ def compute_bevseg_losses(outputs, batch, cfg):
 
 
 def train_bevseg_epoch(model, loader, optimizer, cfg, device, epoch=0):
-    """训练一个 BEVSeg epoch。"""
+    """训练一个 BEVSeg epoch，并按配置输出当前步损失与进度。"""
     model.train()
     optimizer.zero_grad(set_to_none=True)
     sums, count = {}, 0
@@ -69,10 +69,16 @@ def train_bevseg_epoch(model, loader, optimizer, cfg, device, epoch=0):
                 nn.utils.clip_grad_norm_(model.trainable_parameters(), cfg.train.grad_clip_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+        batch_size = batch["bevseg"].shape[0]
         for name, value in components.items():
-            sums[name] = sums.get(name, 0.0) + float(value.detach()) * batch["bevseg"].shape[0]
-        count += batch["bevseg"].shape[0]
-    return {name: value / max(count, 1) for name, value in sums.items()}
+            contribution = value.detach() * batch_size
+            sums[name] = sums[name] + contribution if name in sums else contribution
+        count += batch_size
+        if step == 0 or (step + 1) % cfg.train.log_every == 0 or step + 1 == steps:
+            print("[bevseg] epoch {}/{} step {}/{} ({:.2f}%) {}".format(
+                epoch + 1, cfg.train.epochs, step + 1, steps,
+                (step + 1) * 100.0 / steps, _format_losses(components)), flush=True)
+    return _averages(sums, count)
 
 
 @torch.no_grad()
@@ -83,7 +89,19 @@ def evaluate_bevseg(model, loader, cfg, device):
     for batch in loader:
         batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
         _, components = compute_bevseg_losses(model(batch["bevseg"], epoch=None, sample=False), batch, cfg)
+        batch_size = batch["bevseg"].shape[0]
         for name, value in components.items():
-            sums[name] = sums.get(name, 0.0) + float(value) * batch["bevseg"].shape[0]
-        count += batch["bevseg"].shape[0]
-    return {name: value / max(count, 1) for name, value in sums.items()}
+            contribution = value.detach() * batch_size
+            sums[name] = sums[name] + contribution if name in sums else contribution
+        count += batch_size
+    return _averages(sums, count)
+
+
+def _averages(sums, count):
+    return {name: (value / max(count, 1)).item() for name, value in sums.items()}
+
+
+def _format_losses(components):
+    return "  ".join(
+        "{}={:.4f}".format(name, value.detach().item())
+        for name, value in components.items())

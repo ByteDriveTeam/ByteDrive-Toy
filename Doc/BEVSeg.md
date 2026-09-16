@@ -8,6 +8,24 @@ Each sample contains five consecutive stored frames ordered from oldest to curre
 
 Because all five frames share that current-frame coordinate system, the HD-map drivable mask, lane classes, lane directions, and static boxes are projected once per window and copied before frame-varying dynamic boxes and traffic controls are drawn. The batched path is pixel-equivalent to independently rasterizing the five frames.
 
+## Raster cache
+
+The dataset uses a bounded read-through cache at `data.bevseg.cache.dir`. A cache hit reconstructs the same `float32` tensors without loading frame metadata or running HD-map/box rasterization. Binary semantic layers are bit-packed, while the lane-direction field remains `float32` and is stored once because all five frames share it. Entries use compressed NumPy `.npz` files and atomic writes, so DataLoader workers may safely fill missing entries while training. Each worker retains every HD map it has loaded, keyed by map path rather than scene, so scenes from the same town never reload and reparse that map.
+
+`data.bevseg.cache.max_size_gb` caps the payload across cache versions and defaults to 32 GiB. Once the next entry would exceed the limit, the cache keeps all existing entries and stops adding new ones; misses are still rasterized normally. `compression_level` controls the zlib speed/size tradeoff. Raster configuration, rasterizer source, source LMDB size/time, and HD-map size/time participate in cache identity so changed inputs do not silently reuse stale labels.
+
+With the default `prebuild: true`, normal BEVSeg training first scans the cache, reports the current sample number and percentage every `progress_every` samples, and generates only missing entries before constructing the model. The cache scan and generation cover the same complete `BevSegDataset` consumed by training. The project has no separate train/validation/test split; batching-time shuffle and `drop_last` do not define a stable subset, so prebuild intentionally covers every sample that may appear in any epoch.
+
+To populate the same cache before training without constructing the model:
+
+```powershell
+.\.venv\Scripts\python.exe -m train.run --task bevseg --prepare-bevseg-cache
+```
+
+The command uses `train.num_workers`, `train.prefetch_factor`, and `train.in_order`, reports progress every `data.bevseg.cache.progress_every` samples, and stops when the configured capacity is full. Set `prebuild: false` to skip startup pre-generation while retaining training-time read-through writes. Set `write_missing: false` together with `prebuild: false` for read-only use, or `enabled: false` to bypass the cache.
+
+During training, BEVSeg prints the current epoch, step, percentage, and every loss component at step 1, every `train.log_every` steps, and the final step. The epoch-end line remains a sample-weighted aggregate. Loss accumulation stays on the training device between log points to avoid a device synchronization for every component on every batch.
+
 ## Coordinate and raster contract
 
 - Public BEV axes: `X` is right-positive, `Y` is front-positive, `Z` is up.
