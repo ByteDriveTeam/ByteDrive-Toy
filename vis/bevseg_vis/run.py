@@ -1,11 +1,13 @@
-"""从真实 CARLA LMDB 栅格化并保存五帧 BEVSeg 可视化。
+"""按命令行模式保存 BEVSeg 数据集或压缩器重建与量化特征 PCA 可视化。
 
 模块: vis/bevseg_vis/run.py
-依赖: config, data.bevseg_synthesis, vis.bevseg_vis, vis.data_vis.reader
-读取配置: data.bevseg
+依赖: config, torch, data.bevseg_synthesis, model.bevseg_compressor,
+      vis.bevseg_vis, vis.bevseg_vis.checks.run_checks, vis.data_vis.reader
+读取配置: bevseg_vis.inference/checkpoint/scene/frame/save_dir/device/semantic_threshold,
+          data.bevseg
 对外接口:
     - main(argv=None) -> None
-说明: failed 仅代表驾驶结果；只要场景包含完整五帧，就允许检查其压缩监督标签。
+说明: failed 仅代表驾驶结果；关闭推理时不构建模型，开启推理但无权重时明确告警并使用随机权重。
 """
 
 from __future__ import annotations
@@ -14,13 +16,18 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+import torch
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from config import load_config
 from data.bevseg_synthesis import BevSegRasterizer
-from vis.bevseg_vis.bevseg_vis import save_bevseg_history
+from model.bevseg_compressor import BEVSegCompressor
+from vis.bevseg_vis import save_bevseg_history, save_bevseg_reconstruction
+from vis.bevseg_vis.checks.run_checks import check_frame
 from vis.data_vis.reader import SceneReader, list_scenes
 
 
@@ -29,11 +36,18 @@ def _resolve(path):
     return path if path.is_absolute() else _REPO_ROOT / path
 
 
+def _resolve_device(requested):
+    if str(requested).startswith("cuda") and not torch.cuda.is_available():
+        print("[bevseg-vis] CUDA 不可用，回退 CPU")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
 def _pick_scene(value, root):
     scenes = list_scenes(root)
     if not scenes:
         raise FileNotFoundError("没有找到真实场景目录: {}".format(root))
-    if value is None:
+    if not value:
         return scenes[0]
     candidate = _resolve(value)
     if candidate.is_dir():
@@ -46,38 +60,96 @@ def _pick_scene(value, root):
     raise ValueError("无法解析场景: {}".format(value))
 
 
+def _load_checkpoint(model, checkpoint, device):
+    path = _resolve(checkpoint)
+    if not path.is_file():
+        print("[bevseg-vis][WARNING] 推理已启用，但检查点不存在: {}".format(path))
+        print("[bevseg-vis][WARNING] 将使用随机初始化权重；"
+              "输出仅验证推理/渲染链路，不代表重建质量。")
+        return "random"
+    payload = torch.load(path, map_location=device, weights_only=True)
+    state = payload.get("model", payload)
+    model.load_state_dict(state, strict=True)
+    epoch = payload.get("epoch", "?") if isinstance(payload, dict) else "?"
+    print("[bevseg-vis] 已加载权重: {}（epoch={}）".format(path, epoch))
+    return epoch
+
+
+def _rasterize_history(reader, rasterizer, frame):
+    current_pose = reader.frame_meta(frame)["ego"]["transform"]
+    map_obj = rasterizer.load_map(reader.meta)
+    first = frame - rasterizer.cfg.history_frames + 1
+    history = [rasterizer.rasterize_frame(
+        reader.meta, reader.frame_meta(index), map_obj, current_pose)
+        for index in range(first, frame + 1)]
+    return first, history
+
+
+def _model_input(history):
+    arrays = [np.concatenate((sample["semantic"], sample["direction"]), axis=0)
+              for sample in history]
+    return torch.from_numpy(np.ascontiguousarray(np.stack(arrays))).float().unsqueeze(0)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="从真实 CARLA LMDB 生成 BEVSeg 可视化")
-    parser.add_argument("--config", default=None)
-    parser.add_argument("--env", default=None)
-    parser.add_argument("--scene", default=None, help="scene_XXXXXX、目录路径或场景序号")
-    parser.add_argument("--frame", type=int, default=None, help="当前帧号，默认取最后一帧")
-    parser.add_argument("--output", default="vis/output/bevseg.png")
+    """执行真实五帧数据可视化，并按需执行压缩器推理。"""
+    parser = argparse.ArgumentParser(description="BEVSeg 数据集与压缩器重建/PCA 可视化")
+    parser.add_argument("--config", default=None, help="主配置文件路径")
+    parser.add_argument("--env", default=None, help="环境覆盖名")
+    inference_group = parser.add_mutually_exclusive_group()
+    inference_group.add_argument("--inference", dest="inference", action="store_true",
+                                 help="启用压缩器推理，显示重建与 PCA")
+    inference_group.add_argument("--no-inference", dest="inference", action="store_false",
+                                 help="禁用压缩器推理，仅显示数据集")
+    parser.set_defaults(inference=None)
+    parser.add_argument("--checkpoint", default=None,
+                        help="覆盖 bevseg_vis.checkpoint 的检查点路径")
+    parser.add_argument("--scene", default=None,
+                        help="覆盖 bevseg_vis.scene：scene_XXXXXX、目录路径或场景序号")
+    parser.add_argument("--frame", type=int, default=None,
+                        help="覆盖 bevseg_vis.frame：当前帧号，-1 表示最后一帧")
+    parser.add_argument("--output", default=None,
+                        help="覆盖自动输出路径的 PNG 文件路径")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config, args.env)
+    vis_cfg = cfg.bevseg_vis
     data_cfg = cfg.data.bevseg
+    inference = vis_cfg.inference if args.inference is None else args.inference
+
     scene_root = _resolve(data_cfg.scene_root)
-    scene_dir = _pick_scene(args.scene, scene_root)
+    scene_dir = _pick_scene(args.scene if args.scene is not None else vis_cfg.scene, scene_root)
     reader = SceneReader(scene_dir)
     try:
-        if reader.num_frames < data_cfg.history_frames:
-            raise ValueError("场景不足五帧: {}".format(scene_dir))
-        frame = reader.num_frames - 1 if args.frame is None else args.frame
-        if frame < data_cfg.history_frames - 1 or frame >= reader.num_frames:
-            raise ValueError("frame 必须位于 [{}, {})".format(
-                data_cfg.history_frames - 1, reader.num_frames))
-        current_pose = reader.frame_meta(frame)["ego"]["transform"]
+        requested_frame = vis_cfg.frame if args.frame is None else args.frame
+        frame = reader.num_frames - 1 if requested_frame == -1 else requested_frame
+        check_frame(frame, data_cfg.history_frames, reader.num_frames, scene_dir)
         rasterizer = BevSegRasterizer(data_cfg)
-        map_obj = rasterizer.load_map(reader.meta)
-        first = frame - data_cfg.history_frames + 1
-        history = [rasterizer.rasterize_frame(
-            reader.meta, reader.frame_meta(index), map_obj, current_pose)
-            for index in range(first, frame + 1)]
-        output = _resolve(args.output)
-        save_bevseg_history(history, rasterizer.layers, output,
-                            frame_ids=range(first, frame + 1))
-        print("[bevseg-vis] scene={} frame={} output={}".format(scene_dir.name, frame, output))
+        first, history = _rasterize_history(reader, rasterizer, frame)
+        suffix = "reconstruction_pca" if inference else "dataset"
+        output = (_resolve(args.output) if args.output else
+                  _resolve(vis_cfg.save_dir) /
+                  "bevseg_{}_f{:06d}_{}.png".format(scene_dir.name, frame, suffix))
+        if inference:
+            device = _resolve_device(vis_cfg.device)
+            model = BEVSegCompressor(cfg).to(device).eval()
+            epoch = _load_checkpoint(model, args.checkpoint or vis_cfg.checkpoint, device)
+            with torch.inference_mode():
+                outputs = model(_model_input(history).to(device), epoch=None, sample=False)
+            logits = outputs["reconstruction_logits"][0].reshape(
+                data_cfg.history_frames, len(rasterizer.layers) + 2,
+                data_cfg.resolution, data_cfg.resolution).float().cpu().numpy()
+            codes = outputs["codes"][0].float().cpu().numpy()
+            save_bevseg_reconstruction(
+                history, logits, codes, rasterizer.layers, vis_cfg.semantic_threshold,
+                output, frame_ids=range(first, frame + 1),
+                metadata={"scene": scene_dir.name, "frame": frame, "epoch": epoch})
+        else:
+            print("[bevseg-vis] 模式=仅数据集（未构建模型、未执行推理）")
+            save_bevseg_history(
+                history, rasterizer.layers, output, frame_ids=range(first, frame + 1))
+        print("[bevseg-vis] mode={} scene={} frame={} output={}".format(
+            "inference" if inference else "dataset", scene_dir.name, frame, output))
     finally:
         reader.close()
 

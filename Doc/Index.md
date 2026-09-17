@@ -204,8 +204,8 @@ Python 3.7 simulation worker:
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette
 - [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR/state trajectory BEV, composite panels, and HUD rendering
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
-- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg temporal/layer composite renderer with lane-direction arrows and ego-center marker
-- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — Real CARLA LMDB + HDMap BEVSeg visualization CLI
+- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg target/reconstruction comparison and quantized-code PCA renderer
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — CLI-selectable dataset-only or compressor-inference visualization over a real CARLA five-frame window
 
 ### Perception predictions
 

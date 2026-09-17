@@ -810,6 +810,18 @@ class TrainCfg:
 
 
 @dataclass
+class BevSegVisCfg:
+    """BEVSeg 压缩器重建与量化特征 PCA 可视化参数。"""
+    inference: bool
+    checkpoint: str
+    scene: str
+    frame: int
+    save_dir: str
+    device: str
+    semantic_threshold: float
+
+
+@dataclass
 class PredVisCfg:
     checkpoint: str
     scene: str
@@ -1020,6 +1032,7 @@ class Config:
     model: ModelCfg
     data: DataCfg
     train: TrainCfg
+    bevseg_vis: BevSegVisCfg
     pred_vis: PredVisCfg
     driving_vis: DrivingVisCfg
     clone_loop: CloneLoopCfg
@@ -1179,6 +1192,7 @@ def validate_config(cfg):
     _validate_bevseg_data(cfg.data.bevseg)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_bevseg_loss(cfg.train.bevseg_loss_weights)
+    _validate_bevseg_vis(cfg.bevseg_vis)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
@@ -1914,6 +1928,25 @@ def _validate_pred_vis(pv):
     assert pv.depth_max_display_m > 0, "pred_vis.depth_max_display_m 必须 > 0"
     assert 0 < pv.depth_min_display_m < pv.depth_max_display_m, \
         "pred_vis.depth_min_display_m 须 >0 且 < depth_max_display_m（对数量程下限）"
+
+
+def _validate_bevseg_vis(vis):
+    """校验对象: cfg.bevseg_vis —— 压缩器检查点、样本和 PCA 可视化参数。"""
+    assert isinstance(vis.inference, bool), \
+        "bevseg_vis.inference 必须为布尔值"
+    assert isinstance(vis.checkpoint, str) and vis.checkpoint, \
+        "bevseg_vis.checkpoint 不得为空"
+    assert isinstance(vis.scene, str) and isinstance(vis.save_dir, str) and vis.save_dir, \
+        "bevseg_vis.scene/save_dir 类型或取值非法"
+    assert isinstance(vis.frame, int) and not isinstance(vis.frame, bool) and vis.frame >= -1, \
+        "bevseg_vis.frame 必须 >= -1（-1 表示最后一帧）"
+    cuda_device = vis.device == "cuda" or (
+        vis.device.startswith("cuda:") and vis.device[5:].isdigit())
+    assert vis.device == "cpu" or cuda_device, \
+        "bevseg_vis.device 仅支持 cpu/cuda[:序号]"
+    assert math.isfinite(vis.semantic_threshold) \
+        and 0 < vis.semantic_threshold < 1, \
+        "bevseg_vis.semantic_threshold 必须位于 (0,1)"
 
 
 def _validate_driving_vis(dv, model_lane, model_traffic):

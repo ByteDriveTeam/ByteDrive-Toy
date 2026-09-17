@@ -56,3 +56,23 @@ Training also applies entropy regularization to the processed categorical distri
 The encoder uses a 16×16 stride-16 projection to 384 channels, residual blocks at 16×16, 8×8, and 4×4, and grouped logits with 64 independent 16-entry subword vocabularies of dimension 32. During training, each subword vocabulary first takes its probability-ranked Top-8 candidates, keeps the global Top-1, and samples three additional candidates without replacement from the Top-8 probabilities. The sampled Top-4 probabilities are linearly normalized and linearly sharpened toward a straight-through Top-1 one-hot selection over the first 20% of training. The resulting per-vocabulary probabilities are used to form a weighted codebook vector; inference always uses deterministic Top-1 hard selection. After the 64 subword vectors are concatenated, RMSNorm is applied over the complete 2048-dimensional code before it is returned by the encoder or consumed by the decoder.
 
 The decoder expands 4×4 codes to 256×256 through six 2× PixelShuffle stages. Expand convolutions use ICNR initialization; spatial convolutions and residual channel mixing retain capacity while avoiding interpolation blur and reducing initial checkerboard artifacts.
+
+## Reconstruction and compressed-feature visualization
+
+`vis/bevseg_vis/run.py` always rasterizes one real five-frame window in the selected current frame's ego coordinate system. Dataset-only mode writes the temporal/layer canvas without constructing the compressor. Inference mode runs deterministic Top-1 compression and writes a comparison PNG: the top row shows the five target frames, the bottom row shows their reconstructions, and the right-hand panels report reconstruction metrics and the compressed-feature PCA image.
+
+The PCA source is the normalized, quantized `codes` tensor consumed by the decoder, not the pre-quantization encoder activation. Its 16 spatial tokens are treated as samples and their 2048 code channels as features. PCA reduces the channel axis to three components, maps PC1/PC2/PC3 to red/green/blue, and reshapes the tokens to the native 4×4 compressed grid. Component signs are fixed by their largest absolute loading so repeated rendering of the same codes has stable colors. Each component is normalized independently for display, so PCA colors compare spatial structure within an image rather than absolute magnitude across different images.
+
+Configure the default mode, checkpoint, scene, current frame, output directory, device, and semantic display threshold under `bevseg_vis` in `config/default.yaml`. The default is dataset-only; it can be selected explicitly with:
+
+```powershell
+.\.venv\Scripts\python.exe -m vis.bevseg_vis.run --no-inference
+```
+
+Enable model inference for one render with:
+
+```powershell
+.\.venv\Scripts\python.exe -m vis.bevseg_vis.run --inference
+```
+
+CLI flags `--inference`/`--no-inference`, `--checkpoint`, `--scene`, `--frame`, and `--output` may override the configured mode or values for one render. `--scene` accepts a `scene_XXXXXX` name, scene directory, or numeric scene index; frame `-1` selects the final stored frame. If inference is enabled and the checkpoint file is absent, the CLI prints two explicit warnings and continues with random initialization; that output validates only the software path and does not represent reconstruction quality. Existing but structurally incompatible checkpoints still fail instead of being partially loaded.

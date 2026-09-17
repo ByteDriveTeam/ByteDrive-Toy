@@ -692,6 +692,19 @@ train:
     positive_weight: 2.0
 
 # ============================================================
+# bevseg_vis —— BEVSeg 压缩器重建与量化特征 PCA 可视化
+# ============================================================
+
+bevseg_vis:
+  inference: false                            # false=仅展示数据集；可用 --inference 临时启用模型推理
+  checkpoint: train/ckpt/bevseg/epoch_010.pt  # 推理权重；不存在时明确告警并使用随机初始化
+  scene: ''                                    # scene_XXXXXX、场景路径或序号；空=首个场景
+  frame: -1                                    # 当前帧号；-1=场景最后一帧
+  save_dir: vis/bevseg_vis/out                  # 未传 --output 时的输出目录
+  device: cuda                                 # CUDA 不可用时自动回退 CPU
+  semantic_threshold: 0.5                      # sigmoid 后语义二值化及预测方向显示掩码阈值
+
+# ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
 # ============================================================
 
