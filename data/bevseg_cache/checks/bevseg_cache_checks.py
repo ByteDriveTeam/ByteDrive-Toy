@@ -3,8 +3,8 @@ import numpy as np
 
 def check_cache_arrays(semantic, direction, history_frames, layers, resolution):
     """校验对象: BevSegDiskCache.store 输入 —— 栅格形状与可无损编码的数据类型。"""
-    semantic_shape = (history_frames, layers, resolution, resolution)
-    direction_shape = (history_frames, 2, resolution, resolution)
+    semantic_shape = (layers, resolution, resolution)
+    direction_shape = (2, resolution, resolution)
     if semantic.shape != semantic_shape or direction.shape != direction_shape:
         raise ValueError(
             "BEVSeg 缓存输入形状错误: semantic={} direction={}".format(
@@ -13,8 +13,6 @@ def check_cache_arrays(semantic, direction, history_frames, layers, resolution):
         raise TypeError("BEVSeg 缓存仅接受 rasterizer 输出的 float32 数组")
     if not np.logical_or(semantic == 0.0, semantic == 1.0).all():
         raise ValueError("BEVSeg 语义缓存只能 bit-pack 二值栅格")
-    if not np.array_equal(direction, np.broadcast_to(direction[:1], direction.shape)):
-        raise ValueError("BEVSeg 五帧方向场必须相同，不能压缩为单份方向场")
 
 
 def check_cache_payload(semantic_bits, direction, semantic_count, direction_shape):

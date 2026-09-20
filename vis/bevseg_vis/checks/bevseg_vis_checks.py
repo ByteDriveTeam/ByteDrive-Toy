@@ -5,8 +5,8 @@ import numpy as np
 
 def check_bevseg_history(history, semantic_layers):
     """检查对象: render_bevseg_history 的栅格历史与语义层。"""
-    if len(history) != 5:
-        raise ValueError("BEVSeg 可视化必须提供连续五帧")
+    if len(history) != 1:
+        raise ValueError("BEVSeg 单帧可视化必须提供一个样本")
     expected = len(semantic_layers)
     for sample in history:
         semantic = sample.get("semantic")

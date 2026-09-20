@@ -10,7 +10,7 @@
       .store(key, semantic, direction) -> str
       .summary() -> dict
     - prepare_bevseg_cache(dataset, num_workers, prefetch_factor, in_order, progress_every) -> dict
-说明: 二值语义按 bit 打包；五帧共享的 float32 方向场只存一份，解码结果逐元素等价。
+说明: 二值语义按 bit 打包；单帧 float32 方向场只存一份，解码结果逐元素等价。
 """
 
 from __future__ import annotations
@@ -81,11 +81,11 @@ class BevSegDiskCache:
         self.history_frames = int(history_frames)
         self.layers = int(layers)
         self.resolution = int(resolution)
-        self.semantic_shape = (
-            self.history_frames, self.layers, self.resolution, self.resolution)
+        self.semantic_shape = (self.layers, self.resolution, self.resolution)
         self.direction_shape = (2, self.resolution, self.resolution)
         fingerprint = {
             "format_version": _FORMAT_VERSION,
+            "single_frame": True,
             "payload": fingerprint_payload,
         }
         encoded = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True,
@@ -168,7 +168,7 @@ class BevSegDiskCache:
     def _encode(self, semantic, direction):
         check_cache_arrays(
             semantic, direction, self.history_frames, self.layers, self.resolution)
-        semantic_bits = np.packbits(semantic.reshape(-1).astype(np.uint8), bitorder="little")
+        semantic_bits = np.packbits(semantic.astype(np.uint8).reshape(-1), bitorder="little")
         buffer = io.BytesIO()
         arrays = {"semantic_bits": semantic_bits,
                   "direction": np.ascontiguousarray(direction[0])}
@@ -189,7 +189,7 @@ class BevSegDiskCache:
         semantic = np.unpackbits(
             semantic_bits, count=semantic_count, bitorder="little").reshape(self.semantic_shape)
         semantic = np.ascontiguousarray(semantic, dtype=np.float32)
-        direction = np.repeat(direction[None], self.history_frames, axis=0)
+        direction = np.ascontiguousarray(direction, dtype=np.float32)
         return {"semantic": semantic, "direction": direction}
 
     def load(self, key):

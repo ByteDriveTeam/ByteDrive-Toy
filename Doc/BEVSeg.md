@@ -4,13 +4,13 @@ The BEVSeg task consumes only driving-relevant labels produced from CARLA collec
 
 ## Dataset windows
 
-Each sample contains five consecutive stored frames ordered from oldest to current, all rasterized in the current frame's ego coordinate system. Window endpoints are sampled once per `data.bevseg.window_stride_s` using each scene's recorded `sensor_dt_s`; the default one-second stride is therefore ten stored frames for 10 Hz scenes. Windows never cross scene boundaries, and only scenes with fewer than five stored frames are excluded. A scene-level `failed` flag does not exclude otherwise complete windows because compressor training benefits from the additional state diversity.
+Each sample contains one stored frame rasterized in its own ego coordinate system. Frames are sampled once per `data.bevseg.sample_interval_s` using each scene's recorded `sensor_dt_s`; the default one-second interval is therefore every ten stored frames for 10 Hz scenes. Scenes with no stored frames are excluded. A scene-level `failed` flag does not exclude otherwise complete windows because compressor training benefits from the additional state diversity.
 
-Because all five frames share that current-frame coordinate system, the HD-map drivable mask, lane classes, lane directions, and static boxes are projected once per window and copied before frame-varying dynamic boxes and traffic controls are drawn. The batched path is pixel-equivalent to independently rasterizing the five frames.
+Because all one frame share that current-frame coordinate system, the HD-map drivable mask, lane classes, lane directions, and static boxes are projected once per window and copied before frame-varying dynamic boxes and traffic controls are drawn. The batched path is pixel-equivalent to independently rasterizing the one frame.
 
 ## Raster cache
 
-The dataset uses a bounded read-through cache at `data.bevseg.cache.dir`. A cache hit reconstructs the same `float32` tensors without loading frame metadata or running HD-map/box rasterization. Binary semantic layers are bit-packed, while the lane-direction field remains `float32` and is stored once because all five frames share it. Entries use compressed NumPy `.npz` files and atomic writes, so DataLoader workers may safely fill missing entries while training. Each worker retains every HD map it has loaded, keyed by map path rather than scene, so scenes from the same town never reload and reparse that map.
+The dataset uses a bounded read-through cache at `data.bevseg.cache.dir`. A cache hit reconstructs the same `float32` tensors without loading frame metadata or running HD-map/box rasterization. Binary semantic layers are bit-packed, while the lane-direction field remains `float32` and is stored once because all one frame share it. Entries use compressed NumPy `.npz` files and atomic writes, so DataLoader workers may safely fill missing entries while training. Each worker retains every HD map it has loaded, keyed by map path rather than scene, so scenes from the same town never reload and reparse that map.
 
 `data.bevseg.cache.max_size_gb` caps the payload across cache versions and defaults to 32 GiB. Once the next entry would exceed the limit, the cache keeps all existing entries and stops adding new ones; misses are still rasterized normally. `compression_level` controls the zlib speed/size tradeoff. Raster configuration, rasterizer source, source LMDB size/time, and HD-map size/time participate in cache identity so changed inputs do not silently reuse stale labels.
 
@@ -45,7 +45,7 @@ The existing numeric CARLA ego transform uses `(forward, right)` for its planar 
 
 Each frame has ten binary channels, in this fixed order:
 
-`drivable`, `lane_centerline`, `lane_divider`, `road_boundary`, `pedestrian_crossing`, `vehicle`, `pedestrian`, `stop_line_red`, `stop_line_yellow`, `stop_line_green`.
+`drivable`, `lane_centerline`, `lane_divider`, `road_boundary`, `pedestrian_crossing`, `vehicle`, `pedestrian`, `stop_line_red`, `stop_line_yellow`, `stop_line_green`. The pedestrian layer preserves the original oriented box and adds a centered configurable visibility square (`data.bevseg.pedestrian_grid_size_m`, default 1.0 m). Traffic-light stop lines include every in-range stop waypoint from scene metadata, not only the route-relevant light.
 
 The final three channels are a fused stop-line/control representation. No standalone pole, traffic-light, or untyped stop-line channel is emitted. Two additional continuous channels store lane tangent direction `(right, front)` and are masked by lane pixels. Five ego-aligned frames are concatenated for a 60-channel model input.
 
@@ -59,7 +59,7 @@ The decoder expands 4×4 codes to 256×256 through six 2× PixelShuffle stages. 
 
 ## Reconstruction and compressed-feature visualization
 
-`vis/bevseg_vis/run.py` always rasterizes one real five-frame window in the selected current frame's ego coordinate system. Dataset-only mode writes the temporal/layer canvas without constructing the compressor. Inference mode runs deterministic Top-1 compression and preserves that same diagnostic detail for both sources: the target section and reconstruction section each show all five temporal composites, the current frame's ten independent semantic layers, and its lane-direction overlay. The target temporal row ends with reconstruction metrics, while the reconstruction temporal row ends with the compressed-feature PCA image.
+`vis/bevseg_vis/run.py` always rasterizes one real single-frame window in the selected current frame's ego coordinate system. Dataset-only mode writes the temporal/layer canvas without constructing the compressor. Inference mode runs deterministic Top-1 compression and preserves that same diagnostic detail for both sources: the target section and reconstruction section each show all five temporal composites, the current frame's ten independent semantic layers, and its lane-direction overlay. The target temporal row ends with reconstruction metrics, while the reconstruction temporal row ends with the compressed-feature PCA image.
 
 The PCA source is the normalized, quantized `codes` tensor consumed by the decoder, not the pre-quantization encoder activation. Its 16 spatial tokens are treated as samples and their 2048 code channels as features. PCA reduces the channel axis to three components, maps PC1/PC2/PC3 to red/green/blue, and reshapes the tokens to the native 4×4 compressed grid. Component signs are fixed by their largest absolute loading so repeated rendering of the same codes has stable colors. Each component is normalized independently for display, so PCA colors compare spatial structure within an image rather than absolute magnitude across different images.
 

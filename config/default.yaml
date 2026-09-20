@@ -521,7 +521,6 @@ model:
 # BEVSeg 压缩器：时序语义栅格的分层词表与重建结构
   bevseg:
     in_layers: 12
-    history_frames: 5
     encoder_dim: 384
     patch_kernel: 16
     residual_blocks_16: 3
@@ -608,8 +607,8 @@ data:
       progress_every: 1000        # 自动检测/预生成每处理多少个样本打印一次进度
     extent_m: 64.0
     resolution: 256
-    history_frames: 5
-    window_stride_s: 1.0       # 相邻五帧窗口终点的时间间隔；按场景实际 sensor_dt_s 换算为帧步长
+    sample_interval_s: 1.0     # 单帧样本的时间间隔；按场景实际 sensor_dt_s 换算为帧步长
+    pedestrian_grid_size_m: 1.0  # 保留原始行人框后叠加的中心化可见性方格边长
     lane_half_width_m: 1.75
     line_width_m: 0.5
     stop_line_width_m: 1.00
@@ -684,12 +683,21 @@ train:
     stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
 
   bevseg_loss_weights:
-    semantic: 1.0
     direction: 0.25
     entropy: 0.001
     sharpening: 0.01
     usage: 0.1
-    positive_weight: 2.0
+    semantic_classes:
+      drivable: {bce_weight: 1.0, positive_weight: 2.0}
+      lane_centerline: {bce_weight: 1.0, positive_weight: 2.0}
+      lane_divider: {bce_weight: 1.0, positive_weight: 2.0}
+      road_boundary: {bce_weight: 1.0, positive_weight: 2.0}
+      pedestrian_crossing: {bce_weight: 1.0, positive_weight: 2.0}
+      vehicle: {bce_weight: 1.0, positive_weight: 2.0}
+      pedestrian: {bce_weight: 1.0, positive_weight: 2.0}
+      stop_line_red: {bce_weight: 1.0, positive_weight: 2.0}
+      stop_line_yellow: {bce_weight: 1.0, positive_weight: 2.0}
+      stop_line_green: {bce_weight: 1.0, positive_weight: 2.0}
 
 # ============================================================
 # bevseg_vis —— BEVSeg 压缩器重建与量化特征 PCA 可视化

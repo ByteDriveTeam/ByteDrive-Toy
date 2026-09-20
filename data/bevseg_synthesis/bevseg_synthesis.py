@@ -4,7 +4,7 @@
 依赖: cv2, numpy, data.hd_map, data.driving_targets, vis.data_vis.geometry
 读取配置: data.bevseg.extent_m/resolution/layers/map_dir/map_name_template/lane_types/
           lane_layer_map/box_layers/state_layers/lane_half_width_m/line_width_m/
-          unknown_lane_class/stop_line_width_m
+          unknown_lane_class/stop_line_width_m/pedestrian_grid_size_m
 对外接口:
     - BevSegRasterizer(cfg) -> object
       .map_path(scene_meta) -> Path
@@ -91,8 +91,8 @@ class BevSegRasterizer:
         for frame_semantic, frame_meta in zip(semantic, frame_metas):
             self._rasterize_boxes(
                 frame_semantic, frame_meta.get("bboxes", []), reference, exclude_ego=True)
-            self._rasterize_control(
-                frame_semantic, frame_meta, scene_meta, map_obj, reference)
+            self._rasterize_all_traffic_lights(
+                frame_semantic, scene_meta, frame_meta, reference)
         return {"semantic": semantic, "direction": direction}
 
     def _copy_lane_layers(self, semantic, direction, lane_class, lane_direction):
@@ -120,6 +120,55 @@ class BevSegRasterizer:
             points = np.stack((cols, rows), axis=1).round().astype(np.int32)
             polygon = cv2.convexHull(points)
             cv2.fillConvexPoly(semantic[self.layer_index[target]], polygon, 1.0)
+            if label == "pedestrian":
+                self._rasterize_pedestrian_visibility(semantic[self.layer_index[target]], box,
+                                                       current_pose)
+
+    def _rasterize_pedestrian_visibility(self, canvas, box, current_pose):
+        """在保留原始有向行人框后叠加中心化米制方格，提升小目标可见性。"""
+        corners = bbox_corners(box)
+        center = corners.mean(axis=0, keepdims=True)
+        w2e = world_to_ego(current_pose)
+        center_ego = transform_points(center, w2e)[0, :2]
+        transform = np.asarray(box.get("transform", box.get("location", [0, 0, 0])), dtype=np.float64)
+        yaw = math.radians(float(transform[5])) if transform.size >= 6 else 0.0
+        direction_world = np.array([math.cos(yaw), math.sin(yaw), 0.0])[None]
+        direction = direction_world[0, :2] @ w2e[:2, :2].T
+        direction /= np.linalg.norm(direction).clip(1e-6)
+        normal = np.array([-direction[1], direction[0]])
+        half = float(self.cfg.pedestrian_grid_size_m) * 0.5
+        square = center_ego + np.array([-half, half, half, -half])[:, None] * direction
+        square += np.array([-half, -half, half, half])[:, None] * normal
+        rows, cols = ego_xy_to_pixel(square, self.bev)
+        points = np.stack((cols, rows), axis=1).round().astype(np.int32)
+        cv2.fillConvexPoly(canvas, cv2.convexHull(points), 1.0)
+
+    def _rasterize_all_traffic_lights(self, semantic, scene_meta, frame_meta, current_pose):
+        """绘制 BEV 范围内全部交通灯停止线，不按路线相关性裁剪。"""
+        states = {int(item.get("id")): item.get("state", "unknown")
+                  for item in frame_meta.get("traffic_light_states", [])}
+        w2e = world_to_ego(current_pose)
+        for light in scene_meta.get("traffic_lights", []):
+            target = self.state_layers.get(states.get(int(light.get("id", -1)), "unknown"))
+            if target not in self.layer_index:
+                continue
+            for waypoint in light.get("stop_waypoints", []):
+                transform = waypoint.get("transform")
+                if not transform or len(transform) < 6:
+                    continue
+                center = transform_points(np.asarray([transform[:3]], dtype=np.float64), w2e)[0, :2]
+                yaw = math.radians(float(transform[5]))
+                direction_world = np.array([math.cos(yaw), math.sin(yaw), 0.0])[None]
+                direction = direction_world[0, :2] @ w2e[:2, :2].T
+                direction /= np.linalg.norm(direction).clip(1e-6)
+                half_width = float(waypoint.get("lane_width", self.cfg.stop_line_width_m)) * 0.5
+                normal = np.array([-direction[1], direction[0]])
+                endpoints = center + np.array([-half_width, half_width])[:, None] * normal
+                rows, cols = ego_xy_to_pixel(endpoints, self.bev)
+                points = np.stack((cols, rows), axis=1).round().astype(np.int32)
+                pixels_per_meter = self.bev.width / (self.bev.y_max - self.bev.y_min)
+                cv2.line(semantic[self.layer_index[target]], tuple(points[0]), tuple(points[1]), 1.0,
+                         max(int(round(self.cfg.stop_line_width_m * pixels_per_meter)), 1))
 
     def _rasterize_control(self, semantic, frame_meta, scene_meta, map_obj, current_pose):
         control = frame_meta.get("relevant_traffic_control")

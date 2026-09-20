@@ -227,11 +227,11 @@ def _info_panel(metrics, codes, metadata):
 
 
 def render_bevseg_history(history, semantic_layers, frame_ids=None):
-    """渲染五帧历史、当前语义层和方向箭头，返回 BGR 画布。"""
+    """渲染单帧语义层和方向箭头，返回 BGR 画布。"""
     check_bevseg_history(history, semantic_layers)
-    frame_ids = list(range(5)) if frame_ids is None else list(frame_ids)
-    if len(frame_ids) != 5:
-        raise ValueError("frame_ids 必须包含五个帧号")
+    frame_ids = list(range(len(history))) if frame_ids is None else list(frame_ids)
+    if len(frame_ids) != len(history):
+        raise ValueError("frame_ids 数量必须与单帧样本一致")
 
     prepared = [(sample["semantic"], sample["direction"]) for sample in history]
     temporal = [_composite_panel(semantic, direction, semantic_layers,
@@ -270,7 +270,7 @@ def save_bevseg_history(history, semantic_layers, output_path, frame_ids=None):
 
 def render_bevseg_reconstruction(history, reconstruction_logits, codes, semantic_layers,
                                  semantic_threshold, frame_ids=None, metadata=None):
-    """渲染五帧真值/重建对照和量化压缩特征的三通道 PCA 图。"""
+    """渲染单帧真值/重建对照和量化压缩特征的三通道 PCA 图。"""
     check_bevseg_reconstruction(
         history, reconstruction_logits, codes, semantic_layers, semantic_threshold)
     frame_ids = list(range(len(history))) if frame_ids is None else list(frame_ids)
@@ -305,7 +305,11 @@ def render_bevseg_reconstruction(history, reconstruction_logits, codes, semantic
         np.hstack(pred_panels + [_pca_panel(codes)]),
         *pred_details,
     ]
-    canvas = np.vstack(rows + [_legend_panel(semantic_layers, rows[0].shape[1])])
+    width = max(row.shape[1] for row in rows)
+    rows = [row if row.shape[1] == width else cv2.copyMakeBorder(
+        row, 0, 0, 0, width - row.shape[1], cv2.BORDER_CONSTANT, value=_BACKGROUND)
+            for row in rows]
+    canvas = np.vstack(rows + [_legend_panel(semantic_layers, width)])
     cv2.putText(canvas, "BEVSeg compressor | X=right, Y=front | ego=center",
                 (8, canvas.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX,
                 0.48, (220, 220, 220), 1, cv2.LINE_AA)
@@ -314,7 +318,7 @@ def render_bevseg_reconstruction(history, reconstruction_logits, codes, semantic
 
 def save_bevseg_reconstruction(history, reconstruction_logits, codes, semantic_layers,
                                semantic_threshold, output_path, frame_ids=None, metadata=None):
-    """保存 BEVSeg 压缩器五帧重建与 PCA 对照画布。"""
+    """保存 BEVSeg 压缩器单帧重建与 PCA 对照画布。"""
     image = render_bevseg_reconstruction(
         history, reconstruction_logits, codes, semantic_layers,
         semantic_threshold, frame_ids, metadata)

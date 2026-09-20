@@ -570,7 +570,6 @@ class DrivingCfg:
 class BevSegModelCfg:
     """BEVSeg 压缩器网络与分层词表参数。"""
     in_layers: int
-    history_frames: int
     encoder_dim: int
     patch_kernel: int
     residual_blocks_16: int
@@ -609,8 +608,8 @@ class BevSegDataCfg:
     cache: BevSegCacheCfg
     extent_m: float
     resolution: int
-    history_frames: int
-    window_stride_s: float
+    sample_interval_s: float
+    pedestrian_grid_size_m: float
     lane_half_width_m: float
     line_width_m: float
     stop_line_width_m: float
@@ -625,11 +624,17 @@ class BevSegDataCfg:
 @dataclass
 class BevSegLossWeightsCfg:
     """BEVSeg 重建、方向和熵正则权重。"""
-    semantic: float
     direction: float
     entropy: float
     sharpening: float
     usage: float
+    semantic_classes: Dict[str, "BevSegClassLossCfg"]
+
+
+@dataclass
+class BevSegClassLossCfg:
+    """单个 BEVSeg 语义类别的 BCE 与积极区域权重。"""
+    bce_weight: float
     positive_weight: float
 
 
@@ -1191,7 +1196,7 @@ def validate_config(cfg):
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
     _validate_bevseg_data(cfg.data.bevseg)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
-    _validate_bevseg_loss(cfg.train.bevseg_loss_weights)
+    _validate_bevseg_loss(cfg.train.bevseg_loss_weights, cfg.data.bevseg.layers)
     _validate_bevseg_vis(cfg.bevseg_vis)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
@@ -1537,8 +1542,7 @@ def _validate_model_collection(cc, cfg):
 
 def _validate_bevseg_model(model):
     """鏍￠獙瀵硅薄: cfg.model.bevseg 鈥斺€?BEVSeg 缂栬В鐮佸櫒涓庡垎灞傝瘝琛ㄣ€?"""
-    assert model.in_layers == 12 and model.history_frames == 5, \
-        "model.bevseg.in_layers/history_frames 必须为 12/5"
+    assert model.in_layers == 12, "model.bevseg.in_layers 必须为 12"
     assert model.encoder_dim == 384 and model.patch_kernel == 16, \
         "model.bevseg.encoder_dim/patch_kernel 必须为 384/16"
     assert model.residual_blocks_16 == 3 and model.residual_blocks_8 == 3 \
@@ -1557,10 +1561,11 @@ def _validate_bevseg_model(model):
 
 def _validate_bevseg_data(data):
     """鏍￠獙瀵硅薄: cfg.data.bevseg 鈥斺€?坐标和驾驶语义层契约。"""
-    assert data.extent_m > 0 and data.resolution > 0 and data.history_frames == 5, \
-        "data.bevseg 范围、分辨率和历史帧数非法"
-    assert math.isfinite(data.window_stride_s) and data.window_stride_s > 0, \
-        "data.bevseg.window_stride_s 必须为有限正数"
+    assert data.extent_m > 0 and data.resolution > 0, "data.bevseg 范围和分辨率非法"
+    assert math.isfinite(data.sample_interval_s) and data.sample_interval_s > 0, \
+        "data.bevseg.sample_interval_s 必须为有限正数"
+    assert math.isfinite(data.pedestrian_grid_size_m) and data.pedestrian_grid_size_m > 0, \
+        "data.bevseg.pedestrian_grid_size_m 必须为有限正数"
     assert data.cache.dir, "data.bevseg.cache.dir 不能为空"
     assert math.isfinite(data.cache.max_size_gb) and data.cache.max_size_gb > 0, \
         "data.bevseg.cache.max_size_gb 必须为有限正数"
@@ -1590,13 +1595,17 @@ def _validate_bevseg_data(data):
         "data.bevseg.state_layers 目标层必须存在"
 
 
-def _validate_bevseg_loss(weights):
-    """鏍￠獙瀵硅薄: cfg.train.bevseg_loss_weights 鈥斺€?BEVSeg 损失权重。"""
-    assert weights.semantic > 0 and weights.direction >= 0 and weights.entropy >= 0 \
-        and weights.sharpening >= 0 and weights.usage >= 0, \
-        "train.bevseg_loss_weights 权重非法"
-    assert weights.positive_weight >= 1, \
-        "train.bevseg_loss_weights.positive_weight 必须 >= 1"
+def _validate_bevseg_loss(weights, layers):
+    """校验对象: cfg.train.bevseg_loss_weights —— BEVSeg 损失权重。"""
+    assert weights.direction >= 0 and weights.entropy >= 0 \
+        and weights.sharpening >= 0 and weights.usage >= 0, "train.bevseg_loss_weights 权重非法"
+    assert set(weights.semantic_classes) == set(layers), \
+        "semantic_classes 必须覆盖且仅覆盖全部语义层"
+    assert sum(item.bce_weight for item in weights.semantic_classes.values()) > 0, \
+        "至少需要一个正 BCE 权重"
+    assert all(item.bce_weight >= 0 and item.positive_weight > 0
+               for item in weights.semantic_classes.values()), \
+        "类别 BCE 权重必须 >= 0，积极区域权重必须 > 0"
 
 
 def _validate_model(model):

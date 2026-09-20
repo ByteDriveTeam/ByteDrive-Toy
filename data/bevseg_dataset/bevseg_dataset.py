@@ -1,8 +1,8 @@
-"""读取 CARLA 场景并返回五帧 ego 对齐 BEVSeg。
+"""读取 CARLA 场景并返回单帧 ego 对齐 BEVSeg。
 
 模块: data/bevseg_dataset/bevseg_dataset.py
 依赖: torch, numpy, data.single_frame_base, data.bevseg_synthesis, data.bevseg_cache
-读取配置: data.bevseg.scene_root/history_frames/window_stride_s/cache, data.scene_cache_size
+读取配置: data.bevseg.scene_root/sample_interval_s/cache, data.scene_cache_size
 对外接口:
     - BevSegDataset(cfg) -> Dataset
       __getitem__(index) -> dict[str, Tensor]
@@ -33,7 +33,7 @@ __all__ = ["BevSegDataset"]
 
 
 class BevSegDataset(Dataset):
-    """返回当前帧坐标系下的完整五帧 BEVSeg 样本。"""
+    """返回当前帧坐标系下的单帧 BEVSeg 样本。"""
 
     def __init__(self, cfg) -> None:
         self.cfg = cfg
@@ -56,7 +56,7 @@ class BevSegDataset(Dataset):
         self._disk_cache = BevSegDiskCache(
             self.data_cfg.cache,
             fingerprint,
-            self.data_cfg.history_frames,
+            1,
             len(self.data_cfg.layers),
             self.data_cfg.resolution,
         )
@@ -94,20 +94,19 @@ class BevSegDataset(Dataset):
             pass
 
     def _build_index(self):
-        history = self.data_cfg.history_frames
         index = []
         for scene in list_scenes(self._root):
             reader = SceneReader(scene)
             try:
                 self._scene_signatures[str(scene)] = self._source_signature(scene, reader.meta)
                 # failed 只描述驾驶结果，不代表 BEV 标签损坏；压缩学习保留所有完整窗口。
-                if reader.num_frames < history:
+                if reader.num_frames < 1:
                     continue
                 # 不同场景可采用不同落盘频率，按场景元数据保持统一的时间步长。
                 sensor_dt_s = float(reader.meta["sensor_dt_s"])
-                stride = max(1, int(round(self.data_cfg.window_stride_s / sensor_dt_s)))
+                stride = max(1, int(round(self.data_cfg.sample_interval_s / sensor_dt_s)))
                 index.extend((scene, frame)
-                             for frame in range(history - 1, reader.num_frames, stride))
+                             for frame in range(0, reader.num_frames, stride))
             finally:
                 reader.close()
         return index
@@ -159,14 +158,8 @@ class BevSegDataset(Dataset):
         current_pose = current_meta["ego"]["transform"]
         scene_meta = reader.meta
         map_obj = self._map(scene_meta)
-        start = frame_idx - self.data_cfg.history_frames + 1
-        outputs = self._rasterizer.rasterize_frames(
-            scene_meta,
-            [reader.frame_meta(i) for i in range(start, frame_idx + 1)],
-            map_obj,
-            current_pose,
-        )
-        return outputs
+        return self._rasterizer.rasterize_frame(
+            scene_meta, current_meta, map_obj, current_pose)
 
     def _load_outputs(self, index):
         scene, frame_idx = self._index[index]
@@ -198,10 +191,9 @@ class BevSegDataset(Dataset):
         outputs, _ = self._load_outputs(index)
         semantic = outputs["semantic"]
         direction = outputs["direction"]
-        bevseg = np.concatenate((semantic, direction), axis=1)
+        bevseg = np.concatenate((semantic, direction), axis=0)
         return {
             "bevseg": torch.from_numpy(np.ascontiguousarray(bevseg)).float(),
             "semantic": torch.from_numpy(np.ascontiguousarray(semantic)).float(),
             "direction": torch.from_numpy(np.ascontiguousarray(direction)).float(),
-            "temporal_valid": torch.ones(self.data_cfg.history_frames, dtype=torch.float32),
         }

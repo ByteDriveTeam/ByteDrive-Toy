@@ -4,13 +4,11 @@ import torch
 
 
 def check_bevseg_input(x, in_channels):
-    """检查 BEVSeg 输入是否为五帧堆叠或已展平的四维张量。"""
-    if not isinstance(x, torch.Tensor) or x.ndim not in (4, 5):
-        raise ValueError("BEVSeg 输入必须为 [B,5,C,H,W] 或 [B,5C,H,W]")
-    if x.ndim == 5 and (x.shape[1] != 5 or x.shape[1] * x.shape[2] != in_channels):
-        raise ValueError("BEVSeg 历史帧必须为 5 帧且与语义层数匹配")
-    if x.ndim == 4 and x.shape[1] != in_channels:
-        raise ValueError("BEVSeg 展平输入通道数与配置不一致")
+    """检查对象: BEVSegCompressor.encode 输入 —— 单帧四维张量。"""
+    if not isinstance(x, torch.Tensor) or x.ndim != 4:
+        raise ValueError("BEVSeg 输入必须为 [B,C,H,W] 单帧张量")
+    if x.shape[1] != in_channels:
+        raise ValueError("BEVSeg 输入通道数与配置不一致")
     if x.shape[-2:] != (256, 256):
         raise ValueError("BEVSeg 输入分辨率必须为 256x256")
 

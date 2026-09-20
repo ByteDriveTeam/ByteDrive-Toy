@@ -75,24 +75,20 @@ def _load_checkpoint(model, checkpoint, device):
     return epoch
 
 
-def _rasterize_history(reader, rasterizer, frame):
+def _rasterize_frame(reader, rasterizer, frame):
+    """栅格化一个当前 ego 坐标系下的单帧样本。"""
     current_pose = reader.frame_meta(frame)["ego"]["transform"]
     map_obj = rasterizer.load_map(reader.meta)
-    first = frame - rasterizer.cfg.history_frames + 1
-    history = [rasterizer.rasterize_frame(
-        reader.meta, reader.frame_meta(index), map_obj, current_pose)
-        for index in range(first, frame + 1)]
-    return first, history
+    return rasterizer.rasterize_frame(reader.meta, reader.frame_meta(frame), map_obj, current_pose)
 
 
-def _model_input(history):
-    arrays = [np.concatenate((sample["semantic"], sample["direction"]), axis=0)
-              for sample in history]
-    return torch.from_numpy(np.ascontiguousarray(np.stack(arrays))).float().unsqueeze(0)
+def _model_input(sample):
+    array = np.concatenate((sample["semantic"], sample["direction"]), axis=0)
+    return torch.from_numpy(np.ascontiguousarray(array)).float().unsqueeze(0)
 
 
 def main(argv=None):
-    """执行真实五帧数据可视化，并按需执行压缩器推理。"""
+    """执行真实单帧数据可视化，并按需执行压缩器推理。"""
     parser = argparse.ArgumentParser(description="BEVSeg 数据集与压缩器重建/PCA 可视化")
     parser.add_argument("--config", default=None, help="主配置文件路径")
     parser.add_argument("--env", default=None, help="环境覆盖名")
@@ -123,9 +119,9 @@ def main(argv=None):
     try:
         requested_frame = vis_cfg.frame if args.frame is None else args.frame
         frame = reader.num_frames - 1 if requested_frame == -1 else requested_frame
-        check_frame(frame, data_cfg.history_frames, reader.num_frames, scene_dir)
+        check_frame(frame, reader.num_frames, scene_dir)
         rasterizer = BevSegRasterizer(data_cfg)
-        first, history = _rasterize_history(reader, rasterizer, frame)
+        sample = _rasterize_frame(reader, rasterizer, frame)
         suffix = "reconstruction_pca" if inference else "dataset"
         output = (_resolve(args.output) if args.output else
                   _resolve(vis_cfg.save_dir) /
@@ -135,19 +131,19 @@ def main(argv=None):
             model = BEVSegCompressor(cfg).to(device).eval()
             epoch = _load_checkpoint(model, args.checkpoint or vis_cfg.checkpoint, device)
             with torch.inference_mode():
-                outputs = model(_model_input(history).to(device), epoch=None, sample=False)
+                outputs = model(_model_input(sample).to(device), epoch=None, sample=False)
             logits = outputs["reconstruction_logits"][0].reshape(
-                data_cfg.history_frames, len(rasterizer.layers) + 2,
+                len(rasterizer.layers) + 2,
                 data_cfg.resolution, data_cfg.resolution).float().cpu().numpy()
             codes = outputs["codes"][0].float().cpu().numpy()
             save_bevseg_reconstruction(
-                history, logits, codes, rasterizer.layers, vis_cfg.semantic_threshold,
-                output, frame_ids=range(first, frame + 1),
+                [sample], logits[None], codes, rasterizer.layers, vis_cfg.semantic_threshold,
+                output, frame_ids=[frame],
                 metadata={"scene": scene_dir.name, "frame": frame, "epoch": epoch})
         else:
             print("[bevseg-vis] 模式=仅数据集（未构建模型、未执行推理）")
             save_bevseg_history(
-                history, rasterizer.layers, output, frame_ids=range(first, frame + 1))
+                [sample], rasterizer.layers, output, frame_ids=[frame])
         print("[bevseg-vis] mode={} scene={} frame={} output={}".format(
             "inference" if inference else "dataset", scene_dir.name, frame, output))
     finally:

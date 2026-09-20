@@ -49,7 +49,7 @@ This is the single navigation entry for project documentation and source files. 
 - [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — Driving-relevant HDMap, box, and fused stop-line-state rasterization under the X-right/Y-front BEV contract
 - [data/bevseg_cache/__init__.py](../data/bevseg_cache/__init__.py) — Public API for the bounded BEVSeg raster cache and offline warmup
 - [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — Bounded, concurrent, lossless compressed NumPy cache with automatic missing-entry detection and warmup progress
-- [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, five-frame ego-aligned BEVSeg windows from all complete CARLA scenes
+- [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection
 
@@ -205,7 +205,7 @@ Python 3.7 simulation worker:
 - [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR/state trajectory BEV, composite panels, and HUD rendering
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
 - [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg target/reconstruction comparison and quantized-code PCA renderer
-- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — CLI-selectable dataset-only or compressor-inference visualization over a real CARLA five-frame window
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — CLI-selectable dataset-only or compressor-inference visualization over a real CARLA single frame
 
 ### Perception predictions
 

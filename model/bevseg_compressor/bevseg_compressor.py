@@ -61,13 +61,13 @@ class _PixelShuffleStage(nn.Module):
 
 
 class BEVSegCompressor(nn.Module):
-    """五帧 BEVSeg 的分层离散编码器与高保真解码器。"""
+    """单帧 BEVSeg 的分层离散编码器与高保真解码器。"""
 
     def __init__(self, cfg) -> None:
         super().__init__()
         model_cfg = cfg.model.bevseg
         data_cfg = cfg.data.bevseg
-        self.in_channels = model_cfg.in_layers * model_cfg.history_frames
+        self.in_channels = model_cfg.in_layers
         self.out_channels = self.in_channels
         self.dim = model_cfg.encoder_dim
         self.groups = model_cfg.codebook_groups
@@ -168,8 +168,6 @@ class BEVSegCompressor(nn.Module):
     def encode(self, x: torch.Tensor, epoch=None, sample=False):
         """编码输入并返回 logits、离散索引、2048 维码字和 latent。"""
         check_bevseg_input(x, self.in_channels)
-        if x.ndim == 5:
-            x = x.flatten(1, 2)
         latent = self.blocks4(self.down4(self.blocks8(self.down8(self.blocks16(self.patch(x))))))
         logits = self.logit_head(latent).flatten(2).transpose(1, 2)
         logits = logits.view(x.shape[0], 16, self.groups, self.vocab_size)
