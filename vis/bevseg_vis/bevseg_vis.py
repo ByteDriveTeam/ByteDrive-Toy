@@ -109,9 +109,9 @@ def _direction_overlay(canvas, direction):
     return result
 
 
-def _binary_panel(mask, title, color):
+def _binary_panel(mask, title, color, threshold):
     image = np.full((*mask.shape, 3), _BACKGROUND, np.uint8)
-    image[mask > 0.5] = color
+    image[mask > threshold] = color
     _ego_marker(image)
     return _title_panel(image, title)
 
@@ -141,6 +141,19 @@ def _composite_panel(semantic, direction, layers, title, threshold):
     image = _direction_overlay(image, direction)
     _ego_marker(image)
     return _title_panel(image, title)
+
+
+def _detail_rows(semantic, direction, layers, tag, threshold):
+    panels = [_binary_panel(semantic[index], "{} {}".format(tag, name),
+                            _COLORS[index], threshold)
+              for index, name in enumerate(layers)]
+    direction_panel = _composite_panel(
+        semantic, direction, layers, "{} current + direction".format(tag), threshold)
+    blank = np.full_like(direction_panel, _BACKGROUND)
+    return (
+        np.hstack(panels[:5] + [direction_panel]),
+        np.hstack(panels[5:] + [blank]),
+    )
 
 
 def _pca_rgb(codes):
@@ -227,7 +240,7 @@ def render_bevseg_history(history, semantic_layers, frame_ids=None):
     temporal_row = np.hstack(temporal)
 
     current_semantic, current_direction = prepared[-1]
-    panels = [_binary_panel(current_semantic[index], name, _COLORS[index])
+    panels = [_binary_panel(current_semantic[index], name, _COLORS[index], 0.5)
               for index, name in enumerate(semantic_layers)]
     layer_rows = [np.hstack(panels[start:start + 5]) for start in (0, 5)]
     direction = _composite_panel(current_semantic, current_direction, semantic_layers,
@@ -282,9 +295,15 @@ def render_bevseg_reconstruction(history, reconstruction_logits, codes, semantic
                    in zip(pred_semantic, pred_direction, frame_ids)]
     metrics = _quality_metrics(target_semantic, pred_semantic, target_direction,
                                pred_direction, semantic_threshold)
+    target_details = _detail_rows(
+        target_semantic[-1], target_direction[-1], semantic_layers, "target", 0.5)
+    pred_details = _detail_rows(
+        pred_semantic[-1], pred_direction[-1], semantic_layers, "recon", semantic_threshold)
     rows = [
         np.hstack(target_panels + [_info_panel(metrics, codes, metadata)]),
+        *target_details,
         np.hstack(pred_panels + [_pca_panel(codes)]),
+        *pred_details,
     ]
     canvas = np.vstack(rows + [_legend_panel(semantic_layers, rows[0].shape[1])])
     cv2.putText(canvas, "BEVSeg compressor | X=right, Y=front | ego=center",

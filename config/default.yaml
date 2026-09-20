@@ -611,8 +611,8 @@ data:
     history_frames: 5
     window_stride_s: 1.0       # 相邻五帧窗口终点的时间间隔；按场景实际 sensor_dt_s 换算为帧步长
     lane_half_width_m: 1.75
-    line_width_m: 0.25
-    stop_line_width_m: 0.50
+    line_width_m: 0.5
+    stop_line_width_m: 1.00
     layers: [drivable, lane_centerline, lane_divider, road_boundary, pedestrian_crossing,
              vehicle, pedestrian, stop_line_red, stop_line_yellow, stop_line_green]
     lane_types: {Center: 1, Broken: 2, Solid: 2, NONE: 3, Crosswalk: 4}
