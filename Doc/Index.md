@@ -111,7 +111,7 @@ Python 3.12 collector:
 - [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — Shared upsampling for the three fields, lane geometry, and traffic controls
 - [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — Public BEV-specific PixelShuffle upsampler API
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Six-layer pointwise data-space flow matching for a 6 s, 2 Hz ego trajectory
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 融合感知第 2/4/6 层完整查询序列的逐点流匹配轨迹解码器。
 - [model/driving_transformer/__init__.py](../model/driving_transformer/__init__.py) — 重导出驾驶感知的六层位置隔离 Transformer。
 - [model/driving_transformer/driving_transformer.py](../model/driving_transformer/driving_transformer.py) — 六层 Pre-Norm CA→SA→FFN 驾驶感知主干，位置只提示注意力。
 - [model/driving_transformer/checks/__init__.py](../model/driving_transformer/checks/__init__.py) — Validation package for the driving perception Transformer

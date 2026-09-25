@@ -1,4 +1,4 @@
-"""逐点数据空间流匹配轨迹解码器，使用六层 Pre-Norm CA→SA→FFN。
+"""融合感知第 2/4/6 层完整查询序列的逐点流匹配轨迹解码器。
 
 模块: model/trajectory_decoder/trajectory_decoder.py
 依赖: torch, model.attention, model.driving_transformer.driving_transformer
@@ -90,10 +90,13 @@ class TrajectoryDecoder(nn.Module):
         self.condition = nn.Sequential(nn.Linear(4, tj.condition_mlp_hidden), nn.SiLU(),
                                        nn.Linear(tj.condition_mlp_hidden, dim))
         self.time_mlp = nn.Sequential(nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.context_norms = nn.ModuleList(RMSNormTokens(cfg_driving.work_dim)
-                                           for _ in range(6))
-        self.context_projections = nn.ModuleList(nn.Linear(cfg_driving.work_dim, dim)
-                                                  for _ in range(6))
+        context_dim = 3 * cfg_driving.work_dim
+        self.context_fusion = nn.Sequential(
+            RMSNormTokens(context_dim),
+            nn.Linear(context_dim, tj.feature_ffn_hidden),
+            nn.SiLU(),
+            nn.Linear(tj.feature_ffn_hidden, dim),
+        )
         self.layers = nn.ModuleList(_FlowLayer(dim, tj.num_heads, cfg_driving.bev_encoder.rope_theta)
                                     for _ in range(6))
         self.output_norm = RMSNormTokens(dim)
@@ -101,15 +104,15 @@ class TrajectoryDecoder(nn.Module):
         nn.init.zeros_(self.velocity_head.weight)
         nn.init.zeros_(self.velocity_head.bias)
 
-    def _velocity(self, x, time, contexts, condition):
+    def _velocity(self, x, time, context, context_positions, condition):
         batch = x.shape[0]
         physical = x * self.coord_scale
         positions = torch.cat((physical, self.future_time[None, :, None].expand(
             batch, -1, -1)), -1)
         tokens = self.point_tokens.expand(batch, -1, -1) + self.input_projection(x) + condition[:, None]
         time_embed = self.time_mlp(_time_embedding(time, tokens.shape[-1]))
-        for layer, context in zip(self.layers, contexts):
-            tokens = layer(tokens, context, positions, self.bev_positions, time_embed)
+        for layer in self.layers:
+            tokens = layer(tokens, context, positions, context_positions, time_embed)
         return self.velocity_head(self.output_norm(tokens))
 
     def _noise(self, shape, device):
@@ -118,18 +121,22 @@ class TrajectoryDecoder(nn.Module):
         generator = torch.Generator(device=device).manual_seed(self.noise_seed)
         return torch.randn(shape, device=device, generator=generator)
 
-    def forward(self, perception_features, target_point, ego_velocity,
+    def forward(self, perception_features, detect_anchors, target_point, ego_velocity,
                 trajectory=None, traj_valid=None, flow_time=None, flow_noise=None):
         """训练返回流速度目标；评估从固定或随机高斯积分到轨迹。"""
-        check_trajectory_inputs(perception_features, target_point, ego_velocity,
-                                self.work_dim, trajectory)
+        check_trajectory_inputs(perception_features, detect_anchors, target_point,
+                                ego_velocity, self.work_dim, len(self.bev_positions), trajectory)
         batch = target_point.shape[0]
         condition_raw = torch.cat((target_point, ego_velocity), -1)
         condition_raw = torch.sign(condition_raw) * torch.log1p(condition_raw.abs()) * self.symlog_scale
         condition = self.condition(condition_raw)
-        contexts = tuple(proj(norm(feature.flatten(2).transpose(1, 2)))
-                         for feature, norm, proj in zip(
-                             perception_features, self.context_norms, self.context_projections))
+        # 同一位置的低、中、高层 BEV/Detect 内容先融合，六层 CA 共用完整查询序列。
+        context = self.context_fusion(torch.cat(
+            (perception_features[1], perception_features[3], perception_features[5]), dim=-1))
+        anchors_xy = detect_anchors[..., :2]
+        anchor_positions = torch.cat((anchors_xy, torch.zeros_like(anchors_xy[..., :1])), -1)
+        context_positions = torch.cat((
+            self.bev_positions[None].expand(batch, -1, -1), anchor_positions), dim=1)
         if trajectory is not None:
             x0 = torch.randn_like(trajectory) if flow_noise is None else flow_noise
             x1 = trajectory / self.coord_scale
@@ -137,11 +144,11 @@ class TrajectoryDecoder(nn.Module):
                 x1 = torch.where(traj_valid.bool()[..., None], x1, x0)
             time = torch.rand(batch, device=x1.device) if flow_time is None else flow_time
             xt = (1 - time[:, None, None]) * x0 + time[:, None, None] * x1
-            velocity = self._velocity(xt, time, contexts, condition)
+            velocity = self._velocity(xt, time, context, context_positions, condition)
             return {"flow_velocity": velocity, "flow_target": x1 - x0,
                     "flow_valid": traj_valid if traj_valid is not None else torch.ones_like(x1[..., 0])}
         x = self._noise((batch, self.steps, 2), target_point.device)
         for step in range(self.flow_steps):
             time = torch.full((batch,), step / self.flow_steps, device=x.device)
-            x = x + self._velocity(x, time, contexts, condition) / self.flow_steps
+            x = x + self._velocity(x, time, context, context_positions, condition) / self.flow_steps
         return {"trajectories": x * self.coord_scale}

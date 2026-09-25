@@ -533,9 +533,9 @@ class TrajectoryCfg:
     waypoint_dt_s: float           # 相邻输出轨迹点的时间间隔
     planning_dim: int              # 规划分支工作维
     condition_mlp_hidden: int      # 目标点+ego 速度条件编码 MLP 隐藏维
-    feature_ffn_hidden: int        # path2 感知特征适配 FFN 隐藏维
-    cross_layers: int              # 规划 CTB 数（固定对应第 3、6 层特征）
-    self_layers: int               # 规划 CTB 后的 TB 层数
+    feature_ffn_hidden: int        # 第 2/4/6 层完整感知查询融合 MLP 隐藏维
+    cross_layers: int              # CA→SA→FFN 层数
+    self_layers: int               # 与交叉注意力层数一致
     num_heads: int
     mode_token_init_std: float     # 可学习 Mode Token 随机初始化标准差
     symlog_scale: float            # 条件输入（目标点/ego 速度）归一化的 Symlog 缩放（轨迹在物理空间预测）
@@ -1829,7 +1829,7 @@ def _validate_driving(dv):
     states = dv.traffic_control.state_names
     assert states and len(states) == len(set(states)) and "red" in states, \
         "model.driving.traffic_control.state_names 须非空、不重复且包含 red"
-    # 校验对象: trajectory —— 固定 8 Mode、2 个规划 CTB、4 个后续 TB，其余维度与尺度合法
+    # 校验对象: trajectory —— 单条十二点轨迹与六层规划块的维度、尺度合法
     tj = dv.trajectory
     assert tj.num_modes == 1 and tj.num_waypoints == 12, \
         "model.driving.trajectory 必须为单条十二点轨迹"
@@ -1839,8 +1839,6 @@ def _validate_driving(dv):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
     assert math.isclose(tj.waypoint_dt_s, 0.5, rel_tol=0.0, abs_tol=1e-9), \
         "model.driving.trajectory.waypoint_dt_s 必须为 0.5"
-    assert tj.planning_dim < tj.cross_layers * dv.work_dim, \
-        "model.driving.trajectory.planning_dim 必须小于 cross_layers×work_dim（拼接后 1×1 CNN 降维）"
     assert tj.num_heads > 0 and tj.planning_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 planning_dim"
     assert all(math.isfinite(value) and value > 0 for value in (

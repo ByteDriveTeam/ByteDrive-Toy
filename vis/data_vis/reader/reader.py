@@ -14,7 +14,7 @@
         .available -> dict[str,bool]  # 各模态是否实际落盘：rgb/depth/semantic/optical_flow/lidar
         .rgb(i, camera) -> np.ndarray # 只解码指定相机 RGB，不读取 LMDB 大数组
         .lidar(i) -> np.ndarray | None # 只读取语义 LiDAR，不解码 RGB/其他大数组
-        .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
+        .frame(i, modalities=None) -> dict  # 标注 + 所选模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
         .kinematics() -> list[dict]   # 独立高频运动学时间序列；旧数据回退逐帧 ego
         .actor_trajectories() -> dict[int,list[list[float]]]  # 动态车辆/行人/自车世界坐标轨迹
@@ -179,9 +179,9 @@ class SceneReader:
     def frame(self, i, modalities=None):
         """读取第 i 帧的标注与所选大数组模态，组装为一个 dict（缺失/未选模态为空/None）。
 
-        modalities=None 解码全部已落盘大数组（默认，保持既有行为）；传入模态名集合（depth/semantic/
-        optical_flow/lidar 的任意子集）时只解码其中的大数组，供只需部分模态的下游跳过无用解码与分配开销。
-        rgb 与逐帧元数据（ego/bboxes/交通灯）恒返回，不受 modalities 影响。
+        modalities=None 解码全部已落盘模态（默认，保持既有行为）；传入模态名集合
+        （rgb/depth/semantic/optical_flow/lidar 的任意子集）时只解码其中的模态。
+        逐帧元数据（ego/bboxes/交通灯）恒返回；未选 RGB 时返回空字典。
         """
         check_frame_index(i, self.num_frames)
         wanted = None if modalities is None else set(modalities)
@@ -192,7 +192,8 @@ class SceneReader:
             optical_flow = self._cam_arrays(txn, i, "optical_flow", wanted)
             want_lidar = self.available["lidar"] and (wanted is None or "lidar" in wanted)
             lidar = unpack_array(txn.get(self._key(i, "lidar"))) if want_lidar else None
-        rgb = {cam: v.at(i) for cam, v in self._videos.items()}
+        rgb = ({cam: v.at(i) for cam, v in self._videos.items()}
+               if wanted is None or "rgb" in wanted else {})
         return {"rgb": rgb, "depth": depth, "semantic": semantic, "optical_flow": optical_flow,
                 "lidar": lidar, "ego": fmeta["ego"], "bboxes": fmeta["bboxes"],
                 "traffic_light_states": fmeta.get("traffic_light_states", []), "meta": fmeta}

@@ -144,8 +144,11 @@ class DrivingModel(nn.Module):
                         "detect_boxes": torch.stack(boxes),
                         "detect_future": torch.stack(futures),
                         "detect_anchors": anchors})
+        perception_tokens = tuple(torch.cat((
+            layer.flatten(2).transpose(1, 2), detect_tokens), dim=1).float()
+            for layer, detect_tokens in zip(layers, detections))
         outputs.update(self.trajectory_decoder(
-            tuple(layer.float() for layer in layers), target_point.float(),
+            perception_tokens, anchors.float(), target_point.float(),
             ego_velocity.float(), trajectory=trajectory, traj_valid=traj_valid,
             flow_time=flow_time, flow_noise=flow_noise))
         return outputs

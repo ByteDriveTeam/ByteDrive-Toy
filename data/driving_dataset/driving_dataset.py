@@ -3,7 +3,7 @@
 模块: data/driving_dataset/driving_dataset.py
 依赖: numpy, torch, data.single_frame_base, data.driving_targets,
       data.driving_occupancy, data.hd_map, data.lidar_voxelization, vis.data_vis.geometry
-读取配置: data.driving.*, data.scene_cache_size/video_frame_cache_size, data.dataset.dino_mean/dino_std,
+读取配置: carla_collector.cameras.height/width, data.driving.*, data.scene_cache_size/video_frame_cache_size, data.dataset.dino_mean/dino_std,
           model.driving.bev/bev_decoder/lidar_fusion/lane_map/traffic_control/trajectory/detection,
           model.physics.depth_max_m
 对外接口:
@@ -49,6 +49,8 @@ class DrivingDataset(SingleFrameSceneBase):
                          cfg.data.scene_cache_size, cfg.data.video_frame_cache_size)
         self._cfg_data = drv_data
         self._cameras = tuple(drv_data.cameras)
+        self._image_shape = (cfg.carla_collector.cameras.height,
+                             cfg.carla_collector.cameras.width)
         bev = cfg.model.driving.bev
         self._bev_geometry = bev
         self._lidar_voxel_size = cfg.model.driving.lidar_fusion.voxel_size_m
@@ -101,7 +103,7 @@ class DrivingDataset(SingleFrameSceneBase):
         history_views = [np.stack([reader.rgb(index, camera) for camera in cameras])
                          if valid else None
                          for index, valid in zip(history_indices, history_valid)]
-        frame = reader.frame(frame_idx, modalities=("depth", "lidar"))
+        frame = reader.frame(frame_idx, modalities=("rgb", "depth", "lidar"))
         check_behavior_annotations(meta, frame, cameras)
         pose = [float(value) for value in frame["ego"]["transform"]]
         intrinsics = [meta["intrinsics"][camera] for camera in cameras]
@@ -198,7 +200,7 @@ class DrivingDataset(SingleFrameSceneBase):
         intrinsics = [meta["intrinsics"][camera] for camera in cameras]
         extrinsics = np.asarray([meta["extrinsics"][camera] for camera in cameras],
                                 dtype=np.float32)
-        image_shape = frame["rgb"][cameras[0]].shape[:2]
+        image_shape = self._image_shape
         moving = [box for box in frame["bboxes"]
                   if box.get("semantic") in ("vehicle", "pedestrian")]
         scene_occ, _ = self._occupancy.scene(
