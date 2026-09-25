@@ -350,6 +350,10 @@ reconstructed_udf_vis:
 # ============================================================
 data_vis:
   scene_root: data/carla_data_collector/dataset/scenes  # 场景目录的默认搜索根（含 scene_XXXXXX/）
+  driving:
+    output_dir: output/data-vis-driving  # 新驾驶数据集监督面板输出目录
+    tile_width_px: 288                # 每个数据面板的画布宽度
+    tile_height_px: 216               # 每个数据面板的画布高度
 
   display:
     scale: 0.6                 # 合成画布整体缩放（多相机横排很宽，缩小便于单屏查看）
@@ -490,9 +494,10 @@ model:
       up_channels: [192, 96, 48] # 三级 2× 像素洗牌输出通道（32→256）
       feature_channels: 32       # 全部 BEV 空间任务共享的高分辨率特征通道
 
-    # 道路线图：类别 logits + 有向单位切向量，复用统一 BEV 高分辨率特征
+    # 道路线图：类别 logits + 部分类别的有向单位切向量，复用统一 BEV 高分辨率特征
     lane_map:
       class_names: [background, centerline, lane_separator, road_boundary, other_marking]
+      directional_classes: [centerline, lane_separator]  # Center/Broken 才监督 cos/sin；其余仅监督语义
 
     # 交通控制辅助头：复用统一 BEV 高分辨率特征，分别预测相关停止线几何与灯色
     traffic_control:
@@ -695,7 +700,8 @@ train:
     detect_box: 1.0
     detect_future: 1.0
     flow: 1.0
-    lane_occupancy: 1.0
+    lane_semantic: 1.0
+    lane_direction: 1.0
     drivable: 1.0
     stop_line: 1.0
 

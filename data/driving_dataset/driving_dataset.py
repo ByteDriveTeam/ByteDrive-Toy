@@ -1,4 +1,4 @@
-"""五帧三目驾驶数据集：独立场景/Agent 占用、检测与轨迹监督。
+"""五帧三目驾驶数据集：分离占用、语义道路线、检测与轨迹监督。
 
 模块: data/driving_dataset/driving_dataset.py
 依赖: numpy, torch, data.single_frame_base, data.driving_targets,
@@ -7,8 +7,9 @@
           model.driving.bev/bev_decoder/lidar_fusion/lane_map/traffic_control/trajectory/detection,
           model.physics.depth_max_m
 对外接口:
-    - DrivingDataset(cfg) -> torch.utils.data.Dataset
+    - DrivingDataset(cfg, scene_name=None) -> torch.utils.data.Dataset
 说明: 四帧历史图像按真实位姿使用 4×4 刚性变换；场景与 Agent 占用分别生成并按需缓存。
+      道路线保留语义类别，仅对配置指定类别输出有向 cos/sin 真值和有效掩码。
       Agent 缓存命中时复用可见性生成 Detect 监督，避免重复逐框 LiDAR 判定。
       只返回当前帧 LiDAR，三目 BGR 在训练设备上归一化。
 """
@@ -29,24 +30,28 @@ from data.driving_dataset.checks.driving_dataset_checks import (
     check_camera_calib,
     check_frame_cadence,
     check_ego_box_annotations,
+    check_selected_scene,
 )
 from data.hd_map import HdMap
 from data.lidar_voxelization import lidar_xyz_to_voxels
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
-from vis.data_vis.geometry import transform_matrix, transform_points, world_to_ego
+from vis.data_vis.geometry import bbox_corners, transform_matrix, transform_points, world_to_ego
 
 
 __all__ = ["DrivingDataset"]
 
 
 class DrivingDataset(SingleFrameSceneBase):
-    """以当前帧为索引并读取四帧历史的三目驾驶数据集。"""
+    """以当前帧为索引并读取四帧历史；可按场景筛选以检查未融合完的数据集。"""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, scene_name: str | None = None) -> None:
         drv_data = cfg.data.driving
         super().__init__(drv_data.scene_root, drv_data.cameras[0],
                          cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std,
                          cfg.data.scene_cache_size, cfg.data.video_frame_cache_size)
+        if scene_name is not None:
+            self._index = [item for item in self._index if item[0].name == scene_name]
+            check_selected_scene(self._index, scene_name)
         self._cfg_data = drv_data
         self._cameras = tuple(drv_data.cameras)
         self._image_shape = (cfg.carla_collector.cameras.height,
@@ -60,6 +65,9 @@ class DrivingDataset(SingleFrameSceneBase):
         self._detect_queries = cfg.model.driving.detection.num_queries
         self._detect_steps = cfg.model.driving.detection.future_steps
         self._detect_dt = cfg.model.driving.detection.future_dt_s
+        lane_model = cfg.model.driving.lane_map
+        self._directional_lane_ids = tuple(lane_model.class_names.index(name)
+                                           for name in lane_model.directional_classes)
         self._occupancy = DrivingOccupancyCache(cfg)
         self._occupancy.check_sources(scene for scene, _ in self.frame_index)
         # 场分辨率 = BEV 工作分辨率 · 统一解码头上采样倍率
@@ -139,9 +147,12 @@ class DrivingDataset(SingleFrameSceneBase):
         drivable = hd_map.drivable_bev(
             pose, self._bev, self._cfg_data.lane_half_width_m)
         lane_cfg = self._cfg_data.lane_map
-        lane_class, _ = hd_map.lane_map_bev(
+        lane_class, lane_direction = hd_map.lane_map_bev(
             pose, self._bev, lane_cfg.line_width_m,
             lane_cfg.type_to_class, lane_cfg.unknown_class)
+        lane_direction_valid = (np.isin(lane_class, self._directional_lane_ids)
+                                & (np.linalg.norm(lane_direction, axis=0) > 0))
+        lane_direction = lane_direction * lane_direction_valid[None]
         moving = [box for box in frame["bboxes"]
                   if box.get("semantic") in ("vehicle", "pedestrian")]
         scene_occ, scene_mask = self._occupancy.scene(
@@ -174,7 +185,9 @@ class DrivingDataset(SingleFrameSceneBase):
             "trajectory": torch.from_numpy(waypoints),
             "traj_valid": torch.from_numpy(traj_valid),
             "drivable": torch.from_numpy(drivable.astype(np.float32)),
-            "lane_occupancy": torch.from_numpy((lane_class != 0).astype(np.float32)),
+            "lane_class": torch.from_numpy(lane_class),
+            "lane_direction": torch.from_numpy(lane_direction),
+            "lane_direction_valid": torch.from_numpy(lane_direction_valid),
             "stop_line": torch.from_numpy(np.asarray(traffic["stop_line"], dtype=np.float32)),
             "scene_occ": torch.from_numpy(scene_occ),
             "scene_occ_mask": torch.from_numpy(scene_mask),
@@ -231,13 +244,23 @@ class DrivingDataset(SingleFrameSceneBase):
             lidar_points=lidar_points, lidar_object_ids=lidar_ids)
 
     def _detect_targets(self, reader, frame_idx, pose, boxes, visible):
-        """只存储本帧可见运动 Agent；未来轨迹按 actor ID 临近帧匹配。"""
+        """只存储可见且与 BEV 相交的 Agent；未来轨迹按 actor ID 临近帧匹配。"""
         count = self._detect_queries
         classes = np.full(count, -1, dtype=np.int64)
         box_target = np.zeros((count, 9), dtype=np.float32)
         future = np.zeros((count, self._detect_steps, 2), dtype=np.float32)
         future_valid = np.zeros((count, self._detect_steps), dtype=bool)
-        selected = sorted((box for box, keep in zip(boxes, visible) if keep),
+        visible_boxes = [box for box, keep in zip(boxes, visible) if keep]
+        if visible_boxes:
+            world_corners = np.stack([bbox_corners(box) for box in visible_boxes])
+            ego_corners = transform_points(
+                world_corners.reshape(-1, 3), world_to_ego(pose)).reshape(-1, 8, 3)
+            x, y = ego_corners[:, :, 0], ego_corners[:, :, 1]
+            bev = self._bev
+            in_bev = ((x.max(1) >= bev.x_min) & (x.min(1) <= bev.x_max)
+                      & (y.max(1) >= bev.y_min) & (y.min(1) <= bev.y_max))
+            visible_boxes = [box for box, keep in zip(visible_boxes, in_bev) if keep]
+        selected = sorted(visible_boxes,
                           key=lambda box: np.linalg.norm(
                               np.asarray(box["location"])[:2] - np.asarray(pose)[:2]))[:count]
         next_frames = [reader.frame_meta(min(frame_idx + step, reader.num_frames - 1))

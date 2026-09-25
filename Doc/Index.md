@@ -31,7 +31,7 @@ This is the single navigation entry for project documentation and source files. 
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Five-frame, three-camera + LiDAR dataset with separate scene and Agent occupancy supervision
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 五帧三目驾驶数据集：分离占用、语义道路线、检测与轨迹监督。
 - [data/driving_occupancy/__init__.py](../data/driving_occupancy/__init__.py) — 重导出驾驶场景与 Agent 独立体素缓存及预生成入口。
 - [data/driving_occupancy/driving_occupancy.py](../data/driving_occupancy/driving_occupancy.py) — 场景和 Agent 独立生成并支持按需或预生成二值 3D 占用监督。
 - [data/driving_occupancy/checks/__init__.py](../data/driving_occupancy/checks/__init__.py) — 独立占用缓存校验包。
@@ -108,7 +108,7 @@ Python 3.12 collector:
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — Perception/DINO feature fusion, frustum geometry, and 2D residual processing
 - [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — Three-camera and historical-BEV fusion followed by a register-token 2D-RoPE transformer
 - [model/bev_decoder/__init__.py](../model/bev_decoder/__init__.py) — Public unified BEV decoder API
-- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — Shared upsampling for the three fields, lane geometry, and traffic controls
+- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — 统一 BEV 解码头：共享上采样并输出独立占用、二维场与语义道路线方向。
 - [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — Public BEV-specific PixelShuffle upsampler API
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 融合感知第 2/4/6 层完整查询序列的逐点流匹配轨迹解码器。
@@ -124,7 +124,7 @@ Python 3.12 collector:
 ## train/ — training and evaluation
 
 - [train/__init__.py](../train/__init__.py) — Training/optimization/evaluation package marker
-- [train/losses/losses.py](../train/losses/losses.py) — Multitask perception, field, lane, traffic-control, trajectory, behavior, and safety losses
+- [train/losses/losses.py](../train/losses/losses.py) — 感知与新驾驶任务损失：独立占用、语义道路线、逐层 Detect 和流匹配。
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
@@ -206,7 +206,13 @@ Python 3.7 simulation worker:
 - [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 词表可视化 CLI
 
 - [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — Raw dataset visualization package marker
-- [vis/data_vis/run.py](../vis/data_vis/run.py) — Configuration, scene location, and interactive-window CLI
+- [vis/data_vis/run.py](../vis/data_vis/run.py) — 可视化入口 CLI：浏览原始场景或渲染新驾驶数据集的训练样本。
+
+- [vis/data_vis/driving_sample/__init__.py](../vis/data_vis/driving_sample/__init__.py) — 驾驶训练样本监督面板的公开渲染接口。
+
+- [vis/data_vis/driving_sample/driving_sample.py](../vis/data_vis/driving_sample/driving_sample.py) — 把五帧三目驾驶样本的输入、独立占用与规划监督合成一张检查图。
+
+- [vis/data_vis/driving_sample/checks/driving_sample_checks.py](../vis/data_vis/driving_sample/checks/driving_sample_checks.py) — 校验驾驶样本可视化所需字段与主要张量形状。
 - [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — Per-scene LMDB/MP4 reader and modality discovery
 - [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — NumPy CARLA transforms and 3D-to-2D projection
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette

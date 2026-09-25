@@ -4,13 +4,14 @@ _REQUIRED_OUTPUTS = ("semantic", "depth")
 _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 
 _DRIVING_OUTPUTS = (
-    "scene_occ_logits", "agent_occ_logits", "drivable", "lane_occupancy",
+    "scene_occ_logits", "agent_occ_logits", "drivable", "lane_class_logits", "lane_direction",
     "stop_line_logits", "detect_class_logits", "detect_boxes", "detect_future",
     "flow_velocity", "flow_target", "flow_valid",
 )
 _DRIVING_TARGETS = (
     "scene_occ", "scene_occ_mask", "agent_occ", "agent_occ_mask",
-    "drivable", "lane_occupancy", "stop_line", "detect_class", "detect_box",
+    "drivable", "lane_class", "lane_direction", "lane_direction_valid",
+    "stop_line", "detect_class", "detect_box",
     "detect_future", "detect_future_valid", "trajectory", "traj_valid",
 )
 
@@ -42,3 +43,9 @@ def check_driving_losses_io(outputs, targets):
             raise ValueError("{} 占用预测、标签、掩码必须同形".format(kind))
     if outputs["flow_velocity"].shape != outputs["flow_target"].shape:
         raise ValueError("流速度预测与目标必须同形")
+    lane_shape = tuple(targets["lane_class"].shape)
+    if tuple(outputs["lane_class_logits"].shape[0:1] + outputs["lane_class_logits"].shape[2:]) != lane_shape \
+            or tuple(targets["lane_direction_valid"].shape) != lane_shape \
+            or tuple(outputs["lane_direction"].shape) != tuple(targets["lane_direction"].shape) \
+            or tuple(outputs["lane_direction"].shape[0:1] + outputs["lane_direction"].shape[2:]) != lane_shape:
+        raise ValueError("车道语义、方向预测、方向标签与有效掩码的空间尺寸必须一致")

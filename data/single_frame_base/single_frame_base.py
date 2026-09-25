@@ -8,6 +8,7 @@
     - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size, video_frame_cache_size) -> Dataset
         .frame_index -> list[(Path, int)]       # (场景目录, 帧号)
         .reader(scene_dir) -> SceneReader        # 惰性构造并按 worker 缓存
+        .close() -> None                         # 显式关闭当前进程缓存的场景读取器
         .bgr_uint8(bgr) -> Tensor                # BGR uint8 → 紧凑 [3,H,W]，设备侧再归一化
         .normalize_rgb(bgr) -> Tensor            # 兼容可视化/独立调用的 DINO 归一化
         .scene_num_frames(scene_dir) -> int      # 轻量读 LMDB num_frames
@@ -71,6 +72,12 @@ class SingleFrameSceneBase(Dataset):
             _, evicted = self._readers.popitem(last=False)
             evicted.close()
         return reader
+
+    def close(self) -> None:
+        """关闭当前进程缓存的 LMDB 与视频句柄。"""
+        for reader in self._readers.values():
+            reader.close()
+        self._readers.clear()
 
     def normalize_rgb(self, bgr: np.ndarray) -> torch.Tensor:
         """BGR uint8 → RGB → [0,1] → DINO ImageNet 归一化，输出 [3,H,W] float32。"""

@@ -1,4 +1,4 @@
-"""感知与新驾驶任务损失：独立占用、二维场、逐层 Detect 和流匹配。
+"""感知与新驾驶任务损失：独立占用、语义道路线、逐层 Detect 和流匹配。
 
 模块: train/losses/losses.py
 依赖: torch, scipy, config.schema.Config, data.target_encoding.physics_decode,
@@ -116,8 +116,11 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
                                  targets["agent_occ_mask"].float()),
         "drivable": F.binary_cross_entropy_with_logits(
             outputs["drivable"][:, 0], targets["drivable"]),
-        "lane_occupancy": F.binary_cross_entropy_with_logits(
-            outputs["lane_occupancy"][:, 0], targets["lane_occupancy"]),
+        "lane_semantic": _balanced_lane_cross_entropy(
+            outputs["lane_class_logits"], targets["lane_class"].long()),
+        "lane_direction": _masked_lane_direction_loss(
+            outputs["lane_direction"], targets["lane_direction"],
+            targets["lane_direction_valid"]),
         "stop_line": _balanced_binary_loss(
             outputs["stop_line_logits"][:, 0], targets["stop_line"],
             torch.ones_like(targets["stop_line"])),
@@ -131,6 +134,22 @@ def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, 
     total = sum(getattr(weights, name) * value for name, value in components.items())
     components["total"] = total
     return total, components
+
+
+def _balanced_lane_cross_entropy(logits, target):
+    """按当前批次出现的每个语义类别分别归一，避免细线被背景像素淹没。"""
+    per_pixel = F.cross_entropy(logits, target, reduction="none")
+    labels = target.reshape(-1)
+    count = torch.bincount(labels, minlength=logits.shape[1])
+    sums = per_pixel.new_zeros(logits.shape[1]).scatter_add_(0, labels, per_pixel.reshape(-1))
+    return (sums / count.clamp_min(1))[count > 0].mean()
+
+
+def _masked_lane_direction_loss(pred, target, valid):
+    """仅在指定类别且地图方向有效的像素监督两个有向正余弦分量。"""
+    per_pixel = F.smooth_l1_loss(pred, target, reduction="none").mean(dim=1)
+    mask = valid.to(per_pixel.dtype)
+    return (per_pixel * mask).sum() / mask.sum().clamp_min(1)
 
 
 def _detect_losses(outputs, targets, cfg):

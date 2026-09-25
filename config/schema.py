@@ -432,8 +432,16 @@ class DataVisLidarCfg:
 
 
 @dataclass
+class DataVisDrivingCfg:
+    output_dir: str
+    tile_width_px: int
+    tile_height_px: int
+
+
+@dataclass
 class DataVisCfg:
     scene_root: str
+    driving: DataVisDrivingCfg
     display: DataVisDisplayCfg
     traffic_lights: DataVisTrafficLightsCfg
     bbox: DataVisBBoxCfg
@@ -519,6 +527,7 @@ class BevDecoderCfg:
 @dataclass
 class LaneMapCfg:
     class_names: List[str]         # 0 固定为背景，其余为道路线类别
+    directional_classes: List[str] # 需要有向 cos/sin 监督的语义类别
 
 
 @dataclass
@@ -804,7 +813,8 @@ class DrivingLossWeightsCfg:
     detect_box: float
     detect_future: float
     flow: float
-    lane_occupancy: float
+    lane_semantic: float
+    lane_direction: float
     drivable: float
     stop_line: float
 
@@ -1773,7 +1783,7 @@ def _validate_train(train, model_lane):
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
                ("scene_occ", "agent_occ", "detect_class", "detect_box", "detect_future",
-                "flow", "lane_occupancy", "drivable", "stop_line")), \
+                "flow", "lane_semantic", "lane_direction", "drivable", "stop_line")), \
         "train.driving_loss_weights.* 必须 >= 0"
 
 
@@ -1825,6 +1835,9 @@ def _validate_driving(dv):
         "model.driving.lane_map.class_names 至少含背景+一道路线，且索引 0 必须为 background"
     assert len(lane.class_names) == len(set(lane.class_names)), \
         "model.driving.lane_map.class_names 不得重复"
+    assert lane.directional_classes and len(lane.directional_classes) == len(set(lane.directional_classes)) \
+        and all(name in lane.class_names[1:] for name in lane.directional_classes), \
+        "model.driving.lane_map.directional_classes 须为不重复的非背景类别"
     # 校验对象: traffic_control —— 灯色类别稳定且至少覆盖红灯越线监督所需的 red
     states = dv.traffic_control.state_names
     assert states and len(states) == len(set(states)) and "red" in states, \
@@ -1909,6 +1922,9 @@ _DATA_VIS_COLORMAPS = {"turbo", "jet", "magma", "viridis", "plasma", "inferno"}
 
 def _validate_data_vis(dv):
     """校验对象: cfg.data_vis —— 数据可视化样式参数（尺寸/量程/枚举/颜色三元组）。"""
+    # 校验对象: data_vis.driving —— 输出目录与面板尺寸必须可用
+    assert dv.driving.output_dir and dv.driving.tile_width_px > 0 \
+        and dv.driving.tile_height_px > 0, "data_vis.driving 输出目录与面板尺寸非法"
     # 校验对象: data_vis.display —— 缩放与播放帧率为正
     assert dv.display.scale > 0, "data_vis.display.scale 必须 > 0"
     assert dv.display.play_fps > 0, "data_vis.display.play_fps 必须 > 0"

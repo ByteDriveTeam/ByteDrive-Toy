@@ -1,6 +1,12 @@
 # 本文件为 data/driving_dataset/driving_dataset.py 的校验伴随文件（规范 §7.1，免文件头）。
 
 
+def check_selected_scene(index, scene_name):
+    """校验对象: DrivingDataset.scene_name —— 指定场景必须存在且至少有一帧。"""
+    if not index:
+        raise ValueError("驾驶数据集未找到指定场景 {} 的样本帧。".format(scene_name))
+
+
 def check_camera_calib(meta, cameras):
     """校验对象: 场景 meta —— 三目相机须按配置全部提供内参与外参。"""
     intr = meta.get("intrinsics", {})
