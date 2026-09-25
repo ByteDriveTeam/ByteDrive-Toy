@@ -1,14 +1,15 @@
 """场景和 Agent 独立生成并支持按需或预生成二值 3D 占用监督。
 
 模块: data/driving_occupancy/driving_occupancy.py
-依赖: numpy, torch, filelock, data.driving_targets, vis.data_vis.geometry
+依赖: numpy, torch, filelock, 可选 numba, vis.data_vis.geometry
 读取配置: model.driving.bev/occupancy, data.driving.fused_root
 对外接口:
     - DrivingOccupancyCache(cfg) -> object
     - prepare_driving_occupancy_cache(dataset, num_workers, prefetch_factor, in_order, progress_every) -> dict
 说明: 静态占用只取融合 PT 的 static.xyz；两种监督分开生成、分开存储。
+      Agent 缓存同时保存逐框可见性，供 Detect 监督复用；旧 Agent 缓存按版本自动重建。
       可见性按每个体素中心到相机的精确网格穿越计算，目标体素不算遮挡。
-      CUDA 路径采用同构 float64 体素化和 DDA；CPU 为默认，CUDA 性能须在目标设备实测。
+      固定标定的完整 DDA 路径预计算后由 CPU/GPU 共用；超限回退逐射线 DDA。
 """
 
 from __future__ import annotations
@@ -18,13 +19,19 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import warnings
 
 import numpy as np
 import torch
 from filelock import FileLock
 from torch.utils.data import DataLoader, Dataset
 
-from data import driving_targets as dt
+try:
+    from numba import config as numba_config, njit, prange, set_num_threads
+except ImportError:
+    njit = None
+    prange = range
+
 from data.driving_occupancy.checks.driving_occupancy_checks import (
     check_cache_prepare, check_fused_signature, check_fused_sources,
     check_occupancy_device)
@@ -35,8 +42,112 @@ from vis.data_vis.geometry import bbox_corners, transform_matrix, transform_poin
 __all__ = ["DrivingOccupancyCache", "prepare_driving_occupancy_cache"]
 
 
+if njit is not None:
+    @njit(cache=True)
+    def _ray_path(origin, target, low, step, dims, output, offset):
+        """列出目标体素之前的网格单元；越界单元可省略，因为永远不占用。"""
+        sx, sy, sz = (origin[0] - low[0]) / step, (origin[1] - low[1]) / step, (origin[2] - low[2]) / step
+        tx = int(np.floor((target[0] - low[0]) / step))
+        ty = int(np.floor((target[1] - low[1]) / step))
+        tz = int(np.floor((target[2] - low[2]) / step))
+        vx, vy, vz = (target[0] - origin[0]) / step, (target[1] - origin[1]) / step, (target[2] - origin[2]) / step
+        dx = 1 if vx > 0 else -1 if vx < 0 else 0
+        dy = 1 if vy > 0 else -1 if vy < 0 else 0
+        dz = 1 if vz > 0 else -1 if vz < 0 else 0
+        cx, cy, cz = int(np.floor(sx)), int(np.floor(sy)), int(np.floor(sz))
+        mx = np.inf if dx == 0 else (cx + (dx > 0) - sx) / vx
+        my = np.inf if dy == 0 else (cy + (dy > 0) - sy) / vy
+        mz = np.inf if dz == 0 else (cz + (dz > 0) - sz) / vz
+        ix = np.inf if dx == 0 else abs(1.0 / vx)
+        iy = np.inf if dy == 0 else abs(1.0 / vy)
+        iz = np.inf if dz == 0 else abs(1.0 / vz)
+        count = 0
+        while cx != tx or cy != ty or cz != tz:
+            if 0 <= cx < dims[0] and 0 <= cy < dims[1] and 0 <= cz < dims[2]:
+                if len(output):
+                    output[offset + count] = cz * dims[0] * dims[1] + cx * dims[1] + cy
+                count += 1
+            minimum = min(mx, my, mz)
+            if mx == minimum:
+                cx += dx
+                mx += ix
+            if my == minimum:
+                cy += dy
+                my += iy
+            if mz == minimum:
+                cz += dz
+                mz += iz
+        return count
+
+
+    @njit(parallel=True, cache=True)
+    def _ray_path_counts(origin, targets, low, step, dims):
+        counts = np.empty(len(targets), dtype=np.int32)
+        empty = np.empty(0, dtype=np.uint32)
+        for row in prange(len(targets)):
+            counts[row] = _ray_path(origin, targets[row], low, step, dims, empty, 0)
+        return counts
+
+
+    @njit(parallel=True, cache=True)
+    def _ray_path_fill(origin, targets, low, step, dims, offsets, indices):
+        for row in prange(len(targets)):
+            _ray_path(origin, targets[row], low, step, dims, indices, offsets[row])
+
+
+    @njit(parallel=True, cache=True)
+    def _lookup_visible_cpu(flat_occupied, offsets, indices):
+        visible = np.ones(len(offsets) - 1, dtype=np.bool_)
+        for row in prange(len(visible)):
+            for index in range(offsets[row], offsets[row + 1]):
+                if flat_occupied[indices[index]]:
+                    visible[row] = False
+                    break
+        return visible
+
+
+    @njit(parallel=True, cache=True)
+    def _trace_rays_cpu(occupied, origin, targets, low, step, dims):
+        """每条射线独立执行与 NumPy 路径相同的精确 3D DDA。"""
+        result = np.ones(len(targets), dtype=np.bool_)
+        sx, sy, sz = (origin[0] - low[0]) / step, (origin[1] - low[1]) / step, (origin[2] - low[2]) / step
+        for row in prange(len(targets)):
+            tx = int(np.floor((targets[row, 0] - low[0]) / step))
+            ty = int(np.floor((targets[row, 1] - low[1]) / step))
+            tz = int(np.floor((targets[row, 2] - low[2]) / step))
+            vx = (targets[row, 0] - origin[0]) / step
+            vy = (targets[row, 1] - origin[1]) / step
+            vz = (targets[row, 2] - origin[2]) / step
+            dx = 1 if vx > 0 else -1 if vx < 0 else 0
+            dy = 1 if vy > 0 else -1 if vy < 0 else 0
+            dz = 1 if vz > 0 else -1 if vz < 0 else 0
+            cx, cy, cz = int(np.floor(sx)), int(np.floor(sy)), int(np.floor(sz))
+            mx = np.inf if dx == 0 else (cx + (dx > 0) - sx) / vx
+            my = np.inf if dy == 0 else (cy + (dy > 0) - sy) / vy
+            mz = np.inf if dz == 0 else (cz + (dz > 0) - sz) / vz
+            ix = np.inf if dx == 0 else abs(1.0 / vx)
+            iy = np.inf if dy == 0 else abs(1.0 / vy)
+            iz = np.inf if dz == 0 else abs(1.0 / vz)
+            while cx != tx or cy != ty or cz != tz:
+                if 0 <= cx < dims[0] and 0 <= cy < dims[1] and 0 <= cz < dims[2]:
+                    if occupied[cz, cx, cy]:
+                        result[row] = False
+                        break
+                minimum = min(mx, my, mz)
+                if mx == minimum:
+                    cx += dx
+                    mx += ix
+                if my == minimum:
+                    cy += dy
+                    my += iy
+                if mz == minimum:
+                    cz += dz
+                    mz += iz
+        return result
+
+
 class DrivingOccupancyCache:
-    """首次访问生成监督并写压缩 bitset，后续 epoch 直接读缓存。"""
+    """首次访问生成监督与 Agent 可见性，后续 epoch 直接读压缩缓存。"""
 
     def __init__(self, cfg):
         bev = cfg.model.driving.bev
@@ -51,12 +162,25 @@ class DrivingOccupancyCache:
         self.max_bytes = int(occ.cache_max_size_gb * 1024 ** 3)
         self.enabled = occ.cache_enabled
         self.chunk = occ.visibility_chunk
+        self.cpu_threads = occ.cpu_threads
+        self.ray_lookup_enabled = occ.ray_lookup_enabled
+        self.ray_lookup_max_bytes = int(occ.ray_lookup_max_size_gb * 1024 ** 3)
+        if self.ray_lookup_enabled and njit is None:
+            warnings.warn("驾驶占用路径查表需要 Numba；当前退回逐射线 DDA，请安装 numba>=0.67,<0.68。",
+                          RuntimeWarning, stacklevel=2)
+        self._jit_pid = None
         requested = occ.compute_device
         self.device = torch.device("cuda" if requested == "auto" and torch.cuda.is_available()
                                    else "cpu" if requested == "auto" else requested)
         check_occupancy_device(self.device)
         self._fused = {}
         self._centers = None
+        self._view_key = None
+        self._view_candidates = None
+        self._ray_tables = None
+        self._ray_gpu_tables = None
+        self._gpu_static_scene = None
+        self._gpu_static_points = None
 
     def check_sources(self, scene_dirs):
         """训练启动时列出缺少的 PT，不从原始数据暗中做融合。"""
@@ -79,7 +203,8 @@ class DrivingOccupancyCache:
 
     def _cache_path(self, kind, scene_dir, frame_idx, fingerprint):
         digest = hashlib.sha256(json.dumps({
-            "version": 2, "kind": kind, "scene": Path(scene_dir).name,
+            "version": 3 if kind == "agent" else 2, "kind": kind,
+            "scene": Path(scene_dir).name,
             "frame": int(frame_idx), "pt": fingerprint, "step": self.step,
             "lo": self.lo.tolist(), "hi": self.hi.tolist(),
         }, sort_keys=True).encode()).hexdigest()
@@ -96,8 +221,12 @@ class DrivingOccupancyCache:
         path = self._cache_path(kind, scene_dir, frame_idx,
                                 payload["metadata"]["fingerprint"])
         if self.enabled and path.exists():
-            return self._unpack(path)
-        occupancy, mask = builder(payload)
+            return self._unpack(path, kind)
+        result = builder(payload)
+        occupancy, mask = result[:2]
+        extra = ({"visible": np.packbits(result[2], bitorder="little"),
+                  "visible_count": np.asarray(len(result[2]), dtype=np.int32)}
+                 if kind == "agent" else {})
         if self.enabled:
             path.parent.mkdir(parents=True, exist_ok=True)
             with FileLock(str(path) + ".lock"):
@@ -108,7 +237,7 @@ class DrivingOccupancyCache:
                     try:
                         np.savez_compressed(temporary, occupancy=np.packbits(
                             occupancy.ravel(), bitorder="little"),
-                            mask=np.packbits(mask.ravel(), bitorder="little"))
+                            mask=np.packbits(mask.ravel(), bitorder="little"), **extra)
                         with FileLock(str(self.root / ".usage.lock")):
                             state_path = self.root / ".usage.json"
                             dirty = self.root / ".usage.dirty"
@@ -128,16 +257,20 @@ class DrivingOccupancyCache:
                             dirty.unlink()
                     finally:
                         temporary.unlink(missing_ok=True)
-        return occupancy, mask
+        return result
 
-    def _unpack(self, path):
+    def _unpack(self, path, kind):
         with np.load(path) as data:
             count = int(np.prod(self.shape))
             occupancy = np.unpackbits(data["occupancy"], count=count,
                                       bitorder="little").reshape(self.shape).astype(bool)
             mask = np.unpackbits(data["mask"], count=count,
                                  bitorder="little").reshape(self.shape).astype(bool)
-        return occupancy, mask
+            if kind == "agent":
+                visible = np.unpackbits(data["visible"],
+                                        count=int(data["visible_count"]),
+                                        bitorder="little").astype(bool)
+        return (occupancy, mask, visible) if kind == "agent" else (occupancy, mask)
 
     def _grid_centers(self):
         if self._centers is None:
@@ -149,21 +282,31 @@ class DrivingOccupancyCache:
     def scene(self, scene_dir, frame_idx, ego_pose, intrinsics, extrinsics, image_shape):
         """仅用 PT 静态点生成体素；遮挡判定严格不引用 Agent 或 LiDAR。"""
         def build(payload):
-            points = payload["static"]["xyz"].numpy()
-            # 世界轴对齐裁剪为保守球外接盒，之后再用真实刚性变换精确裁剪。
-            center = np.asarray(ego_pose[:3], dtype=np.float64)
-            radius = np.linalg.norm(self.hi - self.lo)
-            points = points[np.all(np.abs(points - center) <= radius, axis=1)]
-            occupied = (self._scene_voxels_gpu(points, ego_pose)
-                        if self.device.type == "cuda" else self._scene_voxels_cpu(points, ego_pose))
+            # 世界 AABB 是旋转后 BEV 盒的保守包络；体素索引仍由精确刚性变换决定。
+            corners = np.stack(np.meshgrid(*zip(self.lo, self.hi), indexing="ij"), -1).reshape(-1, 3)
+            world_corners = transform_points(corners, transform_matrix(ego_pose))
+            minimum = world_corners.min(0) - 1e-9
+            maximum = world_corners.max(0) + 1e-9
+            if self.device.type == "cuda":
+                scene = Path(scene_dir).name
+                if self._gpu_static_scene != scene:
+                    self._gpu_static_points = payload["static"]["xyz"].to(self.device)
+                    self._gpu_static_scene = scene
+                occupied = self._scene_voxels_gpu(
+                    self._gpu_static_points, ego_pose, minimum, maximum)
+            else:
+                points = payload["static"]["xyz"].numpy()
+                points = points[np.all((points >= minimum) & (points <= maximum), axis=1)]
+                occupied = self._scene_voxels_cpu(points, ego_pose)
             mask = self._visibility(occupied, intrinsics, extrinsics, image_shape)
             return occupied, mask
         return self._read_or_build("scene", scene_dir, frame_idx, build)
 
-    def agent(self, scene_dir, frame_idx, ego_pose, boxes, visible,
+    def agent(self, scene_dir, frame_idx, ego_pose, boxes, visibility_builder,
               scene_occupied, intrinsics, extrinsics, image_shape):
-        """仅对确认可见的运动框栅格化完整 OBB，含背面体素。"""
+        """命中时复用可见性；未命中才判定运动框并栅格化完整 OBB。"""
         def build(_payload):
+            visible = np.asarray(visibility_builder(), dtype=bool)
             occupied = (torch.zeros(self.shape, dtype=torch.bool, device=self.device)
                         if self.device.type == "cuda" else np.zeros(self.shape, dtype=bool))
             ego_to_world = transform_matrix(ego_pose)
@@ -198,7 +341,7 @@ class DrivingOccupancyCache:
             # 负样本只来自场景与 Agent 都无遮挡的相机可见区域；正样本全框监督。
             mask = self._visibility(scene_occupied | occupied, intrinsics,
                                     extrinsics, image_shape) | occupied
-            return occupied, mask
+            return occupied, mask, visible
         return self._read_or_build("agent", scene_dir, frame_idx, build)
 
     def _scene_voxels_cpu(self, points, ego_pose):
@@ -210,7 +353,13 @@ class DrivingOccupancyCache:
         occupied[i[:, 2], i[:, 0], i[:, 1]] = True
         return occupied
 
-    def _scene_voxels_gpu(self, points, ego_pose):
+    def _scene_voxels_gpu(self, points, ego_pose, minimum=None, maximum=None):
+        if isinstance(points, torch.Tensor) and minimum is not None:
+            low_bound = torch.as_tensor(minimum - 1e-5, device=self.device,
+                                        dtype=points.dtype)
+            high_bound = torch.as_tensor(maximum + 1e-5, device=self.device,
+                                         dtype=points.dtype)
+            points = points[((points >= low_bound) & (points <= high_bound)).all(1)]
         xyz = torch.as_tensor(points, device=self.device, dtype=torch.float64)
         matrix = torch.as_tensor(world_to_ego(ego_pose), device=self.device,
                                  dtype=torch.float64)
@@ -223,12 +372,16 @@ class DrivingOccupancyCache:
         occupied[i[:, 2], i[:, 0], i[:, 1]] = True
         return occupied.cpu().numpy()
 
-    def _visibility(self, occupied, intrinsics, extrinsics, image_shape):
+    def _camera_candidates(self, intrinsics, extrinsics, image_shape):
+        """相同标定与图像大小只计算一次视场候选体素。"""
+        key = (tuple(image_shape),
+               tuple((item["fx"], item["fy"], item["cx"], item["cy"])
+                     for item in intrinsics), np.asarray(extrinsics).tobytes())
+        if key == self._view_key:
+            return self._view_candidates
         centers = self._grid_centers()
         height, width = image_shape
-        visible = np.zeros(len(centers), dtype=bool)
-        occupied_gpu = (torch.as_tensor(occupied, device=self.device)
-                        if self.device.type == "cuda" else None)
+        views = []
         for intrinsic, extrinsic in zip(intrinsics, extrinsics):
             matrix = transform_matrix(extrinsic)
             local = transform_points(centers, np.linalg.inv(matrix))
@@ -237,17 +390,105 @@ class DrivingOccupancyCache:
             u = intrinsic["fx"] * local[:, 1] / safe + intrinsic["cx"]
             v = intrinsic["cy"] - intrinsic["fy"] * local[:, 2] / safe
             in_view = (depth > 0) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
-            candidates = np.flatnonzero(in_view & ~visible)
-            for indices in np.array_split(candidates, max(1, int(np.ceil(len(candidates) / self.chunk)))):
+            views.append((np.flatnonzero(in_view), matrix[:3, 3]))
+        self._view_key = key
+        self._view_candidates = views
+        self._ray_tables = None
+        self._ray_gpu_tables = None
+        return views
+
+    def _configure_cpu_threads(self):
+        if self._jit_pid != os.getpid():
+            set_num_threads(min(self.cpu_threads, numba_config.NUMBA_NUM_THREADS))
+            self._jit_pid = os.getpid()
+
+    def _build_ray_tables(self, views):
+        """按标定生成三相机 CSR 射线路径；超预算时保留精确 DDA 回退。"""
+        if not self.ray_lookup_enabled or njit is None or self._ray_tables is False:
+            return None
+        if self._ray_tables is not None:
+            return self._ray_tables
+        self._configure_cpu_threads()
+        centers = self._grid_centers()
+        counts = [_ray_path_counts(origin, centers[ids], self.lo, self.step, self.dims)
+                  for ids, origin in views]
+        table_bytes = sum(ids.nbytes + (len(ids) + 1) * 8 + int(item.sum()) * 4
+                          for (ids, _), item in zip(views, counts))
+        peak_bytes = table_bytes * (2 if self.device.type == "cuda" else 1)
+        if self.device.type == "cuda":
+            peak_bytes += max(int(item.sum()) * 5 for item in counts)
+        if peak_bytes > self.ray_lookup_max_bytes:
+            self._ray_tables = False
+            return None
+        tables = []
+        for (ids, origin), item in zip(views, counts):
+            offsets = np.empty(len(ids) + 1, dtype=np.int64)
+            offsets[0] = 0
+            np.cumsum(item, out=offsets[1:])
+            indices = np.empty(int(offsets[-1]), dtype=np.uint32)
+            _ray_path_fill(origin, centers[ids], self.lo, self.step,
+                           self.dims, offsets, indices)
+            tables.append((ids, offsets, indices))
+        self._ray_tables = tables
+        return tables
+
+    def _lookup_visibility_cpu(self, occupied, tables):
+        flat = occupied.ravel()
+        visible = np.zeros(flat.size, dtype=bool)
+        for ids, offsets, indices in tables:
+            visible[ids] |= _lookup_visible_cpu(flat, offsets, indices)
+        return visible.reshape(self.shape)
+
+    def _lookup_visibility_torch(self, occupied, tables):
+        """GPU 一次 gather + 分段最大值规约每条射线，目标体素不在路径表中。"""
+        if self._ray_gpu_tables is None:
+            self._ray_gpu_tables = [(
+                torch.as_tensor(ids, device=self.device),
+                torch.as_tensor(np.diff(offsets), device=self.device),
+                torch.as_tensor(indices.view(np.int32), device=self.device))
+                for ids, offsets, indices in tables]
+        flat = torch.as_tensor(occupied.ravel(), device=self.device)
+        visible = torch.zeros(flat.numel(), dtype=torch.bool, device=self.device)
+        for ids, lengths, indices in self._ray_gpu_tables:
+            path_occupied = flat.index_select(0, indices).to(torch.float32)
+            blocked = torch.segment_reduce(path_occupied, "max", lengths=lengths,
+                                           initial=0)
+            visible[ids] |= blocked == 0
+        return visible.cpu().numpy().reshape(self.shape)
+
+    def _visibility(self, occupied, intrinsics, extrinsics, image_shape):
+        centers = self._grid_centers()
+        views = self._camera_candidates(intrinsics, extrinsics, image_shape)
+        tables = self._build_ray_tables(views)
+        if tables is not None:
+            return (self._lookup_visibility_torch(occupied, tables)
+                    if self.device.type == "cuda" else self._lookup_visibility_cpu(
+                        occupied, tables))
+        visible = np.zeros(len(centers), dtype=bool)
+        occupied_gpu = (torch.as_tensor(occupied, device=self.device)
+                        if self.device.type == "cuda" else None)
+        for in_view, origin in views:
+            candidates = in_view[~visible[in_view]]
+            batches = ([candidates] if occupied_gpu is None and njit is not None
+                       else np.array_split(candidates, max(1, int(np.ceil(len(candidates) / self.chunk)))))
+            for indices in batches:
                 if len(indices):
                     visible[indices] = (self._unblocked_gpu(
-                        occupied_gpu, matrix[:3, 3], centers[indices])
+                        occupied_gpu, origin, centers[indices])
                         if occupied_gpu is not None else self._unblocked(
-                            occupied, matrix[:3, 3], centers[indices]))
+                            occupied, origin, centers[indices]))
         return visible.reshape(self.shape)
 
     def _unblocked(self, occupied, origin, targets):
-        """向量化 3D DDA，只有目标之前遇到占用才判为遮挡。"""
+        """CPU 以多核 JIT 遍历独立射线；无 Numba 时保留原 NumPy 算子。"""
+        if njit is not None:
+            self._configure_cpu_threads()
+            return _trace_rays_cpu(occupied, np.asarray(origin), targets,
+                                   self.lo, self.step, self.dims)
+        return self._unblocked_numpy(occupied, origin, targets)
+
+    def _unblocked_numpy(self, occupied, origin, targets):
+        """原始向量化 3D DDA，作为精确对照和无 JIT 环境回退。"""
         start = (origin - self.lo) / self.step
         target_index = np.floor((targets - self.lo) / self.step).astype(np.int64)
         delta = (targets - origin) / self.step

@@ -4,7 +4,7 @@
 依赖: torch, numpy, config.schema.Config, data.single_frame_base.SingleFrameSceneBase, data.target_encoding
 读取配置:
     data.dataset.scene_root / camera / dino_mean / dino_std
-    data.scene_cache_size
+    data.scene_cache_size / video_frame_cache_size
     model.physics.symlog_scale / depth_max_m
 对外接口:
     - PerceptionDataset(cfg) -> torch.utils.data.Dataset
@@ -43,7 +43,7 @@ class PerceptionDataset(SingleFrameSceneBase):
     def __init__(self, cfg: Config) -> None:
         ds = cfg.data.dataset
         super().__init__(ds.scene_root, ds.camera, ds.dino_mean, ds.dino_std,
-                         cfg.data.scene_cache_size)
+                         cfg.data.scene_cache_size, cfg.data.video_frame_cache_size)
         self._physics = cfg.model.physics
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:

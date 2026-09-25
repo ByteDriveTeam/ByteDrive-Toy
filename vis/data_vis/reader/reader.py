@@ -2,9 +2,9 @@
 
 模块: vis/data_vis/reader/reader.py
 依赖: cv2, lmdb, msgpack, numpy, collector.writer(unpack_array), vis.data_vis.reader.checks.reader_checks
-读取配置: —（场景目录由调用方传入；样式参数不在本层）
+读取配置: —（场景目录与内存视频帧缓存容量由调用方传入）
 对外接口:
-    - SceneReader(scene_dir)
+    - SceneReader(scene_dir, video_frame_cache_size=None)
         .meta -> dict                 # 场景级元数据（内外参/静态框/相机名/视频引用等）
         .num_frames -> int
         .num_kinematics -> int
@@ -21,7 +21,7 @@
         .close()
     - list_scenes(root) -> list[Path] # root 下的 scene_* 目录（按名排序）
 说明: RGB 随机读用 cv2.VideoCapture（顺序播放走 read()，跳帧才 set POS_FRAMES，规避 hevc 频繁 seek）；
-      每路视频仅保留最近一帧，使驾驶双帧数据的重叠历史帧无需回跳重解码，缓存大小恒定。
+      每路视频可保留有界内存帧缓存，复用驾驶四帧历史；不生成独立图片文件。
       数组解码复用 collector.writer.unpack_array，确保与写入端的 (dtype,shape,bytes) 格式单一来源、无损还原；
       为此把采集模块根加入 sys.path（vis 是其数据的消费者）。各传感器模态由采集端开关决定是否存在，故构造时
       探测首帧实际落盘的模态（available），frame() 只返回存在的模态；旧场景缺交通灯状态时返回空列表，
@@ -29,6 +29,7 @@
 """
 
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2
@@ -54,32 +55,35 @@ def list_scenes(root):
 class _Mp4Reader:
     """单个相机 mp4 的逐帧随机读取：顺序读高效，跳帧才 seek。"""
 
-    def __init__(self, path):
+    def __init__(self, path, cache_size):
         self._cap = cv2.VideoCapture(str(path))
         self._next = 0  # 下一次 read() 将返回的帧序号
-        self._last_idx = None
-        self._last_frame = None
+        self._cache_size = cache_size
+        self._frames = OrderedDict()
 
     def at(self, idx):
         """返回第 idx 帧 BGR 图（解码失败返回 None）。"""
-        if idx == self._last_idx:
-            return self._last_frame
+        if idx in self._frames:
+            self._frames.move_to_end(idx)
+            return self._frames[idx]
         if idx != self._next:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             self._next = idx
         ok, frame = self._cap.read()
         self._next = idx + 1 if ok else idx
-        self._last_idx = idx if ok else None
-        self._last_frame = frame if ok else None
-        return self._last_frame
+        if ok:
+            self._frames[idx] = frame
+            if len(self._frames) > self._cache_size:
+                self._frames.popitem(last=False)
+        return frame if ok else None
 
     def close(self):
         self._cap.release()
-        self._last_frame = None
+        self._frames.clear()
 
 
 class SceneReader:
-    def __init__(self, scene_dir):
+    def __init__(self, scene_dir, video_frame_cache_size=None):
         scene_dir = Path(scene_dir)
         check_scene_dir(scene_dir)
         self._env = lmdb.open(str(scene_dir / "lmdb"), readonly=True, subdir=True, lock=False)
@@ -95,7 +99,8 @@ class SceneReader:
         self.failure_status = self.meta.get("failure_status")
         # RGB 仅在采集开启时落 mp4；video_files 为空即该场景无 RGB，不建解码器
         video_files = self.meta.get("video_files", {})
-        self._videos = {cam: _Mp4Reader(scene_dir / video_files[cam])
+        self._videos = {cam: _Mp4Reader(scene_dir / video_files[cam],
+                                        video_frame_cache_size if video_frame_cache_size is not None else 1)
                         for cam in self.camera_names if cam in video_files}
         # 各模态由采集端开关决定，探测首帧首相机的实际落盘键，frame() 据此只取存在的模态
         self.available = self._detect_available(bool(self._videos))

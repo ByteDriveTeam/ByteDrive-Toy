@@ -551,6 +551,9 @@ class OccupancyCfg:
     cache_max_size_gb: float
     cache_enabled: bool
     compute_device: str
+    cpu_threads: int
+    ray_lookup_enabled: bool
+    ray_lookup_max_size_gb: float
     prebuild: bool
     progress_every: int
     visibility_chunk: int
@@ -779,6 +782,7 @@ class DrivingDatasetCfg:
 @dataclass
 class DataCfg:
     scene_cache_size: int
+    video_frame_cache_size: int
     dataset: DatasetCfg
     driving: DrivingDatasetCfg
     bevseg: BevSegDataCfg
@@ -1683,6 +1687,7 @@ def _validate_physics(ph):
 def _validate_data(data, model_lane, camera_rig):
     """校验对象: cfg.data —— 数据加载参数。"""
     assert data.scene_cache_size > 0, "data.scene_cache_size 必须 > 0"
+    assert data.video_frame_cache_size > 0, "data.video_frame_cache_size 必须 > 0"
     ds = data.dataset
     assert len(ds.dino_mean) == 3 and len(ds.dino_std) == 3, \
         "data.dataset.dino_mean/std 必须为 3 通道"
@@ -1848,6 +1853,10 @@ def _validate_driving(dv):
         and occ.visibility_chunk > 0 and occ.progress_every > 0 \
         and isinstance(occ.cache_enabled, bool) and isinstance(occ.prebuild, bool) \
         and occ.compute_device in ("cpu", "auto", "cuda") \
+        and isinstance(occ.cpu_threads, int) and not isinstance(occ.cpu_threads, bool) \
+        and occ.cpu_threads > 0 \
+        and isinstance(occ.ray_lookup_enabled, bool) \
+        and occ.ray_lookup_max_size_gb > 0 \
         and (not occ.prebuild or occ.cache_enabled), \
         "占用网格须与 LiDAR 体素对齐且缓存容量为正"
     assert det.num_queries > 0 and det.num_classes == 2 and 0 < det.no_object_weight <= 1 \

@@ -4,7 +4,7 @@
 依赖: data.single_frame_base.single_frame_base
 读取配置: —
 对外接口:
-    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size) -> Dataset
+    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size, video_frame_cache_size) -> Dataset
     - resolve_repo_path(path) -> Path
     - writable_contiguous(arr) -> np.ndarray
 说明: 跨模块统一 `from data.single_frame_base import ...`；实现见 single_frame_base.py，校验见 checks/。

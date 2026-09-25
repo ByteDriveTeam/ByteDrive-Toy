@@ -1415,7 +1415,7 @@ python -m pip install --upgrade pip
 
 # 按 https://pytorch.org/get-started/locally/ 选择匹配本机 CUDA 的 torch 安装命令。
 # 下行只列出项目直接使用的其余依赖：
-pip install transformers pyyaml numpy opencv-python lmdb msgpack av open3d
+pip install transformers pyyaml numpy opencv-python lmdb msgpack av open3d filelock "numba>=0.67,<0.68"
 ```
 
 若只安装了 CPU 版 PyTorch，配置中的 `device: cuda` 会在训练入口回退到 CPU；但 DINOv3 和高分辨率场解码

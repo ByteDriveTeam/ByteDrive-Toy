@@ -521,6 +521,9 @@ model:
       cache_max_size_gb: 32.0
       cache_enabled: true
       compute_device: cpu        # cpu / auto / cuda；CUDA 路径需在目标机器实测后选择
+      cpu_threads: 4             # 每个数据 worker 的 Numba DDA 线程数；4 worker 时总计约 16 线程
+      ray_lookup_enabled: true   # 相机固定标定下预计算逐体素遮挡路径，CPU/GPU 共用
+      ray_lookup_max_size_gb: 5.0 # 单 worker 表与 GPU 查询临时内存预算；超限回退 DDA
       prebuild: false            # true=训练前预生成缺失占用；false=首轮按需写入
       progress_every: 100        # 预生成进度输出间隔（帧）
       visibility_chunk: 4096    # 向量化精确 DDA 的单批射线数
@@ -565,6 +568,7 @@ data:
 
   # 每个 DataLoader worker 的场景资源上限；SceneReader/驾驶状态均采用有界 LRU，防止全量数据集线性涨内存
   scene_cache_size: 2
+  video_frame_cache_size: 5  # 每路 MP4 在 worker 内保留的 BGR 帧数，不写图片文件
 
   # 感知模型的单帧数据集：只读消费 carla_collector 落盘的场景，逐帧独立成样本（采用所有帧）
   dataset:

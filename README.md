@@ -360,7 +360,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 python -m pip install --upgrade pip
 
 # Install the CUDA-compatible PyTorch build from https://pytorch.org/get-started/locally/ first.
-pip install transformers pyyaml numpy opencv-python lmdb msgpack av open3d
+pip install transformers pyyaml numpy opencv-python lmdb msgpack av open3d filelock "numba>=0.67,<0.68"
 ```
 
 CPU fallback is supported but DINOv3 and high-resolution BEV decoding are very slow. Full training should use a BF16-capable CUDA GPU.

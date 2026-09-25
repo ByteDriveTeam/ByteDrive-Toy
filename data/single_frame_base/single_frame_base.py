@@ -3,9 +3,9 @@
 模块: data/single_frame_base/single_frame_base.py
 依赖: torch, numpy, lmdb, msgpack, vis.data_vis.reader(SceneReader/list_scenes),
       data.single_frame_base.checks.single_frame_base_checks
-读取配置: —（scene_root/camera/dino_mean/dino_std/scene_cache_size 由子类以参数传入，来源 config.data.*）
+读取配置: —（scene_root/camera/dino_mean/dino_std/scene_cache_size/video_frame_cache_size 由子类传入）
 对外接口:
-    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size) -> Dataset
+    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size, video_frame_cache_size) -> Dataset
         .frame_index -> list[(Path, int)]       # (场景目录, 帧号)
         .reader(scene_dir) -> SceneReader        # 惰性构造并按 worker 缓存
         .bgr_uint8(bgr) -> Tensor                # BGR uint8 → 紧凑 [3,H,W]，设备侧再归一化
@@ -40,7 +40,7 @@ class SingleFrameSceneBase(Dataset):
     """单帧场景数据集基类：共享索引、有界 reader 缓存与 RGB 归一化。"""
 
     def __init__(self, scene_root, camera: str, dino_mean, dino_std,
-                 scene_cache_size: int) -> None:
+                 scene_cache_size: int, video_frame_cache_size: int) -> None:
         self._root = resolve_repo_path(scene_root)
         check_scene_root(self._root)
         self._camera = camera
@@ -49,6 +49,7 @@ class SingleFrameSceneBase(Dataset):
         self._index = _build_frame_index(self._root)
         check_has_frames(self._index, self._root)
         self._scene_cache_size = scene_cache_size
+        self._video_frame_cache_size = video_frame_cache_size
         self._readers = OrderedDict()
 
     def __len__(self) -> int:
@@ -64,7 +65,7 @@ class SingleFrameSceneBase(Dataset):
         key = str(scene_dir)
         reader = self._readers.pop(key, None)
         if reader is None:
-            reader = SceneReader(scene_dir)
+            reader = SceneReader(scene_dir, video_frame_cache_size=self._video_frame_cache_size)
         self._readers[key] = reader
         if len(self._readers) > self._scene_cache_size:
             _, evicted = self._readers.popitem(last=False)

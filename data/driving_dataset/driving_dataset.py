@@ -3,12 +3,13 @@
 模块: data/driving_dataset/driving_dataset.py
 依赖: numpy, torch, data.single_frame_base, data.driving_targets,
       data.driving_occupancy, data.hd_map, data.lidar_voxelization, vis.data_vis.geometry
-读取配置: data.driving.*, data.scene_cache_size, data.dataset.dino_mean/dino_std,
+读取配置: data.driving.*, data.scene_cache_size/video_frame_cache_size, data.dataset.dino_mean/dino_std,
           model.driving.bev/bev_decoder/lidar_fusion/lane_map/traffic_control/trajectory/detection,
           model.physics.depth_max_m
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
 说明: 四帧历史图像按真实位姿使用 4×4 刚性变换；场景与 Agent 占用分别生成并按需缓存。
+      Agent 缓存命中时复用可见性生成 Detect 监督，避免重复逐框 LiDAR 判定。
       只返回当前帧 LiDAR，三目 BGR 在训练设备上归一化。
 """
 from __future__ import annotations
@@ -45,7 +46,7 @@ class DrivingDataset(SingleFrameSceneBase):
         drv_data = cfg.data.driving
         super().__init__(drv_data.scene_root, drv_data.cameras[0],
                          cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std,
-                         cfg.data.scene_cache_size)
+                         cfg.data.scene_cache_size, cfg.data.video_frame_cache_size)
         self._cfg_data = drv_data
         self._cameras = tuple(drv_data.cameras)
         bev = cfg.model.driving.bev
@@ -91,6 +92,15 @@ class DrivingDataset(SingleFrameSceneBase):
         cameras = self._cameras
         check_camera_calib(meta, cameras)
         check_frame_cadence(meta, self._previous_offset, self._detect_dt)
+        history_indices = [max(frame_idx - distance * self._previous_offset, 0)
+                           for distance in range(self._history_frames, 0, -1)]
+        history_valid = np.asarray([
+            frame_idx >= distance * self._previous_offset
+            for distance in range(self._history_frames, 0, -1)], dtype=bool)
+        # 历史帧先顺序解码，避免当前帧读取后连续回跳；无效历史仍用当前图像。
+        history_views = [np.stack([reader.rgb(index, camera) for camera in cameras])
+                         if valid else None
+                         for index, valid in zip(history_indices, history_valid)]
         frame = reader.frame(frame_idx, modalities=("depth", "lidar"))
         check_behavior_annotations(meta, frame, cameras)
         pose = [float(value) for value in frame["ego"]["transform"]]
@@ -101,18 +111,8 @@ class DrivingDataset(SingleFrameSceneBase):
         extrinsics = np.asarray([meta["extrinsics"][camera] for camera in cameras],
                                 dtype=np.float32)
         rgb = np.stack([frame["rgb"][camera] for camera in cameras])
-        depth = (np.stack([np.asarray(frame["depth"][camera], dtype=np.float32)
-                           for camera in cameras])
-                 if all(camera in frame["depth"] for camera in cameras) else None)
-        history_indices = [max(frame_idx - distance * self._previous_offset, 0)
-                           for distance in range(self._history_frames, 0, -1)]
-        history_valid = np.asarray([
-            frame_idx >= distance * self._previous_offset
-            for distance in range(self._history_frames, 0, -1)], dtype=bool)
-        history_rgb = np.stack([
-            np.stack([reader.rgb(index, camera) for camera in cameras])
-            if valid else rgb
-            for index, valid in zip(history_indices, history_valid)])
+        history_rgb = np.stack([views if views is not None else rgb
+                                for views in history_views])
         current_from_world = world_to_ego(pose)
         history_to_current = np.stack([
             current_from_world @ transform_matrix(
@@ -120,8 +120,6 @@ class DrivingDataset(SingleFrameSceneBase):
             if valid else np.eye(4)
             for index, valid in zip(history_indices, history_valid)
         ]).astype(np.float32)
-        lidar_points, lidar_ids = self._lidar_target_points(
-            frame["lidar"], meta, frame["meta"])
         lidar_stats, lidar_occupied, lidar_valid = self._lidar_voxels(
             scene_dir, frame["lidar"], meta, frame["meta"])
         states = self._scene_states(scene_dir, reader)
@@ -144,12 +142,12 @@ class DrivingDataset(SingleFrameSceneBase):
             lane_cfg.type_to_class, lane_cfg.unknown_class)
         moving = [box for box in frame["bboxes"]
                   if box.get("semantic") in ("vehicle", "pedestrian")]
-        visible = self._visible_agents(moving, depth, intrinsics, extrinsics,
-                                       pose, lidar_points, lidar_ids)
         scene_occ, scene_mask = self._occupancy.scene(
             scene_dir, frame_idx, pose, intrinsics, extrinsics, rgb.shape[1:3])
-        agent_occ, agent_mask = self._occupancy.agent(
-            scene_dir, frame_idx, pose, moving, visible, scene_occ,
+        agent_occ, agent_mask, visible = self._occupancy.agent(
+            scene_dir, frame_idx, pose, moving,
+            lambda: self._visible_agents_for_frame(
+                frame, meta, cameras, intrinsics, extrinsics, pose, moving), scene_occ,
             intrinsics, extrinsics, rgb.shape[1:3])
         # 缓存按 x 递增索引，BEV 特征行从远到近；只在输出边界翻转以保持缓存几何直观。
         scene_occ, scene_mask, agent_occ, agent_mask = (
@@ -201,19 +199,26 @@ class DrivingDataset(SingleFrameSceneBase):
         extrinsics = np.asarray([meta["extrinsics"][camera] for camera in cameras],
                                 dtype=np.float32)
         image_shape = frame["rgb"][cameras[0]].shape[:2]
+        moving = [box for box in frame["bboxes"]
+                  if box.get("semantic") in ("vehicle", "pedestrian")]
+        scene_occ, _ = self._occupancy.scene(
+            scene_dir, frame_idx, pose, intrinsics, extrinsics, image_shape)
+        self._occupancy.agent(
+            scene_dir, frame_idx, pose, moving,
+            lambda: self._visible_agents_for_frame(
+                frame, meta, cameras, intrinsics, extrinsics, pose, moving),
+            scene_occ, intrinsics, extrinsics, image_shape)
+
+    def _visible_agents_for_frame(self, frame, meta, cameras, intrinsics,
+                                  extrinsics, pose, moving):
+        """仅在 Agent 缓存未命中时从当前帧计算框可见性。"""
         depth = (np.stack([np.asarray(frame["depth"][camera], dtype=np.float32)
                            for camera in cameras])
                  if all(camera in frame["depth"] for camera in cameras) else None)
         lidar_points, lidar_ids = self._lidar_target_points(
             frame["lidar"], meta, frame["meta"])
-        moving = [box for box in frame["bboxes"]
-                  if box.get("semantic") in ("vehicle", "pedestrian")]
-        visible = self._visible_agents(moving, depth, intrinsics, extrinsics,
-                                       pose, lidar_points, lidar_ids)
-        scene_occ, _ = self._occupancy.scene(
-            scene_dir, frame_idx, pose, intrinsics, extrinsics, image_shape)
-        self._occupancy.agent(scene_dir, frame_idx, pose, moving, visible,
-                              scene_occ, intrinsics, extrinsics, image_shape)
+        return self._visible_agents(moving, depth, intrinsics, extrinsics,
+                                    pose, lidar_points, lidar_ids)
 
     def _visible_agents(self, boxes, depth, intrinsics, extrinsics, pose,
                         lidar_points, lidar_ids):
