@@ -58,7 +58,7 @@ from vis.data_vis.geometry import (
 __all__ = [
     "BEHAVIOR_CLASSES", "BehaviorParams", "BevParams", "bev_cell_centers", "ego_xy_to_pixel",
     "inview_mask", "speed_accelerations", "trajectory_targets", "behavior_targets",
-    "risk_field", "visible_moving_box_occupancy", "distribution_field",
+    "risk_field", "visible_moving_box_occupancy", "visible_moving_boxes", "distribution_field",
 ]
 
 BevParams = namedtuple("BevParams", ["x_min", "x_max", "y_min", "y_max", "height", "width"])
@@ -277,6 +277,28 @@ def _bbox_hits_semantic(box, semantic, w2c, k, semantic_tag, margin_px, min_pixe
     return int(np.count_nonzero(semantic[y0:y1 + 1, x0:x1 + 1] == semantic_tag)) >= min_pixels
 
 
+def visible_moving_boxes(boxes, depth_maps, intrinsics, current_pose6,
+                         camera_extrinsics, depth_max_m, min_visible_pixels,
+                         lidar_points=None, lidar_object_ids=None):
+    """返回输入运动框的深度优先、LiDAR 回退可见性布尔向量。"""
+    check_visible_moving_box_inputs(
+        depth_maps, intrinsics, np.asarray(camera_extrinsics),
+        min_visible_pixels, lidar_points)
+    if not boxes:
+        return np.zeros(0, dtype=bool)
+    if depth_maps is None:
+        return _visible_boxes_in_lidar(
+            boxes, lidar_points, lidar_object_ids, current_pose6)
+    world_corners = np.stack([bbox_corners(box) for box in boxes])
+    visible = np.zeros(len(boxes), dtype=bool)
+    for depth_m, intrinsic, extrinsic in zip(depth_maps, intrinsics, camera_extrinsics):
+        camera_to_world = transform_matrix(current_pose6) @ transform_matrix(extrinsic)
+        visible |= _visible_boxes_in_camera(
+            boxes, world_corners, depth_m, intrinsic, camera_to_world,
+            depth_max_m, min_visible_pixels)
+    return visible
+
+
 def visible_moving_box_occupancy(bboxes, depth_maps, intrinsics, current_pose6,
                                  camera_extrinsics, bev: BevParams, depth_max_m: float,
                                  min_visible_pixels: int, lidar_points=None,
@@ -300,8 +322,6 @@ def visible_moving_box_occupancy(bboxes, depth_maps, intrinsics, current_pose6,
     camera_extrinsics = (
         np.asarray(camera_extrinsics) if camera_extrinsics is not None else None)
     lidar_points = None if lidar_points is None else np.asarray(lidar_points)
-    check_visible_moving_box_inputs(
-        depth_maps, intrinsics, camera_extrinsics, min_visible_pixels, lidar_points)
     occupancy = np.zeros((bev.height, bev.width), dtype=np.uint8)
     boxes = [box for box in bboxes if box.get("semantic") in _MOVING_BOX_SEMANTICS]
     if not boxes:
@@ -317,16 +337,9 @@ def visible_moving_box_occupancy(bboxes, depth_maps, intrinsics, current_pose6,
     boxes = [box for box, keep in zip(boxes, relevant) if keep]
     ego_corners = ego_corners[relevant]
     world_corners = world_corners[relevant]
-    if depth_maps is not None:
-        visible = np.zeros(len(boxes), dtype=bool)
-        for depth_m, intrinsic, extrinsic in zip(depth_maps, intrinsics, camera_extrinsics):
-            camera_to_world = transform_matrix(current_pose6) @ transform_matrix(extrinsic)
-            visible |= _visible_boxes_in_camera(
-                boxes, world_corners, depth_m, intrinsic, camera_to_world,
-                depth_max_m, min_visible_pixels)
-    else:
-        visible = _visible_boxes_in_lidar(
-            boxes, lidar_points, lidar_object_ids, current_pose6)
+    visible = visible_moving_boxes(
+        boxes, depth_maps, intrinsics, current_pose6, camera_extrinsics,
+        depth_max_m, min_visible_pixels, lidar_points, lidar_object_ids)
 
     for corners in ego_corners[visible]:
         rows, cols = ego_xy_to_pixel(corners[:, :2], bev)

@@ -4,12 +4,13 @@
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
       model.driving_model.DrivingModel, data.perception_dataset.PerceptionDataset,
       data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
-      data.bevseg_cache, train.optimizer, train.loop, train.checks.run_checks
+      data.bevseg_cache, data.driving_occupancy, train.optimizer, train.loop, train.checks.run_checks
 读取配置:
-    train.device / epochs / batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
+    train.device / epochs / batch_size / driving_batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
         shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer /
         float32_matmul_precision / ckpt_dir / resume
     data.bevseg.cache.prebuild/progress_every
+    model.driving.occupancy.prebuild/progress_every
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -17,7 +18,7 @@
       （--task 选择）。设备取 config，CUDA 不可用回退 CPU。检查点只保存非骨干权重（排除任何含 `backbone.`
       的键），故驾驶模型也不落几十 M 的 DINO 权重、可断点续训。驾驶训练可用 --perception-ckpt 以感知预训练权重
       初始化其视觉 fusion/trunk；语义/深度头权重不会加载到 Driving。num_workers>0 时 DataLoader 在 worker 内惰性建 SceneReader，
-      故入口置于 __main__ 守卫下。BEVSeg 可在构建模型前自动检测并预生成缺失栅格缓存。
+      故入口置于 __main__ 守卫下。BEVSeg 与驾驶占用均可在构建模型前预生成缺失缓存。
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from config import load_config
 from data.bevseg_cache import prepare_bevseg_cache
 from data.bevseg_dataset import BevSegDataset
 from data.driving_dataset import DrivingDataset
+from data.driving_occupancy import prepare_driving_occupancy_cache
 from data.perception_dataset import PerceptionDataset
 from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
@@ -102,7 +104,8 @@ def _save_checkpoint(model, optimizer, path: Path, epoch: int) -> None:
     """保存非骨干权重（排除任何含 backbone. 的键）+ 优化器状态 + 已完成 epoch 数，供断点续训。"""
     trainable = {k: v for k, v in model.state_dict().items() if "backbone." not in k}
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"epoch": epoch, "model": trainable, "optimizer": optimizer.state_dict(),
+    torch.save({"epoch": epoch, "architecture_version": 2 if isinstance(model, DrivingModel) else 1,
+                "model": trainable, "optimizer": optimizer.state_dict(),
                 "optimizer_param_names": _optimizer_param_names(model, optimizer)}, path)
 
 
@@ -121,6 +124,15 @@ def _maybe_resume(model, optimizer, ckpt_dir: Path, resume: bool, explicit) -> i
     if path is None:
         return 0
     ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    if isinstance(model, DrivingModel) and ckpt.get("architecture_version") != 2:
+        current = model.state_dict()
+        compatible = {name: value for name, value in ckpt["model"].items()
+                      if name.startswith("perception.") and name in current
+                      and tuple(value.shape) == tuple(current[name].shape)}
+        model.load_state_dict(compatible, strict=False)
+        print("[train] 旧驾驶架构仅恢复感知参数 {} 项；新规划/占用头与优化器重新初始化".format(
+            len(compatible)))
+        return 0
     loaded_names = _load_compatible_model(model, ckpt["model"])
     _load_compatible_optimizer(
         model, optimizer, ckpt.get("optimizer"), ckpt.get("optimizer_param_names"), loaded_names)
@@ -273,13 +285,30 @@ def main(argv=None) -> None:
                         help="驾驶训练时用于初始化感知子模块的感知检查点路径")
     parser.add_argument("--prepare-bevseg-cache", action="store_true",
                         help="仅预热 BEVSeg 压缩栅格缓存，不构建模型或开始训练")
+    parser.add_argument("--prepare-driving-cache", action="store_true",
+                        help="仅预生成缺失的场景与 Agent 占用缓存，不构建模型或开始训练")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config, args.env)
     if args.prepare_bevseg_cache and args.task != "bevseg":
         parser.error("--prepare-bevseg-cache 仅可与 --task bevseg 一起使用")
+    if args.prepare_driving_cache and args.task != "driving":
+        parser.error("--prepare-driving-cache 仅可与 --task driving 一起使用")
+    if args.prepare_driving_cache and not cfg.model.driving.occupancy.cache_enabled:
+        parser.error("--prepare-driving-cache 要求 model.driving.occupancy.cache_enabled=true")
     model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
-    dataset = dataset_cls(cfg) if args.task == "bevseg" else None
+    dataset = dataset_cls(cfg) if (args.task == "bevseg" or
+                                (args.task == "driving" and
+                                 (args.prepare_driving_cache or
+                                  cfg.model.driving.occupancy.prebuild))) else None
+    if args.task == "driving" and dataset is not None:
+        stats = prepare_driving_occupancy_cache(
+            dataset, cfg.train.num_workers, cfg.train.prefetch_factor,
+            cfg.train.in_order, cfg.model.driving.occupancy.progress_every)
+        print("[driving-cache] existing={existing} built={built} total={total}".format(
+            **stats), flush=True)
+        if args.prepare_driving_cache:
+            return
     if args.task == "bevseg" and (args.prepare_bevseg_cache or cfg.data.bevseg.cache.prebuild):
         try:
             stats = prepare_bevseg_cache(
@@ -307,15 +336,19 @@ def main(argv=None) -> None:
     if args.task == "driving" and args.perception_ckpt:
         _load_perception_weights(model, args.perception_ckpt)
     batch_sampler = SceneBatchSampler(
-        dataset.frame_index, cfg.train.batch_size, cfg.train.shuffle, cfg.train.drop_last)
+        dataset.frame_index,
+        cfg.train.driving_batch_size if args.task == "driving" else cfg.train.batch_size,
+        cfg.train.shuffle, cfg.train.drop_last)
+    loader_workers = (0 if args.task == "driving" and
+                      dataset._occupancy.device.type == "cuda" else cfg.train.num_workers)
     loader_kwargs = {
         "batch_sampler": batch_sampler,
-        "num_workers": cfg.train.num_workers,
+        "num_workers": loader_workers,
         "pin_memory": cfg.train.pin_memory and device.type == "cuda",
-        "persistent_workers": cfg.train.persistent_workers and cfg.train.num_workers > 0,
+        "persistent_workers": cfg.train.persistent_workers and loader_workers > 0,
         "collate_fn": _compact_collate,
     }
-    if cfg.train.num_workers > 0:
+    if loader_workers > 0:
         loader_kwargs.update(
             prefetch_factor=cfg.train.prefetch_factor,
             in_order=cfg.train.in_order)

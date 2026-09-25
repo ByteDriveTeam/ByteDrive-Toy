@@ -538,8 +538,34 @@ class TrajectoryCfg:
     self_layers: int               # 规划 CTB 后的 TB 层数
     num_heads: int
     mode_token_init_std: float     # 可学习 Mode Token 随机初始化标准差
-    baseline_step_m: float         # 扇区中线基线轨迹航点间距（米）
     symlog_scale: float            # 条件输入（目标点/ego 速度）归一化的 Symlog 缩放（轨迹在物理空间预测）
+    flow_steps: int
+    fixed_noise_seed: int
+    noise_mode: str
+
+
+@dataclass
+class OccupancyCfg:
+    voxel_size_m: float
+    cache_dir: str
+    cache_max_size_gb: float
+    cache_enabled: bool
+    compute_device: str
+    prebuild: bool
+    progress_every: int
+    visibility_chunk: int
+
+
+@dataclass
+class DetectionCfg:
+    num_queries: int
+    num_classes: int
+    no_object_weight: float
+    matching_size_scales_m: List[float]
+    matching_velocity_scale_mps: float
+    num_modes: int
+    future_steps: int
+    future_dt_s: float
 
 
 @dataclass
@@ -563,6 +589,8 @@ class DrivingCfg:
     lane_map: LaneMapCfg
     traffic_control: TrafficControlCfg
     trajectory: TrajectoryCfg
+    occupancy: OccupancyCfg
+    detection: DetectionCfg
     behavior: BehaviorCfg
 
 
@@ -732,6 +760,8 @@ class TrafficControlTargetCfg:
 class DrivingDatasetCfg:
     """驾驶数据集参数（几何/K/场分辨率取自 model.driving，避免重复声明）。"""
     scene_root: str
+    fused_root: str
+    history_frames: int
     cameras: List[str]              # 三目相机轴统一顺序
     map_dir: str                  # HD 地图目录
     map_name_template: str        # 地图文件名模板，如 "{map}_HD_map.npz"
@@ -764,25 +794,15 @@ class LossWeightsCfg:
 
 @dataclass
 class DrivingLossWeightsCfg:
-    trajectory: float             # 匈牙利匹配多模态轨迹回归
-    trajectory_unmatched_weight: float  # 未匹配 Mode 的小权重回归系数
-    trajectory_distance_weight_min: float  # 远端航点权重下限
-    trajectory_distance_decay_m: float  # 航点沿 GT 路径距离的指数衰减尺度
-    trajectory_turn_weight_gain: float  # 弯道航点相对直线的额外增权上限
-    trajectory_turn_angle_deg: float  # 达到最大弯道增权的局部转角
-    confidence: float             # 模态置信度分类
-    behavior: float               # 行为多标签分类
-    distribution: float           # 轨迹分布场
-    risk: float                   # 风险场
-    drivable: float               # 可行驶区域场
-    lane_class: float             # 道路线类别
-    lane_class_weights: List[float]  # 类别 CE 权重（顺序对齐 model.driving.lane_map.class_names）
-    lane_direction: float         # 道路线有向切向量
-    centerline: float             # 轨迹到 GT 所贴近中心线链的米制距离
-    boundary: float               # 轨迹到可行驶区域的越界距离（道路外/可见占用内）
-    stop_line: float              # 相关交通灯停止线几何
-    traffic_light_state: float    # 停止线区域灯色分类
-    stop_crossing: float          # 红灯轨迹越线距离
+    scene_occ: float
+    agent_occ: float
+    detect_class: float
+    detect_box: float
+    detect_future: float
+    flow: float
+    lane_occupancy: float
+    drivable: float
+    stop_line: float
 
 
 @dataclass
@@ -790,6 +810,7 @@ class TrainCfg:
     device: str
     epochs: int
     batch_size: int
+    driving_batch_size: int
     grad_accum_steps: int
     num_workers: int
     prefetch_factor: int
@@ -1449,10 +1470,6 @@ def _validate_clone_loop(cl, model, data, cameras, lidar, collection_sim, collec
     assert control.waypoint_dt_s > 0 and control.speed_horizon > 0 \
         and 0 <= control.min_target_speed_mps < control.max_target_speed_mps, \
         "clone_loop.control 航点时间/速度参数取值非法"
-    assert math.isclose(
-        control.waypoint_dt_s, model.driving.trajectory.waypoint_dt_s,
-        rel_tol=0.0, abs_tol=1e-9), \
-        "clone_loop.control.waypoint_dt_s 必须与模型轨迹点间隔一致"
     history_steps = control.waypoint_dt_s / sim.fixed_delta_seconds
     assert history_steps >= 1 and abs(history_steps - round(history_steps)) < 1e-6, \
         "clone_loop.control.waypoint_dt_s 必须是仿真固定步长的正整数倍"
@@ -1679,6 +1696,8 @@ def _validate_data(data, model_lane, camera_rig):
     assert all(name in rig_names for name in dr.cameras), \
         "data.driving.cameras 中每个名称都必须存在于 carla_collector.cameras.rig"
     assert dr.previous_frame_offset > 0, "data.driving.previous_frame_offset 必须 > 0"
+    assert dr.history_frames == 4 and dr.fused_root, \
+        "data.driving.history_frames 必须为 4 且 fused_root 不得为空"
     assert dr.dist_sigma_m > 0 and dr.lane_half_width_m > 0, \
         "data.driving.dist_sigma_m / lane_half_width_m 必须 > 0"
     lane = dr.lane_map
@@ -1730,6 +1749,7 @@ def _validate_train(train, model_lane):
         assert getattr(train, name) >= (1 if name != "num_workers" else 0), \
             "train.{} 取值非法".format(name)
     assert train.lr > 0, "train.lr 必须 > 0"
+    assert train.driving_batch_size > 0, "train.driving_batch_size 必须 > 0"
     assert train.weight_decay >= 0, "train.weight_decay 必须 >= 0"
     assert train.grad_clip_norm >= 0, "train.grad_clip_norm 必须 >= 0（0 表示不裁剪）"
     assert train.perception_lr_scale > 0, "train.perception_lr_scale 必须 > 0（感知子模块相对 lr 缩放）"
@@ -1747,23 +1767,9 @@ def _validate_train(train, model_lane):
     # 校验对象: train.driving_loss_weights —— 各权重非负
     dw = train.driving_loss_weights
     assert all(getattr(dw, n) >= 0 for n in
-               ("trajectory", "confidence", "behavior", "distribution", "risk", "drivable",
-                "lane_class", "lane_direction", "centerline", "boundary", "stop_line",
-                "traffic_light_state", "stop_crossing")), \
+               ("scene_occ", "agent_occ", "detect_class", "detect_box", "detect_future",
+                "flow", "lane_occupancy", "drivable", "stop_line")), \
         "train.driving_loss_weights.* 必须 >= 0"
-    assert 0 < dw.trajectory_unmatched_weight <= 1, \
-        "train.driving_loss_weights.trajectory_unmatched_weight 必须在 (0,1]"
-    assert 0 < dw.trajectory_distance_weight_min <= 1, \
-        "train.driving_loss_weights.trajectory_distance_weight_min 必须在 (0,1]"
-    assert dw.trajectory_distance_decay_m > 0, \
-        "train.driving_loss_weights.trajectory_distance_decay_m 必须 > 0"
-    assert dw.trajectory_turn_weight_gain >= 0, \
-        "train.driving_loss_weights.trajectory_turn_weight_gain 必须 >= 0"
-    assert 0 < dw.trajectory_turn_angle_deg <= 180, \
-        "train.driving_loss_weights.trajectory_turn_angle_deg 必须在 (0,180]"
-    assert len(dw.lane_class_weights) == len(model_lane.class_names) \
-        and all(weight > 0 for weight in dw.lane_class_weights), \
-        "train.driving_loss_weights.lane_class_weights 须与道路线类别等长且各项 > 0"
 
 
 def _validate_driving(dv):
@@ -1788,8 +1794,8 @@ def _validate_driving(dv):
     assert dv.attention.mlp_ratio > 0, "model.driving.attention.mlp_ratio 必须 > 0"
     # 校验对象: bev_encoder —— 固定六层、BEV 寄存器和二维 RoPE 参数合法
     be = dv.bev_encoder
-    assert be.cross_layers > 0 and be.temporal_layers > 0, \
-        "model.driving.bev_encoder.cross_layers / temporal_layers 必须 > 0"
+    assert be.cross_layers == 6 and be.temporal_layers == 0, \
+        "model.driving.bev_encoder 必须为六层图像 CA，不再使用历史 BEV CA"
     assert be.transformer_layers == 6, \
         "model.driving.bev_encoder.transformer_layers 必须为 6"
     assert be.num_register_tokens > 0, \
@@ -1820,20 +1826,37 @@ def _validate_driving(dv):
         "model.driving.traffic_control.state_names 须非空、不重复且包含 red"
     # 校验对象: trajectory —— 固定 8 Mode、2 个规划 CTB、4 个后续 TB，其余维度与尺度合法
     tj = dv.trajectory
-    assert tj.num_modes == 8, "model.driving.trajectory.num_modes 必须为 8"
-    assert tj.cross_layers == 2, "model.driving.trajectory.cross_layers 必须为 2（对应第 3/6 层特征）"
-    assert tj.self_layers == 4, "model.driving.trajectory.self_layers 必须为 4"
+    assert tj.num_modes == 1 and tj.num_waypoints == 12, \
+        "model.driving.trajectory 必须为单条十二点轨迹"
+    assert tj.cross_layers == 6 and tj.self_layers == 6, \
+        "model.driving.trajectory 必须为六层 CA→SA→FFN"
     for name in ("num_waypoints", "planning_dim", "condition_mlp_hidden", "feature_ffn_hidden"):
         assert getattr(tj, name) > 0, "model.driving.trajectory.{} 必须 > 0".format(name)
-    assert math.isclose(tj.waypoint_dt_s, 0.1, rel_tol=0.0, abs_tol=1e-9), \
-        "model.driving.trajectory.waypoint_dt_s 必须为 0.1（模型固定输出 10Hz 轨迹）"
+    assert math.isclose(tj.waypoint_dt_s, 0.5, rel_tol=0.0, abs_tol=1e-9), \
+        "model.driving.trajectory.waypoint_dt_s 必须为 0.5"
     assert tj.planning_dim < tj.cross_layers * dv.work_dim, \
         "model.driving.trajectory.planning_dim 必须小于 cross_layers×work_dim（拼接后 1×1 CNN 降维）"
     assert tj.num_heads > 0 and tj.planning_dim % tj.num_heads == 0, \
         "model.driving.trajectory.num_heads 必须 > 0 且整除 planning_dim"
     assert all(math.isfinite(value) and value > 0 for value in (
-        tj.mode_token_init_std, tj.baseline_step_m, tj.symlog_scale, tj.waypoint_dt_s)), \
+        tj.mode_token_init_std, tj.symlog_scale, tj.waypoint_dt_s)), \
         "model.driving.trajectory 的初始化尺度、基线步长、Symlog 尺度与点间隔必须为有限正数"
+    assert tj.flow_steps > 0 and tj.noise_mode in ("fixed", "random"), \
+        "model.driving.trajectory 流采样配置非法"
+    occ, det = dv.occupancy, dv.detection
+    assert math.isclose(occ.voxel_size_m, dv.lidar_fusion.voxel_size_m) and occ.cache_max_size_gb > 0 \
+        and occ.visibility_chunk > 0 and occ.progress_every > 0 \
+        and isinstance(occ.cache_enabled, bool) and isinstance(occ.prebuild, bool) \
+        and occ.compute_device in ("cpu", "auto", "cuda") \
+        and (not occ.prebuild or occ.cache_enabled), \
+        "占用网格须与 LiDAR 体素对齐且缓存容量为正"
+    assert det.num_queries > 0 and det.num_classes == 2 and 0 < det.no_object_weight <= 1 \
+        and det.num_modes == 3 \
+        and det.future_steps == 6 and math.isclose(det.future_dt_s, 0.5), \
+        "Detect 须为车/行人、三 Mode、未来 3s 2Hz"
+    assert len(det.matching_size_scales_m) == 3 \
+        and all(value > 0 for value in det.matching_size_scales_m) \
+        and det.matching_velocity_scale_mps > 0, "Detect 匹配尺度必须为正"
     # 校验对象: behavior.num_classes —— 固定对应八类行为语义，避免模型头与标签顺序漂移
     assert dv.behavior.num_classes == 8, \
         "model.driving.behavior.num_classes 必须为 8（固定行为语义顺序）"

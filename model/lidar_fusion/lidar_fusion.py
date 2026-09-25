@@ -1,4 +1,4 @@
-"""LiDAR 体素融合：线性缩放局部三维统计，并以视觉条件门控注入初始 BEV 查询。
+"""LiDAR 体素融合：以对应 BEV Patch 内容计算逐位置逐维门控。
 
 模块: model/lidar_fusion/lidar_fusion.py
 依赖: torch, config.schema.DrivingCfg,
@@ -12,7 +12,7 @@
     - LidarQueryFusion(cfg_driving) -> nn.Module
         forward(query, visual, stats=None, occupied=None, valid=None) -> Tensor
 说明: 米制局部统计固定乘 4 后送入体素投影，不作裁剪。空体素由可学习向量表示；
-      整帧缺失由 valid 严格旁路。门控为逐位置逐通道 Sigmoid，
+      整帧缺失由 valid 严格旁路。门控使用对应 BEV Patch 而非视觉 GAP，
       最终空间对齐卷积零初始化，使旧权重初始化时 LiDAR 残差严格为零。
 """
 
@@ -29,7 +29,7 @@ __all__ = ["LidarQueryFusion"]
 
 
 class LidarQueryFusion(nn.Module):
-    """把 `[B,6,Z,X,Y]` LiDAR 统计编码并门控注入初始 BEV 查询。"""
+    """把 `[B,6,Z,X,Y]` LiDAR 统计编码并按对应 BEV Patch 门控融合。"""
 
     def __init__(self, cfg_driving: DrivingCfg) -> None:
         super().__init__()
@@ -82,13 +82,11 @@ class LidarQueryFusion(nn.Module):
         planar = encoded.reshape(batch, channels * depth, height, width)
         lidar_feature = self.spatial_alignment(self.height_reducer(planar))
 
-        visual_global = visual.mean(dim=(1, 3, 4))
-        visual_global = torch.where(
-            frame_valid[:, None], visual_global, torch.zeros_like(visual_global))
+        visual_local = visual.permute(0, 2, 3, 1)
+        visual_local = torch.where(
+            frame_valid[:, None, None, None], visual_local, torch.zeros_like(visual_local))
         local = lidar_feature.permute(0, 2, 3, 1)
-        global_grid = visual_global[:, None, None, :].expand(
-            -1, local.shape[1], local.shape[2], -1)
-        gate = torch.sigmoid(self.gate(torch.cat((global_grid, local), dim=-1)))
+        gate = torch.sigmoid(self.gate(torch.cat((visual_local, local), dim=-1)))
         weighted = (gate * local).permute(0, 3, 1, 2)
         fused = query + weighted
         return torch.where(frame_valid[:, None, None, None], fused, query)

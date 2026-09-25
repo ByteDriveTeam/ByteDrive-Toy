@@ -1,30 +1,16 @@
-"""多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
+"""感知与新驾驶任务损失：独立占用、二维场、逐层 Detect 和流匹配。
 
 模块: train/losses/losses.py
-依赖: torch, config.schema.Config, data.target_encoding.physics_decode,
+依赖: torch, scipy, config.schema.Config, data.target_encoding.physics_decode,
       train.losses.checks.losses_checks
-读取配置:
-    model.physics.semantic_ignore_index / symlog_scale / depth_max_m
-    train.loss_weights.semantic / depth / depth_grad / depth_range
-    train.driving_loss_weights.trajectory / confidence / behavior / distribution / risk / drivable /
-        lane_class / lane_class_weights / lane_direction / centerline / boundary /
-        stop_line / traffic_light_state / stop_crossing / trajectory_unmatched_weight /
-        trajectory_distance_weight_min / trajectory_distance_decay_m /
-        trajectory_turn_weight_gain / trajectory_turn_angle_deg
-    model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m
-    data.driving.traffic_control.stop_margin_m
+读取配置: model.physics.semantic_ignore_index/symlog_scale/depth_max_m,
+          train.loss_weights.*, train.driving_loss_weights.*, model.driving.detection,
+          model.driving.bev
 对外接口:
-    - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])          # 感知总损失与各分量
-    - compute_driving_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])  # 驾驶总损失与各分量
-说明: 单帧模型，outputs 为模型双头输出（[B,C,H,W]，FP32），targets 为数据集监督目标（batch 后 [B,H,W] 等）。
-      深度 ch0 回归 scale·symlog(depth)、仅在范围内像素计损；ch1 以 BCE 监督范围内/超范围二分类（全像素）。
-      语义 CE 忽略 Unlabeled。深度回归再叠「距离加权」：按 GT 深度(米)线性从近处 1 递减到远处 _DIST_WEIGHT_MIN，
-      近距误差权重更高；权重并入掩码（分子分母同乘）得加权均值，不改变整体损失量级。范围二分类不加权
-      （其目标即判定量程内外）。深度梯度：对 ch0 与 GT 的 H/W 相邻像素差取 SmoothL1，监督边界/结构清晰；
-      仅用范围掩码、不加距离权（结构近远同等重要）。掩码归一用「有效（加权）像素数」而非全像素，避免超范围
-      占比波动改变有效学习率。
+    - compute_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])
+    - compute_driving_losses(outputs, targets, cfg) -> (Tensor, dict[str, Tensor])
+说明: Detect 每层独立匹配，只对匹配项的最近未来 Mode 回归；流速度仅监督有效航点。
 """
-
 from __future__ import annotations
 
 from typing import Dict, Tuple
@@ -118,75 +104,98 @@ def _axis_gradient_terms(pred: torch.Tensor, target: torch.Tensor, mask: torch.T
 
 def compute_driving_losses(outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor],
                            cfg: Config) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """计算驾驶多任务加权总损失与各分量。
-
-    风险/可行驶为二值场：可行驶 GT 已从 HDMap 道路中扣除深度确认可见的 box 占用；二者在视场内掩码下做
-    BCE（逼近 GT）。轨迹分布场性质不同——它是「能量/
-    分数场」：目标是让 GT 航点处分数尽可能高，而非逼近某个固定值，故对视场内做空间 softmax 后与 GT 高斯软
-    占据（归一化为分布）取交叉熵（只相对抬高 GT 邻域、压低其余）。轨迹按近端高、远端低且弯道额外增权的米制 ADE
-    做 8×1 匈牙利匹配并回归，其余 Mode 仍小权重更新；同一模态权重还约束各轨迹到 GT
-    可靠贴近的 HD Map 中心线链距离，避免重复匹配且不干扰规控主动偏离。置信度学习匹配结果。行为固定八类彼此独立，以
-      BCE-with-logits 监督同一帧同时激活的多个类别；样本始终保留在 batch 归一分母中。道路线图以加权
-    CE 监督类别，并仅在道路线像素上以有符号余弦距离监督单位
-    切向量；该方向来自 HD Map yaw，保留真实行驶正反向。越界损失沿全部候选轨迹切向展开逐帧自车半长/半宽，
-    以 3×3 有向车身足迹投影到不可行驶单侧距离场：道路外或可见 box 占用内按最严重的米制距离惩罚；
-    超出 BEV 覆盖范围时另加坐标越界距离，保证仍有指向有效区域的梯度。
-    """
+    """独立计算场景/Agent 占用、二维场、六层 Detect 与流匹配损失。"""
     check_driving_losses_io(outputs, targets)
-    w = cfg.train.driving_loss_weights
-    inview = targets["inview"]  # [B,Hf,Wf]
-    if inview.ndim == 2:
-        inview = inview.unsqueeze(0).expand(outputs["risk"].shape[0], -1, -1)
-
-    risk = _masked_bce(outputs["risk"][:, 0], targets["risk"], inview)
-    drivable = _masked_bce(outputs["drivable"][:, 0], targets["drivable"], inview)
-    distribution = _distribution_energy(outputs["distribution"][:, 0], targets["distribution"], inview)
-    lane_weights = outputs["lane_class_logits"].new_tensor(w.lane_class_weights)
-    lane_class = _masked_lane_ce(
-        outputs["lane_class_logits"], targets["lane_class"], inview, lane_weights)
-    lane_direction = _lane_direction_loss(
-        outputs["lane_direction"], targets["lane_direction"], targets["lane_class"], inview)
-    stop_line, traffic_light_state, stop_crossing = _traffic_control_losses(
-        outputs, targets, cfg, inview)
-    waypoint_weights = _trajectory_waypoint_weights(
-        targets["trajectory"], targets["traj_valid"],
-        w.trajectory_distance_weight_min, w.trajectory_distance_decay_m,
-        w.trajectory_turn_weight_gain, w.trajectory_turn_angle_deg)
-    matched_modes, mode_weights, trajectory_sample_valid = _trajectory_matching(
-        outputs["trajectories"], targets["trajectory"], targets["traj_valid"],
-        waypoint_weights, w.trajectory_unmatched_weight)
-    trajectory, confidence = _trajectory_losses(
-        outputs["trajectories"], outputs["confidence"], targets["trajectory"],
-        waypoint_weights, matched_modes, mode_weights, trajectory_sample_valid)
-    centerline = _centerline_loss(
-        outputs["trajectories"], targets["gt_centerline_distance"],
-        targets["gt_centerline_valid"] * targets["traj_valid"],
-        mode_weights, cfg.model.driving.bev)
-    behavior = F.binary_cross_entropy_with_logits(outputs["behavior_logits"], targets["behavior"])
-    boundary = _boundary_loss(
-        outputs["trajectories"], targets["offroad_distance"], targets["ego_extent"],
-        cfg.model.driving.bev)
-    components = {"risk": risk, "drivable": drivable, "distribution": distribution,
-                  "lane_class": lane_class, "lane_direction": lane_direction,
-                  "centerline": centerline,
-                  "stop_line": stop_line, "traffic_light_state": traffic_light_state,
-                  "trajectory": trajectory, "confidence": confidence, "behavior": behavior,
-                  "boundary": boundary, "stop_crossing": stop_crossing}
-    total = sum(getattr(w, name) * loss for name, loss in components.items())
+    weights = cfg.train.driving_loss_weights
+    components = {
+        "scene_occ": _masked_bce(outputs["scene_occ_logits"],
+                                 targets["scene_occ"].float(),
+                                 targets["scene_occ_mask"].float()),
+        "agent_occ": _masked_bce(outputs["agent_occ_logits"],
+                                 targets["agent_occ"].float(),
+                                 targets["agent_occ_mask"].float()),
+        "drivable": F.binary_cross_entropy_with_logits(
+            outputs["drivable"][:, 0], targets["drivable"]),
+        "lane_occupancy": F.binary_cross_entropy_with_logits(
+            outputs["lane_occupancy"][:, 0], targets["lane_occupancy"]),
+        "stop_line": _balanced_binary_loss(
+            outputs["stop_line_logits"][:, 0], targets["stop_line"],
+            torch.ones_like(targets["stop_line"])),
+    }
+    class_loss, box_loss, future_loss = _detect_losses(outputs, targets, cfg)
+    components.update({"detect_class": class_loss, "detect_box": box_loss,
+                       "detect_future": future_loss})
+    valid = outputs["flow_valid"].float()
+    flow_per = (outputs["flow_velocity"] - outputs["flow_target"]).square().sum(-1)
+    components["flow"] = (flow_per * valid).sum() / valid.sum().clamp_min(1)
+    total = sum(getattr(weights, name) * value for name, value in components.items())
     components["total"] = total
     return total, components
 
+
+def _detect_losses(outputs, targets, cfg):
+    """每层独立匈牙利匹配；未来仅监督最近的一个 Mode。"""
+    from scipy.optimize import linear_sum_assignment
+
+    logits = outputs["detect_class_logits"]
+    boxes = outputs["detect_boxes"]
+    futures = outputs["detect_future"]
+    target_class = targets["detect_class"]
+    target_box = targets["detect_box"]
+    target_future = targets["detect_future"]
+    target_valid = targets["detect_future_valid"]
+    num_layers, batch, queries = logits.shape[:3]
+    no_object = cfg.model.driving.detection.num_classes
+    class_weight = logits.new_ones(no_object + 1)
+    class_weight[-1] = cfg.model.driving.detection.no_object_weight
+    bev = cfg.model.driving.bev
+    det = cfg.model.driving.detection
+    scale = logits.new_tensor((bev.x_max_m - bev.x_min_m, bev.y_max_m - bev.y_min_m,
+                               bev.z_max_m - bev.z_min_m, *det.matching_size_scales_m,
+                               torch.pi, det.matching_velocity_scale_mps,
+                               det.matching_velocity_scale_mps))
+    classification, box_terms, future_terms = [], [], []
+    for layer in range(num_layers):
+        for sample in range(batch):
+            gt_indices = torch.nonzero(target_class[sample] >= 0, as_tuple=True)[0]
+            labels = torch.full((queries,), no_object, device=logits.device,
+                                dtype=torch.long)
+            if len(gt_indices):
+                gt_labels = target_class[sample, gt_indices]
+                probability = logits[layer, sample].softmax(-1)
+                cls_cost = -probability[:, gt_labels]
+                box_cost = torch.cdist(
+                    boxes[layer, sample] / scale,
+                    target_box[sample, gt_indices] / scale, p=1)
+                cost = (cls_cost + box_cost).detach().cpu().numpy()
+                row, col = linear_sum_assignment(cost)
+                row = torch.as_tensor(row, device=logits.device)
+                matched = gt_indices[torch.as_tensor(col, device=logits.device)]
+                labels[row] = target_class[sample, matched]
+                box_terms.append(F.smooth_l1_loss(
+                    boxes[layer, sample, row] / scale,
+                    target_box[sample, matched] / scale))
+                modes = futures[layer, sample, row]
+                future_gt = target_future[sample, matched]
+                valid = target_valid[sample, matched].float()
+                distance = torch.linalg.vector_norm(modes - future_gt[:, None], dim=-1)
+                mode_cost = (distance * valid[:, None]).sum(-1) / valid.sum(-1)[:, None].clamp_min(1)
+                chosen = mode_cost.argmin(-1)
+                selected = modes[torch.arange(len(row), device=logits.device), chosen]
+                if bool(valid.any()):
+                    future_terms.append(((torch.linalg.vector_norm(selected - future_gt, dim=-1)
+                                          * valid).sum() / valid.sum()))
+            classification.append(F.cross_entropy(logits[layer, sample], labels,
+                                                   weight=class_weight))
+    zero = logits.sum() * 0
+    return (torch.stack(classification).mean(),
+            torch.stack(box_terms).mean() if box_terms else zero,
+            torch.stack(future_terms).mean() if future_terms else zero)
 
 def _masked_bce(pred_logit: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """视场掩码下的 BCE-with-logits：sum(bce·mask)/max(sum(mask), eps)。"""
     per = F.binary_cross_entropy_with_logits(pred_logit, target, reduction="none") * mask
     return per.sum() / mask.sum().clamp_min(_MASK_EPS)
-
-
-def _masked_lane_ce(logits, target, inview, class_weights):
-    """视场内道路线类别加权交叉熵；背景降权以免细线监督被数量淹没。"""
-    per = F.cross_entropy(logits, target.long(), weight=class_weights, reduction="none") * inview
-    return per.sum() / inview.sum().clamp_min(_MASK_EPS)
 
 
 def _balanced_binary_loss(logits, target, valid):
@@ -199,220 +208,3 @@ def _balanced_binary_loss(logits, target, valid):
     positive_loss = (per * positive).sum() / positive_count.clamp_min(_MASK_EPS)
     has_positive = (positive_count > 0).to(logits.dtype)
     return negative_loss + 0.5 * has_positive * (positive_loss - negative_loss)
-
-
-def _masked_state_ce(logits, target, valid):
-    """仅在相关停止线且灯色已知的像素监督动态状态。"""
-    per = F.cross_entropy(logits, target.long(), reduction="none") * valid
-    return per.sum() / valid.sum().clamp_min(_MASK_EPS)
-
-
-def _traffic_control_losses(outputs, targets, cfg, inview):
-    """集中计算停止线、灯态与红灯越线三项相关损失。"""
-    stop_line = _balanced_binary_loss(
-        outputs["stop_line_logits"][:, 0], targets["stop_line"], inview)
-    traffic_state = _masked_state_ce(
-        outputs["traffic_light_state_logits"], targets["traffic_light_state"],
-        targets["traffic_light_state_valid"] * inview)
-    stop_crossing = _stop_crossing_loss(
-        outputs["trajectories"], targets["stop_point"], targets["stop_direction"],
-        targets["red_stop_valid"], cfg.data.driving.traffic_control.stop_margin_m)
-    return stop_line, traffic_state, stop_crossing
-
-
-def _lane_direction_loss(pred, target, lane_class, inview):
-    """仅道路线像素上的有向余弦距离；`v` 与 `-v` 不等价，保留真实行驶方向。"""
-    pred_unit = F.normalize(pred, dim=1, eps=_VECTOR_EPS)
-    target_unit = F.normalize(target, dim=1, eps=_VECTOR_EPS)
-    direction_valid = target.square().sum(1) > _VECTOR_EPS ** 2
-    mask = ((lane_class > 0) & direction_valid).to(pred.dtype) * inview
-    per = (1.0 - (pred_unit * target_unit).sum(1)) * mask
-    return per.sum() / mask.sum().clamp_min(_MASK_EPS)
-
-
-def _distribution_energy(field_logit: torch.Tensor, target_soft: torch.Tensor,
-                         mask: torch.Tensor) -> torch.Tensor:
-    """轨迹分布能量损失：视场内空间 softmax，最大化 GT 软占据处的对数概率（GT 分数高）。
-
-    把场当作 BEV 上的未归一化分数：仅在视场内竞争（softmax），与 GT 高斯软占据（视场内归一化为分布）做
-    交叉熵。相比 BCE 逼近固定目标，本式只相对抬高 GT 邻域、压低其余，符合「预测一个场使 GT 分数尽可能高」。
-    无 GT 的样本（视场内软占据全 0）贡献 0。
-    """
-    b = field_logit.shape[0]
-    flat = field_logit.reshape(b, -1)
-    in_mask = mask.reshape(b, -1) > 0
-    logp = torch.log_softmax(flat.masked_fill(~in_mask, torch.finfo(flat.dtype).min), dim=1)
-    tgt = target_soft.reshape(b, -1) * in_mask
-    tgt = tgt / tgt.sum(1, keepdim=True).clamp_min(_MASK_EPS)     # 视场内归一化为概率分布
-    # 仅在 tgt>0（视场内、有 GT 权重）处累计，避免 (-inf)·0 的 NaN
-    contrib = torch.where(tgt > 0, tgt * logp, torch.zeros_like(logp))
-    return (-contrib.sum(1)).mean()
-
-
-def _trajectory_waypoint_weights(gt_meters: torch.Tensor, valid: torch.Tensor,
-                                 distance_weight_min: float, distance_decay_m: float,
-                                 turn_weight_gain: float,
-                                 turn_angle_deg: float) -> torch.Tensor:
-    """生成近大远小、弯道增大的 GT 航点权重。
-
-    距离使用从当前自车原点沿 GT 折线累计的路径长度，避免急弯时欧氏距离不能反映实际远近；基础权重从 1
-    按指数衰减并保留 ``distance_weight_min``。弯道权重取相邻 GT 线段夹角，达到
-    ``turn_angle_deg`` 时得到最大 ``1 + turn_weight_gain`` 倍增益。无效或零长度线段不产生弯道增权。
-    """
-    valid_float = valid.to(gt_meters.dtype)
-    valid_bool = valid > 0
-    origin = torch.zeros_like(gt_meters[:, :1])
-    segments = torch.cat((origin, gt_meters), dim=1).diff(dim=1)
-    previous_valid = torch.cat(
-        (torch.ones_like(valid_bool[:, :1]), valid_bool[:, :-1]), dim=1)
-    segment_valid = valid_bool & previous_valid
-    segment_length = torch.linalg.vector_norm(segments, dim=-1)
-    path_distance = (segment_length * segment_valid.to(gt_meters.dtype)).cumsum(dim=-1)
-    distance_weight = distance_weight_min + (1.0 - distance_weight_min) * torch.exp(
-        -path_distance / distance_decay_m)
-
-    unit_segments = F.normalize(segments, dim=-1, eps=_VECTOR_EPS)
-    adjacent_dot = (unit_segments[:, :-1] * unit_segments[:, 1:]).sum(-1)
-    adjacent_angle = torch.acos(adjacent_dot.clamp(-1.0, 1.0))
-    adjacent_valid = (
-        segment_valid[:, :-1] & segment_valid[:, 1:]
-        & (segment_length[:, :-1] > _VECTOR_EPS)
-        & (segment_length[:, 1:] > _VECTOR_EPS)
-    )
-    adjacent_angle = adjacent_angle * adjacent_valid.to(gt_meters.dtype)
-    turn_angle = torch.cat((adjacent_angle, torch.zeros_like(valid_float[:, :1])), dim=-1)
-    turn_scale = (turn_angle / (turn_angle_deg * torch.pi / 180.0)).clamp(0.0, 1.0)
-    return distance_weight * (1.0 + turn_weight_gain * turn_scale) * valid_float
-
-
-def _trajectory_matching(trajectories_meters, gt_meters, valid, waypoint_weights,
-                         unmatched_weight):
-    """按加权有效 GT 航点的米制 ADE 返回匹配 Mode、模态权重与样本有效位。"""
-    displacement = torch.linalg.vector_norm(
-        trajectories_meters - gt_meters[:, None], dim=-1)
-    weight_sum = waypoint_weights.sum(-1)
-    matching_cost = (displacement * waypoint_weights[:, None]).sum(-1) \
-        / weight_sum[:, None].clamp_min(_MASK_EPS)
-    matched_modes = _hungarian_single_target(matching_cost)
-    mode_weights = torch.full_like(matching_cost, unmatched_weight)
-    mode_weights.scatter_(1, matched_modes[:, None], 1.0)
-    sample_valid = (valid.sum(-1) > 0).to(trajectories_meters.dtype)
-    return matched_modes, mode_weights, sample_valid
-
-
-def _trajectory_losses(trajectories_meters: torch.Tensor, confidence: torch.Tensor,
-                       gt_meters: torch.Tensor, waypoint_weights: torch.Tensor,
-                       matched_modes: torch.Tensor, mode_weights: torch.Tensor,
-                       sample_valid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """8×1 匈牙利匹配后的加权米制轨迹监督，未匹配 Mode 仍小权重更新。
-
-    每个样本只有一条专家 GT，加权米制平均位移代价上的矩形匈牙利精确解就是代价最小的 Mode。近端航点权重大、
-    远端权重小，局部弯道航点额外增权。匹配 Mode
-    权重为 1，其余 Mode 使用匹配阶段传入的小权重；全部样本仍保留在 batch 均值分母中。缺少未来航点的样本贡献可微零值，
-    不会被数据管线或 batch 过滤掉。回归与匹配代价同在米制空间，量纲一致、与越界/停线等安全损失可直接比较。
-    """
-    expanded_gt = gt_meters[:, None].expand_as(trajectories_meters)
-    per_waypoint = F.smooth_l1_loss(
-        trajectories_meters, expanded_gt, reduction="none").sum(-1)
-    per_waypoint = per_waypoint * waypoint_weights[:, None]       # [B,M,T]
-    numerator = (per_waypoint * mode_weights[:, :, None]).sum((1, 2))
-    denominator = waypoint_weights.sum(-1) * mode_weights.sum(1)
-    trajectory = (numerator / denominator.clamp_min(_MASK_EPS) * sample_valid).mean()
-    confidence_loss = F.cross_entropy(confidence, matched_modes, reduction="none")
-    confidence_loss = (confidence_loss * sample_valid).mean()
-    return trajectory, confidence_loss
-
-
-def _hungarian_single_target(cost: torch.Tensor) -> torch.Tensor:
-    """求每个 `[M,1]` 代价矩阵的匈牙利匹配；单 GT 时精确退化为逐 Mode 最小值索引。"""
-    return cost.detach().argmin(dim=1)
-
-
-def _centerline_loss(trajectories, distance_field, waypoint_valid, mode_weights, bev):
-    """采样 GT 路线中心线链距离场，并沿用轨迹匹配权重约束各候选 Mode。"""
-    sampled = F.grid_sample(
-        distance_field[:, None], _trajectory_grid(trajectories, bev),
-        mode="bilinear", padding_mode="border", align_corners=False)[:, 0]
-    mask = waypoint_valid[:, None].to(trajectories.dtype)
-    valid_count = waypoint_valid.sum(-1)
-    numerator = (sampled * mask * mode_weights[:, :, None]).sum((1, 2))
-    denominator = valid_count * mode_weights.sum(1)
-    sample_valid = (valid_count > 0).to(trajectories.dtype)
-    return (numerator / denominator.clamp_min(_MASK_EPS) * sample_valid).mean()
-
-
-def _boundary_loss(trajectories: torch.Tensor, offroad_distance: torch.Tensor,
-                   ego_extent: torch.Tensor, bev) -> torch.Tensor:
-    """自车包围框越界损失：可微采样道路外/可见占用距离场，并惩罚超出 BEV 覆盖范围的部分。
-
-    由预测轨迹切向确定每个未来时刻的车身朝向，用逐帧标注中的自车 x/y 半尺寸在每个轨迹点构造 3×3
-    有向包围框采样点。每个包围框取最严重的越界值，使任意车身部分越界或进入占用都受罚，而非只约束车身中心。
-    对全部模态与全部航点等权约束，避免低置信度候选轨迹逃逸。`grid_sample` 的最后一维依次是列、行，
-    因而 ego 的 `(x前向, y右向)` 要换成 `(y归一列, x反向归一行)`。
-    """
-    footprint = _ego_footprint_points(trajectories, ego_extent)  # [B,M,T,9,2]
-    b, modes, waypoints, points, _ = footprint.shape
-    grid = _trajectory_grid(footprint, bev).reshape(b, modes, waypoints * points, 2)
-    sampled = F.grid_sample(
-        offroad_distance[:, None], grid, mode="bilinear", padding_mode="border",
-        align_corners=False)[:, 0].reshape(b, modes, waypoints, points)
-
-    x, y = footprint[..., 0], footprint[..., 1]
-    # x_min 通常正好位于当前自车中心；近端航点的车尾自然会伸到 BEV 后方，不能把这部分当作物理越界。
-    # 因此后方仅约束轨迹中心不逃出 BEV，前方和左右边界则要求完整车身留在覆盖范围内。
-    center_x_under = F.relu(bev.x_min_m - trajectories[..., 0]).unsqueeze(-1)
-    x_over = center_x_under + F.relu(x - bev.x_max_m)
-    y_over = F.relu(bev.y_min_m - y) + F.relu(y - bev.y_max_m)
-    return (sampled + x_over + y_over).amax(dim=-1).mean()
-
-
-def _ego_footprint_points(trajectories: torch.Tensor,
-                          ego_extent: torch.Tensor) -> torch.Tensor:
-    """沿轨迹切向把自车半长/半宽展开为每个航点的 3×3 有向包围框采样点。"""
-    if trajectories.shape[-2] == 1:
-        tangent = trajectories
-    else:
-        first = trajectories[..., :1, :]
-        middle = trajectories[..., 2:, :] - trajectories[..., :-2, :]
-        last = trajectories[..., -1:, :] - trajectories[..., -2:-1, :]
-        tangent = torch.cat((first, middle, last), dim=-2)
-    tangent_norm = torch.linalg.vector_norm(tangent, dim=-1, keepdim=True)
-    forward_default = torch.zeros_like(tangent)
-    forward_default[..., 0] = 1.0
-    forward = torch.where(
-        tangent_norm > _VECTOR_EPS, tangent / tangent_norm.clamp_min(_VECTOR_EPS),
-        forward_default)
-    right = torch.stack((-forward[..., 1], forward[..., 0]), dim=-1)
-
-    axis_samples = trajectories.new_tensor((-1.0, 0.0, 1.0))
-    longitudinal, lateral = torch.meshgrid(axis_samples, axis_samples, indexing="ij")
-    longitudinal = longitudinal.reshape(1, 1, 1, -1, 1)
-    lateral = lateral.reshape(1, 1, 1, -1, 1)
-    half_length = ego_extent[:, 0].reshape(-1, 1, 1, 1, 1)
-    half_width = ego_extent[:, 1].reshape(-1, 1, 1, 1, 1)
-    offsets = (
-        longitudinal * half_length * forward.unsqueeze(-2)
-        + lateral * half_width * right.unsqueeze(-2)
-    )
-    return trajectories.unsqueeze(-2) + offsets
-
-
-def _trajectory_grid(trajectories, bev):
-    """把 ego 米制轨迹转换成 `grid_sample` 使用的 `(列, 行)` 归一化坐标。"""
-    x, y = trajectories[..., 0], trajectories[..., 1]
-    grid_col = 2.0 * (y - bev.y_min_m) / (bev.y_max_m - bev.y_min_m) - 1.0
-    grid_row = 1.0 - 2.0 * (x - bev.x_min_m) / (bev.x_max_m - bev.x_min_m)
-    return torch.stack((grid_col, grid_row), dim=-1)               # [B,M,T,2]
-
-
-def _stop_crossing_loss(trajectories, stop_point, stop_direction, red_valid, stop_margin_m):
-    """红灯时按路线切向惩罚越过安全停止位置的全部候选航点。
-
-    `dot(point-stop_point, direction)` 在停止线之后为正；加上安全余量后，允许区域截止于停止线前
-    `stop_margin_m`。所有模态都受约束，避免低置信度越线轨迹在闭环选择时成为安全漏洞。
-    """
-    relative = trajectories - stop_point[:, None, None, :]
-    signed = (relative * stop_direction[:, None, None, :]).sum(-1) + stop_margin_m
-    mask = red_valid[:, None, None].to(trajectories.dtype)
-    count = mask.sum() * trajectories.shape[1] * trajectories.shape[2]
-    return (F.relu(signed) * mask).sum() / count.clamp_min(_MASK_EPS)

@@ -118,25 +118,22 @@ def evaluate_driving(model, loader, cfg: Config, device) -> Dict[str, float]:
 
 
 def _driving_forward(model, batch: Dict[str, torch.Tensor]):
-    """驾驶模型多输入前向：双帧图像/体素、标定、规划条件与帧间刚性变换。"""
+    """驾驶模型五帧图像、当前体素、独立占用与流目标前向。"""
     return model(batch["rgb"], batch["intrinsics"], batch["extrinsics"],
                  batch["target_point"], batch["ego_velocity"],
-                 batch["previous_rgb"], batch["previous_to_current"], batch["previous_valid"],
+                 batch["history_rgb"], batch["history_to_current"], batch["history_valid"],
                  lidar_stats=batch["lidar_stats"],
                  lidar_occupied=batch["lidar_occupied"],
                  lidar_valid=batch["lidar_valid"],
-                 previous_lidar_stats=batch["previous_lidar_stats"],
-                 previous_lidar_occupied=batch["previous_lidar_occupied"],
-                 previous_lidar_valid=batch["previous_lidar_valid"])
+                 trajectory=batch["trajectory"], traj_valid=batch["traj_valid"])
 
 
 def _batch_to_device(batch: Dict[str, torch.Tensor], device, rgb_stats) -> Dict[str, torch.Tensor]:
     """紧凑张量搬到设备后再转换图像/类别，减少锁页内存与传输量。"""
     batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
     batch["rgb"] = _normalize_bgr(batch["rgb"], rgb_stats)
-    batch["previous_rgb"] = _normalize_bgr(batch["previous_rgb"], rgb_stats)
-    for name in ("lane_class", "traffic_light_state"):
-        batch[name] = batch[name].long()
+    batch["history_rgb"] = _normalize_bgr(batch["history_rgb"], rgb_stats)
+    batch["detect_class"] = batch["detect_class"].long()
     batch["stop_line"] = batch["stop_line"].float()
     return batch
 

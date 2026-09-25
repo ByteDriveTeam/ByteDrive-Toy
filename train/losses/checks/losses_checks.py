@@ -4,16 +4,14 @@ _REQUIRED_OUTPUTS = ("semantic", "depth")
 _REQUIRED_TARGETS = ("semantic", "depth_target", "depth_inrange")
 
 _DRIVING_OUTPUTS = (
-    "risk", "drivable", "distribution", "lane_class_logits", "lane_direction",
-    "stop_line_logits", "traffic_light_state_logits",
-    "trajectories", "confidence", "behavior_logits",
+    "scene_occ_logits", "agent_occ_logits", "drivable", "lane_occupancy",
+    "stop_line_logits", "detect_class_logits", "detect_boxes", "detect_future",
+    "flow_velocity", "flow_target", "flow_valid",
 )
 _DRIVING_TARGETS = (
-    "risk", "drivable", "offroad_distance", "distribution", "lane_class", "lane_direction", "inview",
-    "gt_centerline_distance", "gt_centerline_valid",
-    "stop_line", "traffic_light_state", "traffic_light_state_valid",
-    "stop_point", "stop_direction", "red_stop_valid",
-    "trajectory", "traj_valid", "ego_extent", "behavior",
+    "scene_occ", "scene_occ_mask", "agent_occ", "agent_occ_mask",
+    "drivable", "lane_occupancy", "stop_line", "detect_class", "detect_box",
+    "detect_future", "detect_future_valid", "trajectory", "traj_valid",
 )
 
 
@@ -31,25 +29,16 @@ def check_losses_io(outputs, targets):
 
 
 def check_driving_losses_io(outputs, targets):
-    """校验对象: compute_driving_losses 入参 —— 三场、道路线图、轨迹/行为与地图监督齐备。"""
+    """校验对象: compute_driving_losses 入参 —— 新驾驶输出与监督齐备且形状对齐。"""
     missing_o = [k for k in _DRIVING_OUTPUTS if k not in outputs]
     missing_t = [k for k in _DRIVING_TARGETS if k not in targets]
     if missing_o:
         raise KeyError("driving outputs 缺少键: {}".format(missing_o))
     if missing_t:
         raise KeyError("driving targets 缺少键: {}".format(missing_t))
-    if outputs["behavior_logits"].shape != targets["behavior"].shape:
-        raise ValueError("behavior_logits 与 behavior 标签形状须一致，实际 {} / {}。".format(
-            tuple(outputs["behavior_logits"].shape), tuple(targets["behavior"].shape)))
-    if targets["gt_centerline_distance"].shape != targets["offroad_distance"].shape:
-        raise ValueError("gt_centerline_distance 与 offroad_distance 形状须一致，实际 {} / {}。".format(
-            tuple(targets["gt_centerline_distance"].shape),
-            tuple(targets["offroad_distance"].shape)))
-    if targets["gt_centerline_valid"].shape != targets["traj_valid"].shape:
-        raise ValueError("gt_centerline_valid 与 traj_valid 形状须一致，实际 {} / {}。".format(
-            tuple(targets["gt_centerline_valid"].shape), tuple(targets["traj_valid"].shape)))
-    if targets["ego_extent"].ndim != 2 or targets["ego_extent"].shape[-1] != 2:
-        raise ValueError("ego_extent 须为 [B,2] 的自车 x/y 半尺寸，实际 {}。".format(
-            tuple(targets["ego_extent"].shape)))
-    if bool((targets["ego_extent"] <= 0).any()):
-        raise ValueError("ego_extent 的自车 x/y 半尺寸须均 > 0。")
+    for kind in ("scene", "agent"):
+        if outputs[kind + "_occ_logits"].shape != targets[kind + "_occ"].shape \
+                or targets[kind + "_occ"].shape != targets[kind + "_occ_mask"].shape:
+            raise ValueError("{} 占用预测、标签、掩码必须同形".format(kind))
+    if outputs["flow_velocity"].shape != outputs["flow_target"].shape:
+        raise ValueError("流速度预测与目标必须同形")

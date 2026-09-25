@@ -19,3 +19,10 @@ def check_frustum_inputs(patch_features, intrinsics, extrinsics, patch_size):
         raise ValueError("intrinsics 期望 ({},4)（fx,fy,cx,cy），实际 {}。".format(b, tuple(intrinsics.shape)))
     if extrinsics.shape != (b, 6):
         raise ValueError("extrinsics 期望 ({},6)（x,y,z,roll,pitch,yaw），实际 {}。".format(b, tuple(extrinsics.shape)))
+
+
+def check_frustum_geometry(gh, gw, intrinsics, extrinsics):
+    """校验对象: FrustumEncoding.ego_frustum_coords —— 网格和标定维度须有效。"""
+    if gh <= 0 or gw <= 0 or intrinsics.ndim != 2 or intrinsics.shape[-1] != 4 \
+            or tuple(extrinsics.shape) != (intrinsics.shape[0], 6):
+        raise ValueError("frustum 网格或三目标定形状非法")

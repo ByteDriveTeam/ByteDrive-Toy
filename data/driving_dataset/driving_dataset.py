@@ -1,55 +1,16 @@
-"""驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
+"""五帧三目驾驶数据集：独立场景/Agent 占用、检测与轨迹监督。
 
 模块: data/driving_dataset/driving_dataset.py
-依赖: torch, numpy, warnings, config.schema.Config, data.single_frame_base.SingleFrameSceneBase,
-      data.lidar_voxelization,
-      data.driving_targets, data.hd_map.HdMap, vis.data_vis.geometry, data.driving_dataset.checks.*
-读取配置:
-    data.driving.scene_root / cameras / map_dir / map_name_template / previous_frame_offset /
-        dist_sigma_m / lane_half_width_m
-    data.scene_cache_size
-    data.driving.lane_map.line_width_m / centerline_match_radius_m / type_to_class / unknown_class
-    data.driving.traffic_control.route_lookahead_m / route_corridor_m / line_expand_m /
-        actor_match_radius_m / stop_margin_m / reaction_time_s / comfortable_decel_mps2
-    data.driving.box_min_visible_pixels
-    data.driving.target_min_m / target_max_m（目标点采样距离窗口）
-    data.driving.behavior.stationary_speed_mps / acceleration_threshold_mps2 / turn_angle_deg /
-        traffic_light_semantic_tag / traffic_light_match_radius_m / traffic_light_seg_margin_px /
-        traffic_light_min_pixels
-    data.dataset.dino_mean / dino_std
-    model.driving.bev.x_min_m / x_max_m / y_min_m / y_max_m / fov_deg
-    model.driving.lidar_fusion.voxel_size_m
-    model.driving.bev_decoder.up_channels（推导场分辨率 = bev.height/width · 2^L）
-    model.driving.lane_map.class_names（定位中心线类别索引）
-    model.driving.trajectory.num_waypoints / waypoint_dt_s
-    model.driving.traffic_control.state_names
-    model.physics.depth_max_m（风险场包络排除超范围/天空像素）
+依赖: numpy, torch, data.single_frame_base, data.driving_targets,
+      data.driving_occupancy, data.hd_map, data.lidar_voxelization, vis.data_vis.geometry
+读取配置: data.driving.*, data.scene_cache_size, data.dataset.dino_mean/dino_std,
+          model.driving.bev/bev_decoder/lidar_fusion/lane_map/traffic_control/trajectory/detection,
+          model.physics.depth_max_m
 对外接口:
     - DrivingDataset(cfg) -> torch.utils.data.Dataset
-        __getitem__(i) -> dict[str, Tensor]
-说明: 复用 SingleFrameSceneBase 的索引/reader 缓存；RGB 以 BGR uint8 紧凑返回并在设备侧归一化。
-      三路相机严格按 data.driving.cameras 堆叠；
-      当前/历史语义 LiDAR 先按各帧真实自车有向 Box 剔除车体内点，再在 CPU 上编码为 0.5m 体素中心
-      相对 XYZ 米制均值与总体标准差；旧场景缺失时按场景告警并旁路。
-      每个样本同时返回同场景上一帧三目 RGB 及把
-      上一帧 ego 平面坐标变到当前 ego 系的 3×3 刚性矩阵；场景开头返回当前 RGB、identity 与 previous_valid=0。
-      轨迹 GT 优先从独立运动学时间轴按 10Hz 取未来 num_waypoints 个 ego 世界位姿，再经 world_to_ego
-      变到当前 ego 系；旧场景自动回退低频逐帧状态。行为 GT 为固定八类
-      多热向量，组合当前速度/帧间加速度、未来轨迹、动态 Agent 框与路线相关交通灯状态；红灯停车在接近阶段即激活。
-      新场景逐帧携带 CARLA 原生受控车道/Agent 规划关联结果，直接生成停止线；旧场景缺该字段时自动回退到
-      HD Map 触发区与未来专家路线走廊相交算法，无需迁移历史 LMDB。
-      目标点沿未来自车轨迹搜距当前 target_min~target_max m 的点随机取一（近端引导 + 鲁棒），变到 ego 系；
-      当前世界速度同步旋转到 ego 平面，二者共同作为规划条件。
-      风险场优先由 GT 深度反投影包络、缺失时回退 LiDAR；可行驶场先由 HD 地图按位姿栅格化，再扣除由
-      深度或 LiDAR 确认可见的
-      vehicle/pedestrian box 占用（运动类别间不分类，ego/静态环境框排除），并转成道路外/占用距离场供轨迹约束使用；
-      道路线图由 HD Map 的 Type 与每点 yaw 栅格化为类别和有向单位切向量；GT 可靠贴近的中心线折线
-      另生成米制距离场，规控主动偏离超过配置阈值的航点不参与贴线监督；分布场由 GT 航点高斯软化，视场掩码为常量
-      （构造期预算）。全帧 ego 位姿与速度加速度采用同一有界 LRU 场景缓存，供轨迹/行为/目标点复用且不随场景数涨内存。场分辨率与
-      模型上采样输出一致（Hb·2^L）。HD 地图按场景 map 名（去 _Opt 后缀）惰性加载并缓存。几何投影复用
-      vis.data_vis.geometry / data.driving_targets。
+说明: 四帧历史图像按真实位姿使用 4×4 刚性变换；场景与 Agent 占用分别生成并按需缓存。
+      只返回当前帧 LiDAR，三目 BGR 在训练设备上归一化。
 """
-
 from __future__ import annotations
 
 import warnings
@@ -61,12 +22,14 @@ import torch
 
 from config.schema import Config
 from data import driving_targets as dt
+from data.driving_occupancy import DrivingOccupancyCache
 from data.driving_dataset.checks.driving_dataset_checks import (
     check_behavior_annotations,
     check_camera_calib,
+    check_frame_cadence,
     check_ego_box_annotations,
 )
-from data.hd_map import HdMap, offroad_distance_field
+from data.hd_map import HdMap
 from data.lidar_voxelization import lidar_xyz_to_voxels
 from data.single_frame_base import SingleFrameSceneBase, resolve_repo_path
 from vis.data_vis.geometry import transform_matrix, transform_points, world_to_ego
@@ -76,7 +39,7 @@ __all__ = ["DrivingDataset"]
 
 
 class DrivingDataset(SingleFrameSceneBase):
-    """以当前帧为索引、同时读取上一帧的双帧三目驾驶数据集。"""
+    """以当前帧为索引并读取四帧历史的三目驾驶数据集。"""
 
     def __init__(self, cfg: Config) -> None:
         drv_data = cfg.data.driving
@@ -90,6 +53,12 @@ class DrivingDataset(SingleFrameSceneBase):
         self._lidar_voxel_size = cfg.model.driving.lidar_fusion.voxel_size_m
         self._fov = bev.fov_deg
         self._previous_offset = drv_data.previous_frame_offset
+        self._history_frames = drv_data.history_frames
+        self._detect_queries = cfg.model.driving.detection.num_queries
+        self._detect_steps = cfg.model.driving.detection.future_steps
+        self._detect_dt = cfg.model.driving.detection.future_dt_s
+        self._occupancy = DrivingOccupancyCache(cfg)
+        self._occupancy.check_sources(scene for scene, _ in self.frame_index)
         # 场分辨率 = BEV 工作分辨率 · 统一解码头上采样倍率
         scale = 2 ** len(cfg.model.driving.bev_decoder.up_channels)
         self._bev = dt.BevParams(bev.x_min_m, bev.x_max_m, bev.y_min_m, bev.y_max_m,
@@ -102,10 +71,6 @@ class DrivingDataset(SingleFrameSceneBase):
         self._target_max = drv_data.target_max_m
         self._traffic_cfg = drv_data.traffic_control
         self._traffic_state_names = cfg.model.driving.traffic_control.state_names
-        centerline_class = cfg.model.driving.lane_map.class_names.index("centerline")
-        self._centerline_types = tuple(
-            name for name, class_id in drv_data.lane_map.type_to_class.items()
-            if class_id == centerline_class)
         behavior = drv_data.behavior
         self._behavior_params = dt.BehaviorParams(
             behavior.stationary_speed_mps, behavior.acceleration_threshold_mps2,
@@ -114,144 +79,184 @@ class DrivingDataset(SingleFrameSceneBase):
             behavior.traffic_light_seg_margin_px, behavior.traffic_light_min_pixels)
         self._map_dir = resolve_repo_path(drv_data.map_dir)
         self._inview_np = dt.inview_mask(self._bev, self._fov)
-        self._inview = torch.from_numpy(self._inview_np).to(torch.uint8)  # 紧凑常量，预算一次
         self._hd_maps: Dict[str, HdMap] = {}
         self._state_cache = OrderedDict()  # 每场景 (ego 位姿 [F,6], 标量速度加速度 [F])
         self._missing_lidar_warned = set()
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
+        """取五帧三目、当前 LiDAR、独立占用与 Detect/轨迹监督。"""
         scene_dir, frame_idx = self.frame_index[i]
         reader = self.reader(scene_dir)
         meta = reader.meta
         cameras = self._cameras
         check_camera_calib(meta, cameras)
-
-        previous_idx = max(frame_idx - self._previous_offset, 0)
-        previous_valid = float(frame_idx >= self._previous_offset)
-        previous_meta = reader.frame_meta(previous_idx) if previous_valid else None
-        previous_rgb = (
-            np.stack([reader.rgb(previous_idx, camera) for camera in cameras])
-            if previous_valid else None)
-
-        frame = reader.frame(frame_idx, modalities=("depth", "semantic", "lidar"))
+        check_frame_cadence(meta, self._previous_offset, self._detect_dt)
+        frame = reader.frame(frame_idx, modalities=("depth", "lidar"))
         check_behavior_annotations(meta, frame, cameras)
+        pose = [float(value) for value in frame["ego"]["transform"]]
         intrinsics = [meta["intrinsics"][camera] for camera in cameras]
-        extrinsics = np.asarray(
-            [meta["extrinsics"][camera] for camera in cameras], dtype=np.float32)
-        intrinsics4 = np.asarray([
-            [intr["fx"], intr["fy"], intr["cx"], intr["cy"]] for intr in intrinsics
+        intrinsic4 = np.asarray([
+            [item["fx"], item["fy"], item["cx"], item["cy"]] for item in intrinsics
         ], dtype=np.float32)
+        extrinsics = np.asarray([meta["extrinsics"][camera] for camera in cameras],
+                                dtype=np.float32)
         rgb = np.stack([frame["rgb"][camera] for camera in cameras])
-        depth = (
-            np.stack([
-                np.ascontiguousarray(frame["depth"][camera]).astype(np.float32)
-                for camera in cameras
-            ])
-            if all(camera in frame["depth"] for camera in cameras) else None
-        )
-        semantic = (
-            np.stack([
-                np.ascontiguousarray(frame["semantic"][camera]) for camera in cameras
-            ])
-            if all(camera in frame["semantic"] for camera in cameras) else None
-        )
-
-        pose = [float(v) for v in frame["ego"]["transform"]]
-        world_vel = np.array(frame["ego"]["velocity"], dtype=np.float64)
-        previous_meta = previous_meta or frame["meta"]
-        previous_rgb = previous_rgb if previous_rgb is not None else rgb
-        previous_lidar = reader.lidar(previous_idx) if previous_valid else frame["lidar"]
-        lidar_points, lidar_object_ids = self._lidar_target_points(
+        depth = (np.stack([np.asarray(frame["depth"][camera], dtype=np.float32)
+                           for camera in cameras])
+                 if all(camera in frame["depth"] for camera in cameras) else None)
+        history_indices = [max(frame_idx - distance * self._previous_offset, 0)
+                           for distance in range(self._history_frames, 0, -1)]
+        history_valid = np.asarray([
+            frame_idx >= distance * self._previous_offset
+            for distance in range(self._history_frames, 0, -1)], dtype=bool)
+        history_rgb = np.stack([
+            np.stack([reader.rgb(index, camera) for camera in cameras])
+            if valid else rgb
+            for index, valid in zip(history_indices, history_valid)])
+        current_from_world = world_to_ego(pose)
+        history_to_current = np.stack([
+            current_from_world @ transform_matrix(
+                reader.frame_meta(index)["ego"]["transform"])
+            if valid else np.eye(4)
+            for index, valid in zip(history_indices, history_valid)
+        ]).astype(np.float32)
+        lidar_points, lidar_ids = self._lidar_target_points(
             frame["lidar"], meta, frame["meta"])
         lidar_stats, lidar_occupied, lidar_valid = self._lidar_voxels(
             scene_dir, frame["lidar"], meta, frame["meta"])
-        previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid = \
-            self._lidar_voxels(scene_dir, previous_lidar, meta, previous_meta)
-        previous_pose = [float(v) for v in previous_meta["ego"]["transform"]]
-        previous_to_current = _planar_previous_to_current(previous_pose, pose)
-
         states = self._scene_states(scene_dir, reader)
         state_idx = states["frame_to_index"].get(int(frame["meta"]["frame_id"]))
         if state_idx is None:
             state_idx = int(np.argmin(np.abs(states["times"] - float(frame["meta"]["sim_time"]))))
-        poses, accelerations = states["poses"], states["accelerations"]
-        waypoints, valid = self._trajectory(states, state_idx, pose)
-        ego_extent = np.asarray(self._ego_box(frame["meta"])["extent"][:2], dtype=np.float32)
-        target_point = self._target_point(poses, state_idx, pose, meta)
-        ego_velocity = (world_to_ego(pose)[:2, :2] @ world_vel[:2]).astype(np.float32)
+        waypoints, traj_valid = self._trajectory(states, state_idx, pose)
+        target_point = self._target_point(states["poses"], state_idx, pose, meta)
+        world_velocity = np.asarray(frame["ego"]["velocity"], dtype=np.float64)
+        ego_velocity = (current_from_world[:2, :2] @ world_velocity[:2]).astype(np.float32)
         hd_map = self._hd_map(meta["map"])
-        speed_mps = float(np.linalg.norm(world_vel[:2]))
+        speed = float(np.linalg.norm(world_velocity[:2]))
         traffic = self._traffic_targets(
-            hd_map, poses, state_idx, pose, target_point, meta, frame, speed_mps)
-        behavior = dt.behavior_targets(
-            waypoints, valid, speed_mps, float(accelerations[state_idx]),
-            frame["bboxes"], meta["traffic_lights"], frame["traffic_light_states"],
-            meta["static_bboxes"], semantic, pose, intrinsics, extrinsics,
-            self._bev, self._fov, self._behavior_params,
-            red_light_relevant=bool(traffic["red_stop_valid"]))
-
-        risk = dt.risk_field(
-            depth, intrinsics4, extrinsics, self._bev, self._fov, self._depth_max_m,
-            lidar_points=lidar_points)
-        map_drivable = hd_map.drivable_bev(
+            hd_map, states["poses"], state_idx, pose, target_point, meta, frame, speed)
+        drivable = hd_map.drivable_bev(
             pose, self._bev, self._cfg_data.lane_half_width_m)
         lane_cfg = self._cfg_data.lane_map
-        lane_class, lane_direction = hd_map.lane_map_bev(
+        lane_class, _ = hd_map.lane_map_bev(
             pose, self._bev, lane_cfg.line_width_m,
             lane_cfg.type_to_class, lane_cfg.unknown_class)
-        gt_centerline_distance, gt_centerline_valid = hd_map.gt_centerline_distance_bev(
-            pose, waypoints, valid, self._bev, self._centerline_types,
-            lane_cfg.centerline_match_radius_m)
-        box_occupancy = dt.visible_moving_box_occupancy(
-            frame["bboxes"], depth, intrinsics, pose, extrinsics,
-            self._bev, self._depth_max_m, self._box_min_visible_pixels,
-            lidar_points=lidar_points, lidar_object_ids=lidar_object_ids)
-        drivable = map_drivable * (1.0 - box_occupancy)
-        offroad_distance = offroad_distance_field(drivable, self._bev)
-        distribution = dt.distribution_field(waypoints, valid, self._bev, self._cfg_data.dist_sigma_m)
-
-        sample = {
+        moving = [box for box in frame["bboxes"]
+                  if box.get("semantic") in ("vehicle", "pedestrian")]
+        visible = self._visible_agents(moving, depth, intrinsics, extrinsics,
+                                       pose, lidar_points, lidar_ids)
+        scene_occ, scene_mask = self._occupancy.scene(
+            scene_dir, frame_idx, pose, intrinsics, extrinsics, rgb.shape[1:3])
+        agent_occ, agent_mask = self._occupancy.agent(
+            scene_dir, frame_idx, pose, moving, visible, scene_occ,
+            intrinsics, extrinsics, rgb.shape[1:3])
+        # 缓存按 x 递增索引，BEV 特征行从远到近；只在输出边界翻转以保持缓存几何直观。
+        scene_occ, scene_mask, agent_occ, agent_mask = (
+            np.ascontiguousarray(np.flip(value, axis=1))
+            for value in (scene_occ, scene_mask, agent_occ, agent_mask))
+        detect_class, detect_box, detect_future, detect_future_valid = self._detect_targets(
+            reader, frame_idx, pose, moving, visible)
+        return {
             "rgb": torch.stack([self.bgr_uint8(image) for image in rgb]),
-            "previous_rgb": torch.stack([self.bgr_uint8(image) for image in previous_rgb]),
-            "previous_to_current": torch.from_numpy(previous_to_current),
-            "previous_valid": torch.tensor(previous_valid, dtype=torch.float32),
+            "history_rgb": torch.stack([
+                torch.stack([self.bgr_uint8(image) for image in views])
+                for views in history_rgb]),
+            "history_to_current": torch.from_numpy(history_to_current),
+            "history_valid": torch.from_numpy(history_valid),
             "lidar_stats": lidar_stats,
             "lidar_occupied": lidar_occupied,
-            "lidar_valid": torch.tensor(lidar_valid, dtype=torch.float32),
-            "previous_lidar_stats": previous_lidar_stats,
-            "previous_lidar_occupied": previous_lidar_occupied,
-            "previous_lidar_valid": torch.tensor(
-                previous_lidar_valid, dtype=torch.float32),
-            "intrinsics": torch.from_numpy(intrinsics4),
+            "lidar_valid": torch.tensor(lidar_valid, dtype=torch.bool),
+            "intrinsics": torch.from_numpy(intrinsic4),
             "extrinsics": torch.from_numpy(extrinsics),
             "target_point": torch.tensor(target_point, dtype=torch.float32),
             "ego_velocity": torch.from_numpy(ego_velocity),
-            "ego_extent": torch.from_numpy(ego_extent),
             "trajectory": torch.from_numpy(waypoints),
-            "traj_valid": torch.from_numpy(valid),
-            "behavior": torch.from_numpy(behavior),
-            "risk": torch.from_numpy(risk),
-            "drivable": torch.from_numpy(drivable),
-            "lane_class": torch.from_numpy(lane_class.astype(np.uint8)),
-            "lane_direction": torch.from_numpy(lane_direction),
-            "gt_centerline_distance": torch.from_numpy(gt_centerline_distance),
-            "gt_centerline_valid": torch.from_numpy(gt_centerline_valid),
-            "offroad_distance": torch.from_numpy(offroad_distance),
-            "distribution": torch.from_numpy(distribution),
-            "inview": self._inview,
+            "traj_valid": torch.from_numpy(traj_valid),
+            "drivable": torch.from_numpy(drivable.astype(np.float32)),
+            "lane_occupancy": torch.from_numpy((lane_class != 0).astype(np.float32)),
+            "stop_line": torch.from_numpy(np.asarray(traffic["stop_line"], dtype=np.float32)),
+            "scene_occ": torch.from_numpy(scene_occ),
+            "scene_occ_mask": torch.from_numpy(scene_mask),
+            "agent_occ": torch.from_numpy(agent_occ),
+            "agent_occ_mask": torch.from_numpy(agent_mask),
+            "detect_class": torch.from_numpy(detect_class),
+            "detect_box": torch.from_numpy(detect_box),
+            "detect_future": torch.from_numpy(detect_future),
+            "detect_future_valid": torch.from_numpy(detect_future_valid),
         }
-        compact_uint8 = {"stop_line", "traffic_light_state", "traffic_light_state_valid"}
-        sample.update({
-            name: (
-                torch.from_numpy(value).to(torch.uint8)
-                if isinstance(value, np.ndarray) and name in compact_uint8
-                else torch.from_numpy(value)
-                if isinstance(value, np.ndarray)
-                else torch.tensor(value, dtype=torch.float32)
-            )
-            for name, value in traffic.items()
-        })
-        return sample
+
+    def _prepare_occupancy_sample(self, i: int) -> None:
+        """只读取当前帧并预生成两份占用缓存，跳过历史图像、地图和轨迹监督。"""
+        scene_dir, frame_idx = self.frame_index[i]
+        if self._occupancy.contains(scene_dir, frame_idx):
+            return
+        reader = self.reader(scene_dir)
+        meta = reader.meta
+        cameras = self._cameras
+        check_camera_calib(meta, cameras)
+        frame = reader.frame(frame_idx, modalities=("depth", "lidar"))
+        pose = [float(value) for value in frame["ego"]["transform"]]
+        intrinsics = [meta["intrinsics"][camera] for camera in cameras]
+        extrinsics = np.asarray([meta["extrinsics"][camera] for camera in cameras],
+                                dtype=np.float32)
+        image_shape = frame["rgb"][cameras[0]].shape[:2]
+        depth = (np.stack([np.asarray(frame["depth"][camera], dtype=np.float32)
+                           for camera in cameras])
+                 if all(camera in frame["depth"] for camera in cameras) else None)
+        lidar_points, lidar_ids = self._lidar_target_points(
+            frame["lidar"], meta, frame["meta"])
+        moving = [box for box in frame["bboxes"]
+                  if box.get("semantic") in ("vehicle", "pedestrian")]
+        visible = self._visible_agents(moving, depth, intrinsics, extrinsics,
+                                       pose, lidar_points, lidar_ids)
+        scene_occ, _ = self._occupancy.scene(
+            scene_dir, frame_idx, pose, intrinsics, extrinsics, image_shape)
+        self._occupancy.agent(scene_dir, frame_idx, pose, moving, visible,
+                              scene_occ, intrinsics, extrinsics, image_shape)
+
+    def _visible_agents(self, boxes, depth, intrinsics, extrinsics, pose,
+                        lidar_points, lidar_ids):
+        """复用深度优先、LiDAR 回退的框级可见性判定。"""
+        return dt.visible_moving_boxes(
+            boxes, depth, intrinsics, pose, extrinsics,
+            self._depth_max_m, self._box_min_visible_pixels,
+            lidar_points=lidar_points, lidar_object_ids=lidar_ids)
+
+    def _detect_targets(self, reader, frame_idx, pose, boxes, visible):
+        """只存储本帧可见运动 Agent；未来轨迹按 actor ID 临近帧匹配。"""
+        count = self._detect_queries
+        classes = np.full(count, -1, dtype=np.int64)
+        box_target = np.zeros((count, 9), dtype=np.float32)
+        future = np.zeros((count, self._detect_steps, 2), dtype=np.float32)
+        future_valid = np.zeros((count, self._detect_steps), dtype=bool)
+        selected = sorted((box for box, keep in zip(boxes, visible) if keep),
+                          key=lambda box: np.linalg.norm(
+                              np.asarray(box["location"])[:2] - np.asarray(pose)[:2]))[:count]
+        next_frames = [reader.frame_meta(min(frame_idx + step, reader.num_frames - 1))
+                       if frame_idx + step < reader.num_frames else None
+                       for step in range(1, self._detect_steps + 1)]
+        current_from_world = world_to_ego(pose)
+        for index, box in enumerate(selected):
+            classes[index] = 0 if box["semantic"] == "vehicle" else 1
+            center = transform_points(np.asarray(box["location"])[None],
+                                      current_from_world)[0]
+            dimensions = 2 * np.asarray(box["extent"], dtype=np.float32)
+            yaw = np.deg2rad(float(box["rotation"][2]) - float(pose[5]))
+            matched = [next((item for item in frame["bboxes"]
+                             if item.get("id") == box.get("id")), None)
+                       if frame is not None else None for frame in next_frames]
+            points = [transform_points(np.asarray(item["location"])[None],
+                                       current_from_world)[0, :2]
+                      if item is not None else None for item in matched]
+            for step, point in enumerate(points):
+                if point is not None:
+                    future[index, step] = point
+                    future_valid[index, step] = True
+            velocity = ((points[0] - center[:2]) / self._detect_dt
+                        if points and points[0] is not None else np.zeros(2))
+            box_target[index] = np.r_[center, dimensions, yaw, velocity]
+        return classes, box_target, future, future_valid
 
     def _lidar_voxels(self, scene_dir, lidar, meta, frame_meta):
         """把结构化语义 LiDAR 剔除自车 Box 后转为 ego 系体素统计；缺失场景严格标为无效。"""

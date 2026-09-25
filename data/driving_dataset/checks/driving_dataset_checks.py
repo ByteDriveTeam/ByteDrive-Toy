@@ -10,6 +10,14 @@ def check_camera_calib(meta, cameras):
         raise KeyError("场景 meta 缺三目相机 {} 的内参/外参。".format(missing))
 
 
+def check_frame_cadence(meta, frame_offset, interval_s):
+    """校验对象: DrivingDataset 历史和 Agent 未来帧 —— 采样时间须为 2Hz。"""
+    import math
+    if not math.isclose(float(meta["sensor_dt_s"]) * frame_offset,
+                        interval_s, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError("场景 sensor_dt_s 与未来 2Hz/历史帧间隔不一致")
+
+
 def check_behavior_annotations(meta, frame, cameras):
     """校验驾驶输入：RGB 必需；监督源须有完整 Depth 或 LiDAR；Seg 可选。"""
     missing_rgb = [camera for camera in cameras if camera not in frame.get("rgb", {})]

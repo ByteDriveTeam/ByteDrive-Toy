@@ -1,54 +1,29 @@
-"""双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
+"""五帧三目图像与当前 LiDAR 的驾驶模型，输出独立场景、Agent 与规划任务。
 
 模块: model/driving_model/driving_model.py
-依赖: torch, contextlib, config.schema.Config, model.perception_model.PerceptionFeatureEncoder,
-      model.driving_neck.DrivingNeck, model.bev_query_embedding.BevQueryEmbedding,
-      model.lidar_fusion.LidarQueryFusion, model.bev_encoder.BevEncoder, model.bev_decoder.BevDecoder,
-      model.trajectory_decoder.TrajectoryDecoder,
-      model.driving_model.checks.driving_model_checks
-读取配置:
-    model.driving.work_dim / freeze_perception / neck_num_residual_blocks
-    model.driving.bev / query / lidar_fusion / frustum / attention / bev_encoder / bev_decoder / lane_map /
-        traffic_control / trajectory / behavior 各键
-    model.dinov3_backbone.patch_size / hidden_dim（frustum 像素反投影、DINO 原始特征通道）
-    model.feature_trunk.channels（trunk 通道）
+依赖: torch, config.schema, model.perception_model, model.driving_neck,
+      model.driving_transformer, model.lidar_fusion, model.bev_decoder,
+      model.trajectory_decoder, model.driving_model.checks
+读取配置: model.driving.*, model.dinov3_backbone.patch_size/hidden_dim,
+          model.feature_trunk.channels
 对外接口:
     - DrivingModel(cfg) -> nn.Module
-        forward(rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
-                previous_to_current, previous_valid, lidar_stats=None, lidar_occupied=None,
-                lidar_valid=None, previous_lidar_stats=None, previous_lidar_occupied=None,
-                previous_lidar_valid=None) -> dict
-            # 三场 + 道路线/停止线/灯色 + trajectories/confidence/behavior_logits
-        trainable_parameters() -> Iterator[nn.Parameter]   # 驾驶各件 + 可选感知 fusion/trunk
-说明: Driving 仅构造不含像素头的 PerceptionFeatureEncoder，三路共享全部视觉参数；相机轴展平到 batch 后，
-      driving_neck 按各自标定注入 frustum 几何位置编码，再把三路 patch Token 拼为 BEV 的图像上下文；
-      bev_query_embedding 仅以 BEV xyz 几何初始化查询，lidar_fusion 在图像交叉注意力前以逐通道门控
-      注入当前/历史帧体素中心相对坐标的米制均值与标准差，
-      bev_encoder 用交叉注意力聚合图像与历史，再以带无位置 BEV 寄存器的六层二维 RoPE Transformer 提炼；
-      bev_decoder 共享一次上采样解码三场、道路线与交通控制。上一帧由同一套纯几何查询得到 BEV 骨干末端
-      特征；其每个 cell 的坐标由
-      previous_to_current 刚性变换到当前 ego 系，并通过与当前查询共享的几何编码器按真实变换坐标重编码。当前
-      BEV 查询先查图像、再查上一帧 BEV；trajectory_decoder
-      以目标点、ego 平面速度为条件，用可学习 Mode Token 依次查询主干第 3/6 层。前向三目，自车位于 BEV 下方中心。
-      混精边界（外置）：感知提特征 + neck + BEV 编码在 BF16 autocast 下；末端场上采样/解码与轨迹解码在 FP32。
-      freeze_perception 为真时视觉编码器冻结且在 no_grad 下前向，梯度只回传驾驶各件；为假时优化驾驶实际经过的
-      fusion/trunk。语义/深度解码头不构造、不挂入模型树，也不参与驾驶权重加载。
+说明: 历史图像射线以四维刚性矩阵映射至当前 ego；位置编码只用于注意力 Q/K。
 """
 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any, Dict, Iterator
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from config.schema import Config
 from model.bev_decoder import BevDecoder
-from model.bev_encoder import BevEncoder
-from model.bev_query_embedding import BevQueryEmbedding
 from model.driving_model.checks.driving_model_checks import check_driving_inputs
 from model.driving_neck import DrivingNeck
+from model.driving_transformer import DrivingTransformer
 from model.lidar_fusion import LidarQueryFusion
 from model.perception_model import PerceptionFeatureEncoder
 from model.trajectory_decoder import TrajectoryDecoder
@@ -56,143 +31,135 @@ from model.trajectory_decoder import TrajectoryDecoder
 
 __all__ = ["DrivingModel"]
 
-_LOW_PRECISION = torch.bfloat16
+
+class _LidarStep:
+    """只修改 BEV Patch，Detect Token 保留独立内容。"""
+
+    def __init__(self, fusion, stats, occupied, valid, bev_shape):
+        self.fusion, self.stats = fusion, stats
+        self.occupied, self.valid, self.bev_shape = occupied, valid, bev_shape
+
+    def __call__(self, tokens):
+        b, _, d = tokens.shape
+        n = self.bev_shape[0] * self.bev_shape[1]
+        bev = tokens[:, :n].transpose(1, 2).reshape(b, d, *self.bev_shape)
+        fused = self.fusion(bev, bev, self.stats, self.occupied, self.valid)
+        return torch.cat((fused.flatten(2).transpose(1, 2), tokens[:, n:]), dim=1)
 
 
 class DrivingModel(nn.Module):
-    """双帧三目开环驾驶模型（复用感知主干并融合上一帧 BEV）。
-
-    Args:
-        cfg: 全局配置，读取 `model.driving` 及感知骨干/主干维度。
-
-    Shape:
-        当前/上一帧 rgb `[B,3,3,H,W]`、intrinsics `[B,3,4]`、extrinsics `[B,3,6]`、
-        target_point/ego_velocity `[B,2]`、
-        previous_to_current `[B,3,3]`、previous_valid `[B]`。
-        输出 dict：risk/drivable/distribution/stop_line_logits、交通灯状态、道路线、轨迹与行为。
-    """
+    """五帧图像 CA 与 1/3/5 层 LiDAR 融合的多任务模型。"""
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
         self.cfg = cfg
-        drv = cfg.model.driving
-        bb = cfg.model.dinov3_backbone
+        drv, bb = cfg.model.driving, cfg.model.dinov3_backbone
         self.freeze_perception = drv.freeze_perception
-        self.detach_previous = drv.bev_encoder.detach_previous
-
         self.perception = PerceptionFeatureEncoder(cfg)
-        # DINOv3 骨干恒冻结；freeze_perception=True 时连同融合/trunk 冻结，否则以较小学习率适配驾驶任务。
         if self.freeze_perception:
             self.perception.requires_grad_(False)
-
-        self.neck = DrivingNeck(drv, cfg.model.feature_trunk.channels, bb.hidden_dim, bb.patch_size)
-        self.query = BevQueryEmbedding(
-            out_dim=drv.work_dim,
-            x_min_m=drv.bev.x_min_m, x_max_m=drv.bev.x_max_m,
-            y_min_m=drv.bev.y_min_m, y_max_m=drv.bev.y_max_m,
-            height=drv.bev.height, width=drv.bev.width,
-            z_min_m=drv.bev.z_min_m, z_max_m=drv.bev.z_max_m, z_step_m=drv.bev.z_step_m,
-            coord_symlog_scale=drv.query.coord_symlog_scale, mlp_hidden=drv.query.mlp_hidden)
-        self.lidar_fusion = LidarQueryFusion(drv)
-        self.bev_encoder = BevEncoder(drv)
-        self.bev_decoder = BevDecoder(drv)
+        self.neck = DrivingNeck(drv, cfg.model.feature_trunk.channels,
+                                bb.hidden_dim, bb.patch_size)
+        self.encoder = DrivingTransformer(drv)
+        self.lidar_fusers = nn.ModuleList(LidarQueryFusion(drv) for _ in range(3))
+        self.decoder = BevDecoder(drv)
         self.trajectory_decoder = TrajectoryDecoder(drv)
+        det = drv.detection
+        self.detect_class = nn.ModuleList(nn.Linear(drv.work_dim, det.num_classes + 1)
+                                          for _ in range(6))
+        self.detect_box = nn.ModuleList(nn.Linear(drv.work_dim, 9) for _ in range(6))
+        self.detect_future = nn.ModuleList(
+            nn.Linear(drv.work_dim, det.num_modes * det.future_steps * 2)
+            for _ in range(6))
+        self.detect_modes, self.detect_steps = det.num_modes, det.future_steps
+        bev = drv.bev
+        self.register_buffer("box_scale", torch.tensor((bev.x_max_m - bev.x_min_m,
+                         bev.y_max_m - bev.y_min_m, bev.z_max_m - bev.z_min_m)))
 
     def _driving_modules(self):
-        """驾驶新增模块（不含复用的感知子模块）。"""
-        return (self.neck, self.query, self.lidar_fusion, self.bev_encoder, self.bev_decoder,
-                self.trajectory_decoder)
+        return (self.neck, self.encoder, self.lidar_fusers, self.decoder,
+                self.trajectory_decoder, self.detect_class, self.detect_box,
+                self.detect_future)
 
-    def trainable_parameters(self) -> Iterator[nn.Parameter]:
-        """可训练参数：驾驶各件，以及未冻结时驾驶前向实际使用的感知 fusion/trunk。"""
-        for m in self._driving_modules():
-            yield from m.parameters()
+    def trainable_parameters(self):
+        """返回驾驶参数及可训练的感知融合主干参数。"""
+        for module in self._driving_modules():
+            yield from module.parameters()
         if not self.freeze_perception:
             yield from self.perception.feature_parameters()
 
-    def param_groups(self, base_lr: float, weight_decay: float, perception_lr_scale: float):
-        """优化器参数分组：驾驶各件用 base_lr；感知子模块（若未冻结）用 base_lr·perception_lr_scale 慢更新。
-
-        DINOv3 骨干恒冻结、不出现在任何分组；fusion/trunk 以极小 lr 缓慢适配驾驶任务。驾驶模型不构造
-        语义/深度头，因此模型树和优化器均不存在对应参数。返回 AdamW 参数组。
-        """
-        groups = [{"params": [p for m in self._driving_modules() for p in m.parameters()],
+    def param_groups(self, base_lr, weight_decay, perception_lr_scale):
+        """感知路径使用配置指定的学习率倍率。"""
+        groups = [{"params": [p for module in self._driving_modules()
+                              for p in module.parameters()],
                    "lr": base_lr, "weight_decay": weight_decay}]
         if not self.freeze_perception:
             groups.append({"params": list(self.perception.feature_parameters()),
-                           "lr": base_lr * perception_lr_scale, "weight_decay": weight_decay})
+                           "lr": base_lr * perception_lr_scale,
+                           "weight_decay": weight_decay})
         return groups
 
-    def forward(self, rgb: torch.Tensor, intrinsics: torch.Tensor, extrinsics: torch.Tensor,
-                target_point: torch.Tensor, ego_velocity: torch.Tensor, previous_rgb: torch.Tensor,
-                previous_to_current: torch.Tensor,
-                previous_valid: torch.Tensor, lidar_stats: torch.Tensor = None,
-                lidar_occupied: torch.Tensor = None, lidar_valid: torch.Tensor = None,
-                previous_lidar_stats: torch.Tensor = None,
-                previous_lidar_occupied: torch.Tensor = None,
-                previous_lidar_valid: torch.Tensor = None) -> Dict[str, torch.Tensor]:
-        """双帧三目+LiDAR 前向：各帧先融合体素查询，再生成历史/当前 BEV 与驾驶输出。"""
-        check_driving_inputs(
-            rgb, intrinsics, extrinsics, target_point, ego_velocity, previous_rgb,
-            previous_to_current, previous_valid, lidar_stats, lidar_occupied, lidar_valid,
-            previous_lidar_stats, previous_lidar_occupied, previous_lidar_valid)
-        device = rgb.device
-        batch_size = int(rgb.shape[0])
-
-        # BF16 段：当前帧先查询图像，随后查询携带变换后真实几何的上一帧 BEV。
-        with self._autocast(device, enabled=True):
-            image_feat = self._image_features(rgb, intrinsics, extrinsics)
-            bev_query = self.query(batch_size, device)
-            history_context = torch.no_grad() if self.detach_previous else nullcontext()
-            with history_context:
-                previous_image = self._image_features(previous_rgb, intrinsics, extrinsics)
-                previous_query = self.lidar_fusion(
-                    bev_query, previous_image, previous_lidar_stats,
-                    previous_lidar_occupied, previous_lidar_valid)
-                previous_bev = self.bev_encoder(
-                    previous_query, previous_image)
-
-            transformed_grid = self._transformed_previous_grid(previous_to_current)
-            previous_geometry = self.query(batch_size, device, transformed_grid)
-            current_query = self.lidar_fusion(
-                bev_query, image_feat, lidar_stats, lidar_occupied, lidar_valid)
-            bev_feat, planning_features = self.bev_encoder(
-                current_query, image_feat, previous_bev, previous_geometry, previous_valid,
-                return_intermediate=True)
-
-        # FP32 段：共享空间解码头与轨迹/行为末端解码。
-        with self._autocast(device, enabled=False):
-            bev_feat = bev_feat.float()
-            outputs = self.bev_decoder(bev_feat)
-            outputs.update(self.trajectory_decoder(
-                tuple(feature.float() for feature in planning_features),
-                target_point.float(), ego_velocity.float()))
+    def forward(self, rgb, intrinsics, extrinsics, target_point, ego_velocity,
+                history_rgb, history_to_current, history_valid,
+                lidar_stats=None, lidar_occupied=None, lidar_valid=None,
+                trajectory=None, traj_valid=None, flow_time=None, flow_noise=None):
+        """五帧特征一次编码，按层输出 Detect，并独立解码占用与轨迹。"""
+        check_driving_inputs(rgb, intrinsics, extrinsics, target_point, ego_velocity,
+                             history_rgb, history_to_current, history_valid)
+        b = rgb.shape[0]
+        frames = torch.cat((history_rgb, rgb[:, None]), dim=1)
+        with torch.autocast(rgb.device.type, dtype=torch.bfloat16,
+                            enabled=rgb.device.type in ("cuda", "cpu")):
+            image, rays = self._image_features(frames, intrinsics, extrinsics)
+            with torch.autocast(rgb.device.type, enabled=False):
+                patches = rays.shape[1] // 15
+                xyz = rays.reshape(b, 5, 3, patches, 5, rays.shape[-2], 3)
+                rotation = history_to_current[..., :3, :3]
+                translation = history_to_current[..., :3, 3]
+                past = torch.einsum("bfij,bfvpqnj->bfvpqni", rotation.float(),
+                                    xyz[:, :4].float()) + translation[:, :, None, None, None, None]
+                rays = torch.cat((past, xyz[:, 4:]), 1).reshape(b, -1, 5, rays.shape[-2], 3)
+            dt = self.cfg.model.driving.trajectory.waypoint_dt_s
+            frame_time = torch.arange(-4, 1, device=rgb.device, dtype=torch.float32) * dt
+            time = frame_time[None, :, None].expand(b, -1, 3 * patches).reshape(b, -1)
+            valid = torch.cat((history_valid.bool(),
+                               torch.ones(b, 1, device=rgb.device, dtype=torch.bool)), 1)
+            valid = valid[:, :, None].expand(-1, -1, 3 * patches).reshape(b, -1)
+            steps = tuple(_LidarStep(f, lidar_stats, lidar_occupied, lidar_valid,
+                                     self.encoder.bev_shape) for f in self.lidar_fusers)
+            bev, layers, detections, anchors = self.encoder(
+                image, rays, time, valid, steps)
+        outputs = self.decoder(bev.float())
+        classes, boxes, futures = [], [], []
+        for tokens, cls, box, future in zip(detections, self.detect_class,
+                                             self.detect_box, self.detect_future):
+            token = tokens.float()
+            raw = box(token)
+            center = anchors + torch.tanh(raw[..., :3]) * self.box_scale
+            boxes.append(torch.cat((center, F.softplus(raw[..., 3:6]), raw[..., 6:]), -1))
+            classes.append(cls(token))
+            futures.append(future(token).reshape(b, -1, self.detect_modes,
+                                                 self.detect_steps, 2))
+        outputs.update({"detect_class_logits": torch.stack(classes),
+                        "detect_boxes": torch.stack(boxes),
+                        "detect_future": torch.stack(futures),
+                        "detect_anchors": anchors})
+        outputs.update(self.trajectory_decoder(
+            tuple(layer.float() for layer in layers), target_point.float(),
+            ego_velocity.float(), trajectory=trajectory, traj_valid=traj_valid,
+            flow_time=flow_time, flow_noise=flow_noise))
         return outputs
 
-    def _image_features(self, rgb, intrinsics, extrinsics):
-        """把相机轴展平进 batch 共享视觉参数，再恢复为三路 patch 特征。"""
-        batch_size, views, channels, height, width = rgb.shape
-        flat_rgb = rgb.reshape(batch_size * views, channels, height, width)
-        flat_intrinsics = intrinsics.reshape(batch_size * views, 4)
-        flat_extrinsics = extrinsics.reshape(batch_size * views, 6)
+    def _image_features(self, frames, intrinsics, extrinsics):
+        b, f, v, c, height, width = frames.shape
+        rgb = frames.reshape(b * f * v, c, height, width)
+        intr = intrinsics[:, None].expand(-1, f, -1, -1).reshape(-1, 4)
+        extr = extrinsics[:, None].expand(-1, f, -1, -1).reshape(-1, 6)
         with torch.no_grad() if self.freeze_perception else nullcontext():
-            trunk_feat, dino_raw = self.perception.extract_features(flat_rgb)
-        features = self.neck(
-            trunk_feat, dino_raw, flat_intrinsics, flat_extrinsics)
-        return features.reshape(batch_size, views, *features.shape[1:])
-
-    def _transformed_previous_grid(self, previous_to_current):
-        """把上一帧每个 BEV cell 中心刚性变换到当前 ego 系，保留真实几何供共享编码器使用。"""
-        grid = self.query.grid_xy.float()
-        grid_h = torch.cat((grid, torch.ones_like(grid[..., :1])), dim=-1)
-        transformed = torch.einsum("bij,hwj->bhwi", previous_to_current.float(), grid_h)
-        return transformed[..., :2]
-
-    def _autocast(self, device: torch.device, enabled: bool) -> Any:
-        """构造 autocast 上下文：enabled 用 BF16，否则关闭；meta/不支持设备回退空上下文。"""
-        if device.type == "meta":
-            return nullcontext()
-        try:
-            return torch.autocast(device_type=device.type, dtype=_LOW_PRECISION, enabled=enabled)
-        except (RuntimeError, ValueError):
-            return nullcontext()
+            trunk, dino = self.perception.extract_features(rgb)
+        feature = self.neck(trunk, dino, intr, extr)
+        gh, gw = feature.shape[-2:]
+        with torch.autocast(rgb.device.type, enabled=False):
+            rays = self.neck.frustum.ego_frustum_coords(gh, gw, intr, extr)
+        return feature.flatten(2).transpose(1, 2).reshape(b, -1, feature.shape[1]), \
+            rays.reshape(b, -1, 5, rays.shape[-2], 3)

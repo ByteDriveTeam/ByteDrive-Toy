@@ -6,7 +6,7 @@
 对外接口:
     - BEHAVIOR_CLASSES / BehaviorParams / BevParams
     - bev_cell_centers / ego_xy_to_pixel / inview_mask / speed_accelerations
-    - trajectory_targets / behavior_targets / risk_field / visible_moving_box_occupancy / distribution_field
+    - trajectory_targets / behavior_targets / risk_field / visible_moving_box_occupancy / visible_moving_boxes / distribution_field
 说明: 跨模块统一 `from data.driving_targets import ...`；实现见 driving_targets.py，校验见 checks/。
 """
 
@@ -23,6 +23,7 @@ from data.driving_targets.driving_targets import (
     speed_accelerations,
     trajectory_targets,
     visible_moving_box_occupancy,
+    visible_moving_boxes,
 )
 
 __all__ = [
@@ -37,5 +38,6 @@ __all__ = [
     "behavior_targets",
     "risk_field",
     "visible_moving_box_occupancy",
+    "visible_moving_boxes",
     "distribution_field",
 ]

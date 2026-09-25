@@ -11,9 +11,9 @@ def check_lidar_fusion_inputs(
     if tuple(query.shape) != expected_query:
         raise ValueError("query 期望 {}，实际 {}。".format(
             expected_query, tuple(query.shape)))
-    if visual.ndim != 5 or int(visual.shape[0]) != batch or int(visual.shape[2]) != work_dim:
-        raise ValueError("visual 期望 [B,V,{},H,W]，实际 {}。".format(
-            work_dim, tuple(visual.shape)))
+    if tuple(visual.shape) != expected_query:
+        raise ValueError("visual 期望与 BEV Patch 同形 {}，实际 {}。".format(
+            expected_query, tuple(visual.shape)))
     expected_stats = (batch, 6, *grid_shape)
     expected_occupied = (batch, 1, *grid_shape)
     if tuple(stats.shape) != expected_stats or stats.dtype != torch.float32:

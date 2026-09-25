@@ -1,14 +1,12 @@
-"""BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
+"""BEV 专用像素洗牌上采样器：升维、洗牌、残差卷积逐级恢复分辨率。
 
 模块: model/bev_upsampler/bev_upsampler.py
-依赖: torch, model.bev_upsampler.checks.bev_upsampler_checks
+依赖: torch, model.residual_block.ResidualBlock, model.bev_upsampler.checks.bev_upsampler_checks
 读取配置: —
 对外接口:
     - BevUpsampler(in_channels, up_channels, out_channels) -> nn.Module
         forward(x) -> Tensor   # 逐级 2× 上采样后的 BEV 特征
-说明: 每级采用 3×3 Conv → PixelShuffle → SiLU → 1×1 Conv，并从 PixelShuffle 输出、
-      SiLU 之前引出残差。该模块仅供驾驶 BEV 解码分支使用，参数路径与感知上采样器隔离，
-      使旧视场检查点兼容恢复时自动重新初始化 BEV 上采样权重。
+说明: 每级采用 1×1 升维卷积 → PixelShuffle → 共用残差卷积块；升维偏置初始化为零。
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
+from model.residual_block import ResidualBlock
 
 from model.bev_upsampler.checks.bev_upsampler_checks import (
     check_bev_upsampler_args,
@@ -32,16 +31,13 @@ class _BevUpsampleStage(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.spatial_expand = nn.Conv2d(
-            in_channels, out_channels * 4, kernel_size=3, padding=1)
+        self.spatial_expand = nn.Conv2d(in_channels, out_channels * 4, kernel_size=1)
+        nn.init.zeros_(self.spatial_expand.bias)
         self.shuffle = nn.PixelShuffle(2)
-        self.act = nn.SiLU()
-        self.channel_projection = nn.Conv2d(
-            out_channels, out_channels, kernel_size=1)
+        self.residual = ResidualBlock(out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = self.shuffle(self.spatial_expand(x))
-        return residual + self.channel_projection(self.act(residual))
+        return self.residual(self.shuffle(self.spatial_expand(x)))
 
 
 class BevUpsampler(nn.Module):

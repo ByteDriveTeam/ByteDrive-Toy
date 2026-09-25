@@ -31,7 +31,11 @@ This is the single navigation entry for project documentation and source files. 
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Two-frame, three-camera + LiDAR dataset with voxel statistics, temporal transforms, and multitask supervision
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Five-frame, three-camera + LiDAR dataset with separate scene and Agent occupancy supervision
+- [data/driving_occupancy/__init__.py](../data/driving_occupancy/__init__.py) — 重导出驾驶场景与 Agent 独立体素缓存及预生成入口。
+- [data/driving_occupancy/driving_occupancy.py](../data/driving_occupancy/driving_occupancy.py) — 场景和 Agent 独立生成并支持按需或预生成二值 3D 占用监督。
+- [data/driving_occupancy/checks/__init__.py](../data/driving_occupancy/checks/__init__.py) — 独立占用缓存校验包。
+- [data/driving_occupancy/checks/driving_occupancy_checks.py](../data/driving_occupancy/checks/driving_occupancy_checks.py) — 独立占用缓存的数据来源、设备与预生成参数校验。
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — Public API for multi-frame semantic-LiDAR fusion and dynamic-object reconstruction
 - [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — Static fusion, object-level dynamic reconstruction, scene checkpoints, and batch processing
@@ -107,8 +111,12 @@ Python 3.12 collector:
 - [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — Shared upsampling for the three fields, lane geometry, and traffic controls
 - [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — Public BEV-specific PixelShuffle upsampler API
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Two-frame three-camera + LiDAR model combining image geometry, voxel statistics, and aligned historical BEV
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Six-layer pointwise data-space flow matching for a 6 s, 2 Hz ego trajectory
+- [model/driving_transformer/__init__.py](../model/driving_transformer/__init__.py) — 重导出驾驶感知的六层位置隔离 Transformer。
+- [model/driving_transformer/driving_transformer.py](../model/driving_transformer/driving_transformer.py) — 六层 Pre-Norm CA→SA→FFN 驾驶感知主干，位置只提示注意力。
+- [model/driving_transformer/checks/__init__.py](../model/driving_transformer/checks/__init__.py) — Validation package for the driving perception Transformer
+- [model/driving_transformer/checks/driving_transformer_checks.py](../model/driving_transformer/checks/driving_transformer_checks.py) — 六层驾驶感知主干输入校验。
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Five-frame three-camera and LiDAR driving model with separate scene, Agent and trajectory outputs
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
 - [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — 384-dimensional residual BEVSeg encoder, grouped discrete codebook sampling, and ICNR-initialized PixelShuffle decoder

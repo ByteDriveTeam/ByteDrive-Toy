@@ -1,4 +1,4 @@
-"""驾驶前端 neck：感知 trunk 末端特征 + DINOv3 原始特征 → RMSNorm 融合 + 深度 frustum 位置编码 + 残差。
+"""驾驶前端 neck：融合感知 trunk 与 DINOv3 Patch 内容并作残差提炼。
 
 模块: model/driving_neck/driving_neck.py
 依赖: torch, config.schema.DrivingCfg, model.residual_block.(RMSNorm2d, ResidualBlock),
@@ -10,11 +10,7 @@
 对外接口:
     - DrivingNeck(cfg_driving, trunk_channels, dino_channels, patch_size) -> nn.Module
         forward(trunk_feat, dino_raw, intrinsics, extrinsics) -> Tensor  # [B, work_dim, gh, gw]
-说明: 双头共享的 trunk 末端特征承载深度/分割语义，DINOv3 原始特征承载通用纹理；二者激活尺度不同，各自
-      RMSNorm2d 对齐后沿通道拼接，1×1 卷积融合并降到工作维 work_dim。随后叠加 frustum_encoding 的逐 patch
-      几何位置特征（由内外参+深度采样反投影得），使表观特征带上「该 patch 可能落在 ego 系哪些 3D 位置」的
-      先验；再过 num_residual_blocks 层 2D 瓶颈残差块在空间维提炼，产出送入 BEV 交叉注意力的图像特征。
-      精度由外层 autocast 控制；frustum 内部自管几何 FP32 / MLP BF16 边界。
+说明: 仅处理表观内容；frustum 只提供几何坐标，位置编码在注意力 Q/K 内使用。
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ __all__ = ["DrivingNeck"]
 
 
 class DrivingNeck(nn.Module):
-    """把感知中段表征融合为带几何先验的图像特征。
+    """把感知中段表征融合为纯内容图像特征。
 
     Args:
         cfg_driving: 驾驶配置 `config.model.driving`。
@@ -69,8 +65,7 @@ class DrivingNeck(nn.Module):
 
     def forward(self, trunk_feat: torch.Tensor, dino_raw: torch.Tensor,
                 intrinsics: torch.Tensor, extrinsics: torch.Tensor) -> torch.Tensor:
-        """融合 + 几何位置编码 + 残差，产出图像特征 `[B, work_dim, gh, gw]`。"""
+        """只融合视觉内容并残差提炼，产出图像特征 `[B, work_dim, gh, gw]`。"""
         check_neck_inputs(trunk_feat, dino_raw, self.trunk_channels, self.dino_channels)
         fused = self.fuse(torch.cat((self.norm_trunk(trunk_feat), self.norm_dino(dino_raw)), dim=1))
-        fused = fused + self.frustum(fused, intrinsics, extrinsics)
         return self.res_blocks(fused)

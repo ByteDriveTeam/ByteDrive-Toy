@@ -428,12 +428,11 @@ model:
     depth_max_m: 128.0        # 深度检测上限（米）；超出记为超范围，仅监督二分类
     semantic_ignore_index: 0  # 交叉熵忽略的语义标签（0=Unlabeled）
 
-  # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → 当前图像/上一帧 BEV 交叉注意力
-# → BEV Transformer → 统一空间解码 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
+  # 驾驶系统：五帧三目图像、六层 BEV/Detect 感知与独立场景/Agent/轨迹监督。
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
-    neck_num_residual_blocks: 2  # driving_neck 融合+frustum 后的 2D 残差块层数
+    neck_num_residual_blocks: 2  # 纯视觉内容融合后的残差块层数
 
     # BEV（ego 前向三目）几何——坐标量程/分辨率/联合视场/z 采样的单一来源，供模型与数据侧共用
     bev:
@@ -448,7 +447,7 @@ model:
       z_max_m: 8.0               # 垂直采样上界
       z_step_m: 0.1              # 垂直采样步长（[-3,8]@0.1 → 111 层）
 
-    # 初始 BEV 查询嵌入（仅编码 xyz 几何：逐列 MLP + z 聚合；几何取自 bev）
+    # 旧查询几何参数；射线编码统一由 driving_transformer 的两个 MLP 处理
     query:
       coord_symlog_scale: 0.24   # symlog(坐标)·scale 归一到[-1,1]（max~64m: 1/ln(65)≈0.24）
       mlp_hidden: 256            # 逐 cell 垂直列 MLP 隐藏维
@@ -461,7 +460,7 @@ model:
       reduced_dim: 32            # 4×4 对齐卷积之前的 2D LiDAR 通道
       gate_hidden_dim: 128       # 视觉全局信息+逐位置 LiDAR 的门控 MLP 隐藏维
 
-    # 深度 frustum 位置编码：每 patch 中心+四角 × 深度采样的候选 3D 坐标
+    # 几何射线：每 patch 中心+四角 × 深度采样，位置只作为 Q/K 提示
     frustum:
       depth_min_m: 0.1           # 起始/近处深度
       depth_max_m: 64.0          # 最大深度
@@ -475,17 +474,17 @@ model:
       num_heads: 6               # 须整除 work_dim
       mlp_ratio: 4               # 前馈膨胀率（SwiGLU）
 
-    # BEV 编码器：交叉注意力后，以无位置 BEV 寄存器 + 具 2D RoPE 的 BEV Patch 作统一序列
+    # BEV/Detect 六层 CA→SA→FFN，图像历史直接进入每层 CA
     bev_encoder:
-      cross_layers: 2            # BEV 查询 ← 图像特征 级联交叉注意力层数
-      temporal_layers: 2         # 当前 BEV 查询 ← 上一帧 BEV 级联交叉注意力层数
-      detach_previous: true      # 上一帧分支只作缓存特征，不跨帧反传，控制显存并贴合在线推理
+      cross_layers: 6            # 每层均为 Pre-Norm CA→SA→FFN
+      temporal_layers: 0         # 历史图像直接进入每层 CA
+      detach_previous: true      # 保留旧配置键，历史图像编码是否截断由 freeze_perception 控制
       transformer_layers: 6      # BEV Pre-Norm Transformer 固定层数
-      num_register_tokens: 4     # BEV 自有无位置寄存器 Token 数，用于吸纳噪声
+      num_register_tokens: 4     # 旧配置保留作兼容；新主干不用寄存器
       register_init_std: 0.02    # BEV 寄存器正态初始化标准差
       rope_theta: 100.0          # BEV Patch-only 2D RoPE 基频；坐标从 (1,1) 起
 
-    # 统一 BEV 解码：三场、道路线与交通控制共享一次像素洗牌上采样（32×8=256）
+    # 统一 BEV 上采样：场景/Agent 占用、行驶概率、车道线与停止线
     bev_decoder:
       reduce_channels: 128       # 上采样前 1×1 压缩通道
       up_channels: [192, 96, 48] # 三级 2× 像素洗牌输出通道（32→256）
@@ -499,20 +498,42 @@ model:
     traffic_control:
       state_names: [red, yellow, green]
 
-    # 8 扇区多模态轨迹解码
+    # 十二点数据空间流匹配轨迹解码
     trajectory:
-      num_modes: 8               # 8 个可学习 Mode Token，对应 8 条候选轨迹
-      num_waypoints: 20          # 每条轨迹航点数 T_wp（10Hz、0.1s/点 → 4s）
-      waypoint_dt_s: 0.1         # 相邻输出轨迹点的时间间隔
-      planning_dim: 384          # 规划分支工作维；第 3/6 层分别归一后拼接再经 1×1 CNN 降到此维
+      num_modes: 1               # 单条自车轨迹
+      num_waypoints: 12          # 6s、2Hz
+      waypoint_dt_s: 0.5         # 相邻输出轨迹点的时间间隔
+      planning_dim: 384          # 轨迹点 Token 工作维
       condition_mlp_hidden: 256  # 目标点+ego 速度条件编码 MLP 隐藏维
       feature_ffn_hidden: 512    # path2 感知特征适配 FFN 隐藏维
-      cross_layers: 2            # 两个规划 CTB；第 3、6 层特征分别归一后拼接供两 CTB 共享查询
-      self_layers: 4             # 规划 CTB 后的 TB 层数
+      cross_layers: 6            # 逐层 CA→SA→FFN
+      self_layers: 6             # 与 CA 层数一致
       num_heads: 8               # 须整除 planning_dim
-      mode_token_init_std: 0.02  # 8 个可学习 Mode Token 的随机初始化标准差
-      baseline_step_m: 0.8       # 扇区中线基线相邻点距离（对应初始 8m/s）
+      mode_token_init_std: 0.02  # 十二个逐点 Token 初始化标准差
       symlog_scale: 0.24         # 条件输入（目标点/ego 速度）归一化的 Symlog 缩放
+      flow_steps: 8              # 数据空间 Euler 积分步数
+      fixed_noise_seed: 2026     # 固定噪声推理可复现
+      noise_mode: fixed          # fixed / random
+
+    occupancy:
+      voxel_size_m: 0.5         # 场景与 Agent 独立输出，22×128×128
+      cache_dir: output/driving-occ-cache
+      cache_max_size_gb: 32.0
+      cache_enabled: true
+      compute_device: cpu        # cpu / auto / cuda；CUDA 路径需在目标机器实测后选择
+      prebuild: false            # true=训练前预生成缺失占用；false=首轮按需写入
+      progress_every: 100        # 预生成进度输出间隔（帧）
+      visibility_chunk: 4096    # 向量化精确 DDA 的单批射线数
+
+    detection:
+      num_queries: 128
+      num_classes: 2             # vehicle / pedestrian
+      no_object_weight: 0.1
+      matching_size_scales_m: [10.0, 10.0, 5.0]
+      matching_velocity_scale_mps: 20.0
+      num_modes: 3
+      future_steps: 6            # 3s、2Hz
+      future_dt_s: 0.5
 
     # 行为多标签分类 Token：与 8 个轨迹 Token 拼成同一注意力序列
     behavior:
@@ -556,7 +577,9 @@ data:
   # 驾驶双帧三目+LiDAR 数据集：复用感知读取，另产体素统计、帧间变换、三场、道路线图与规划监督。
   # 几何量程/K/场分辨率取自 model.driving（避免重复声明），本节仅放数据侧独有参数。
   driving:
-    scene_root: data/carla_data_collector/dataset/scenes  # 与感知同源场景根
+    scene_root: data/carla_data_collector/dataset-old/scenes
+    fused_root: data/multiframe_pointcloud_fusion/output
+    history_frames: 4
     cameras: [front, front_left, front_right]  # 三目相机轴的统一顺序（训练、模型与闭环共用）
     map_dir: data/map         # HD 地图目录
     map_name_template: "{map}_HD_map.npz"  # 按场景 map 名解析 HD 地图文件（如 Town02_HD_map.npz）
@@ -628,6 +651,7 @@ train:
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
   batch_size: 32
+  driving_batch_size: 1         # 五帧三目感知显存预算；梯度累积沿用 grad_accum_steps
   grad_accum_steps: 1        # 梯度累积步数；有效 batch=batch_size×本值，1 表示每批更新
   num_workers: 4
   prefetch_factor: 1         # 每个 worker 预取 batch 数；驾驶 batch 很大，默认 1 避免过量锁页内存
@@ -659,28 +683,17 @@ train:
     depth_grad: 1.0          # 深度空间梯度（相邻像素差）SmoothL1，监督边界/结构，不加距离权
     depth_range: 0.5
 
-  # 驾驶多任务损失加权：WTA 多模态轨迹 / 模态置信度 / 行为多标签 / 三场 / 不可行驶距离
-  # 注：distribution 为空间 softmax 交叉熵（能量式），量级天然 ~ln(视场格数)≈11，故权重取小以与 BCE 场平衡
+  # 驾驶损失：独立体素场、二维场、逐层 Detect 与数据空间流匹配
   driving_loss_weights:
-    trajectory: 1.0
-    trajectory_unmatched_weight: 0.05  # 匈牙利匹配外的 7 条轨迹仍以该小权重回归，不丢弃候选
-    trajectory_distance_weight_min: 0.25  # 远端轨迹监督保留的最低权重
-    trajectory_distance_decay_m: 20.0     # 沿 GT 路径每前进该距离，近端额外权重按 exp(-d/scale) 衰减
-    trajectory_turn_weight_gain: 1.0      # 局部转角充分大时额外放大至 2 倍
-    trajectory_turn_angle_deg: 15.0       # 局部转角达到该值时使用最大弯道增权
-    confidence: 0.5
-    behavior: 1.0
-    distribution: 0.05
-    risk: 1.0
+    scene_occ: 1.0
+    agent_occ: 1.0
+    detect_class: 1.0
+    detect_box: 1.0
+    detect_future: 1.0
+    flow: 1.0
+    lane_occupancy: 1.0
     drivable: 1.0
-    lane_class: 1.0           # 道路线类别交叉熵
-    lane_class_weights: [0.1, 1.0, 1.0, 1.0, 1.0]  # 抑制稠密背景对细线类别的数量淹没
-    lane_direction: 1.0       # 道路线有向单位切向量余弦损失
-    centerline: 0.5           # 轨迹到 GT 可靠贴近的 HD Map 中心线链之米制距离
-    boundary: 1.0             # 全部候选航点的不可行驶距离（道路外/可见占用内）；超出 BEV 继续按坐标距离惩罚
-    stop_line: 1.0            # 与当前路线相关的交通灯停止线几何（前景/背景均衡 BCE）
-    traffic_light_state: 1.0  # 仅在相关停止线区域监督 red/yellow/green
-    stop_crossing: 1.0        # 红灯时惩罚全部候选轨迹越过带安全余量的停止线
+    stop_line: 1.0
 
   bevseg_loss_weights:
     direction: 0.25
