@@ -10,7 +10,7 @@
       Agent 缓存同时保存逐框可见性，供 Detect 监督复用；旧 Agent 缓存按版本自动重建。
       可见性按每个体素中心到相机的精确网格穿越计算，目标体素不算遮挡。
       固定标定的完整 DDA 路径预计算后由 CPU/GPU 共用；超限回退到 CPU 逐射线 DDA。
-      CUDA 栅格化把同一帧的全部 Agent 框合成一次 Batch 矩阵乘法，避免逐框小 kernel。
+      CUDA 预生成把多个样本的静态点和 Agent 框合成 Batch 矩阵乘法，避免逐样本/逐框小 kernel。
 """
 
 from __future__ import annotations
@@ -167,6 +167,7 @@ class DrivingOccupancyCache:
         self.ray_lookup_enabled = occ.ray_lookup_enabled
         self.ray_lookup_max_bytes = int(occ.ray_lookup_max_size_gb * 1024 ** 3)
         self.gpu_min_batch_voxels = occ.gpu_min_batch_voxels
+        self.gpu_batch_size = occ.gpu_batch_size
         if self.ray_lookup_enabled and njit is None:
             warnings.warn("驾驶占用路径查表需要 Numba；当前退回逐射线 DDA，请安装 numba>=0.67,<0.68。",
                           RuntimeWarning, stacklevel=2)
@@ -304,6 +305,52 @@ class DrivingOccupancyCache:
             return occupied, mask
         return self._read_or_build("scene", scene_dir, frame_idx, build)
 
+    def _scene_bounds(self, ego_pose):
+        """计算当前 Ego 体素盒在世界系中的保守 AABB；几何分支留在 CPU。"""
+        corners = np.stack(np.meshgrid(*zip(self.lo, self.hi), indexing="ij"), -1)
+        world_corners = transform_points(corners.reshape(-1, 3),
+                                         transform_matrix(ego_pose))
+        return world_corners.min(0) - 1e-9, world_corners.max(0) + 1e-9
+
+    def _scene_occupancy_gpu_batch(self, records, payloads):
+        """把多个样本的静态点打包后一次完成 Ego 变换和体素写入。"""
+        chunks, sample_ids = [], []
+        matrices = []
+        for sample_id, (record, payload) in enumerate(zip(records, payloads)):
+            minimum, maximum = self._scene_bounds(record["pose"])
+            points = payload["static"]["xyz"]
+            points = points.numpy() if isinstance(points, torch.Tensor) else np.asarray(points)
+            points = points[np.all((points >= minimum - 1e-5)
+                                   & (points <= maximum + 1e-5), axis=1)]
+            if len(points):
+                chunks.append(points)
+                sample_ids.append(np.full(len(points), sample_id, dtype=np.int64))
+                matrices.append(np.repeat(
+                    world_to_ego(record["pose"])[None], len(points), axis=0))
+        outputs = [np.zeros(self.shape, dtype=bool) for _ in records]
+        if not chunks:
+            return outputs
+        points = torch.as_tensor(np.concatenate(chunks), device=self.device,
+                                 dtype=torch.float64)
+        transform = torch.as_tensor(np.concatenate(matrices), device=self.device,
+                                    dtype=torch.float64)
+        local = torch.bmm(points[:, None, :], transform[:, :3, :3].transpose(1, 2)).squeeze(1)
+        local = local + transform[:, :3, 3]
+        low = torch.as_tensor(self.lo, device=self.device, dtype=torch.float64)
+        dims = torch.as_tensor(self.dims, device=self.device)
+        index = torch.floor((local - low) / self.step).to(torch.int64)
+        valid = ((index >= 0) & (index < dims)).all(1)
+        index = index[valid]
+        batch = torch.as_tensor(np.concatenate(sample_ids), device=self.device,
+                                dtype=torch.int64)[valid]
+        flat = batch * int(np.prod(self.shape)) \
+            + index[:, 2] * (self.shape[1] * self.shape[2]) \
+            + index[:, 0] * self.shape[2] + index[:, 1]
+        occupied = torch.zeros((len(records), int(np.prod(self.shape))),
+                               dtype=torch.bool, device=self.device)
+        occupied.view(-1).index_fill_(0, flat, True)
+        return [item.cpu().numpy().reshape(self.shape) for item in occupied]
+
     def agent(self, scene_dir, frame_idx, ego_pose, boxes, visibility_builder,
               scene_occupied, intrinsics, extrinsics, image_shape):
         """命中时复用可见性；未命中才判定运动框并栅格化完整 OBB。"""
@@ -346,12 +393,68 @@ class DrivingOccupancyCache:
             return occupied, mask, visible
         return self._read_or_build("agent", scene_dir, frame_idx, build)
 
-    def _agent_occupancy_gpu(self, boxes, visible, ego_pose, ego_to_world):
-        """把当前帧所有可见框合成一次 GPU Batch OBB 测试。
+    def _agent_occupancy_cpu(self, boxes, visible, ego_pose, ego_to_world):
+        """CPU 处理小批量或不规则 Agent 候选，避免 GPU 启动开销。"""
+        occupied = np.zeros(self.shape, dtype=bool)
+        for _, centers, index, local_to_box, extent in self._agent_candidates(
+                boxes, visible, ego_pose, ego_to_world, 0):
+            box_local = transform_points(centers, local_to_box)
+            selected = index[np.all(np.abs(box_local) <= np.asarray(extent), axis=1)]
+            occupied[selected[:, 2], selected[:, 0], selected[:, 1]] = True
+        return occupied
 
-        框的数量和包围盒范围属于 CPU 控制流；体素中心到 Box 坐标的刚性变换
-        才是规则的数值密集部分，因此一次性用 ``bmm`` 处理全部候选体素。
-        """
+    def prepare_batch(self, records):
+        """批量生成多个样本的场景和 Agent 占用，文件缓存仍逐样本落盘。"""
+        if not records:
+            return
+        payloads = [self._payload(record["scene_dir"]) for record in records]
+        for record in records:
+            record["ego_to_world"] = transform_matrix(record["pose"])
+        if self.device.type == "cuda" and len(records) > 1:
+            scene_occupied = self._scene_occupancy_gpu_batch(records, payloads)
+        else:
+            scene_occupied = []
+            for record, payload in zip(records, payloads):
+                minimum, maximum = self._scene_bounds(record["pose"])
+                if self.device.type == "cuda":
+                    points = payload["static"]["xyz"].to(self.device)
+                    occupied = self._scene_voxels_gpu(points, record["pose"],
+                                                       minimum, maximum)
+                else:
+                    points = payload["static"]["xyz"].numpy()
+                    points = points[np.all((points >= minimum) & (points <= maximum), axis=1)]
+                    occupied = self._scene_voxels_cpu(points, record["pose"])
+                scene_occupied.append(occupied)
+        scene_occupied = list(scene_occupied)
+        scene_mask = self._visibility_batch(np.stack(scene_occupied), records)
+        for record, occupied, mask in zip(records, scene_occupied, scene_mask):
+            self._read_or_build(
+                "scene", record["scene_dir"], record["frame_idx"],
+                lambda _payload, result=(occupied, mask): result)
+
+        agent_occupied = (self._agent_occupancy_gpu_batch(records)
+                          if self.device.type == "cuda" else None)
+        if agent_occupied is None:
+            agent_occupied = [self._agent_occupancy_cpu(
+                record["boxes"], record["visible"], record["pose"],
+                record["ego_to_world"]) for record in records]
+        agent_input = np.stack([
+            scene | agent for scene, agent in zip(scene_occupied, agent_occupied)])
+        agent_mask = self._visibility_batch(agent_input, records)
+        for record, occupied, mask in zip(records, agent_occupied, agent_mask):
+            self._read_or_build(
+                "agent", record["scene_dir"], record["frame_idx"],
+                lambda _payload, result=(occupied, mask, record["visible"]): result)
+
+    def _agent_occupancy_gpu(self, boxes, visible, ego_pose, ego_to_world):
+        """兼容单帧入口；实际计算统一复用跨样本 Batch 实现。"""
+        record = {"boxes": boxes, "visible": visible, "pose": ego_pose,
+                  "ego_to_world": ego_to_world}
+        result = self._agent_occupancy_gpu_batch([record])
+        return None if result is None else result[0]
+
+    def _agent_candidates(self, boxes, visible, ego_pose, ego_to_world, sample_id):
+        """在 CPU 生成变长 Box 候选体素，返回 GPU Batch 所需的轻量记录。"""
         candidates = []
         for box, keep in zip(boxes, visible):
             if not keep:
@@ -370,38 +473,53 @@ class DrivingOccupancyCache:
                                 low[2]:high[2] + 1]
             index = np.stack((x, y, z), -1).reshape(-1, 3)
             centers = self.lo + (index + .5) * self.step
-            candidates.append((centers, index, local_to_box, box["extent"]))
+            candidates.append((sample_id, centers, index, local_to_box, box["extent"]))
+        return candidates
+
+    def _agent_occupancy_gpu_batch(self, records):
+        """把多个样本的全部可见框合并成一个 GPU Batch OBB 测试。"""
+        candidates = [item for sample_id, record in enumerate(records)
+                      for item in self._agent_candidates(
+                          record["boxes"], record["visible"], record["pose"],
+                          record["ego_to_world"], sample_id)]
+        outputs = [np.zeros(self.shape, dtype=bool) for _ in records]
         if not candidates:
-            return np.zeros(self.shape, dtype=bool)
-        if sum(len(item[0]) for item in candidates) < self.gpu_min_batch_voxels:
+            return outputs
+        if sum(len(item[1]) for item in candidates) < self.gpu_min_batch_voxels:
             return None
-        occupied = torch.zeros(int(np.prod(self.shape)), dtype=torch.bool,
-                               device=self.device)
-        max_count = max(len(item[0]) for item in candidates)
+        occupied = torch.zeros((len(records), int(np.prod(self.shape))),
+                               dtype=torch.bool, device=self.device)
+        max_count = max(len(item[1]) for item in candidates)
         count = len(candidates)
         centers = np.zeros((count, max_count, 3), dtype=np.float64)
         indices = np.zeros((count, max_count, 3), dtype=np.int64)
         valid = np.zeros((count, max_count), dtype=bool)
-        for row, (item_centers, item_indices, _, _) in enumerate(candidates):
+        sample_ids = np.empty(count, dtype=np.int64)
+        for row, (sample_id, item_centers, item_indices, _, _) in enumerate(candidates):
             size = len(item_centers)
+            sample_ids[row] = sample_id
             centers[row, :size] = item_centers
             indices[row, :size] = item_indices
             valid[row, :size] = True
-        matrices = torch.as_tensor(np.stack([item[2][:3, :3] for item in candidates]),
+        matrices = torch.as_tensor(np.stack([item[3][:3, :3] for item in candidates]),
                                    device=self.device, dtype=torch.float64)
-        translations = torch.as_tensor(np.stack([item[2][:3, 3] for item in candidates]),
+        translations = torch.as_tensor(np.stack([item[3][:3, 3] for item in candidates]),
                                        device=self.device, dtype=torch.float64)
-        extents = torch.as_tensor(np.stack([item[3] for item in candidates]),
+        extents = torch.as_tensor(np.stack([item[4] for item in candidates]),
                                   device=self.device, dtype=torch.float64)
         centers_gpu = torch.as_tensor(centers, device=self.device, dtype=torch.float64)
         local = torch.bmm(centers_gpu, matrices.transpose(1, 2)) + translations[:, None]
         inside = ((local.abs() <= extents[:, None]).all(2)
                   & torch.as_tensor(valid, device=self.device))
         indices = torch.as_tensor(indices, device=self.device, dtype=torch.int64)[inside]
-        flat = indices[:, 2] * (self.shape[1] * self.shape[2]) \
+        row_ids = torch.as_tensor(np.repeat(sample_ids[:, None], max_count, axis=1),
+                                  device=self.device, dtype=torch.int64)
+        rows = row_ids[inside]
+        flat = rows * int(np.prod(self.shape)) \
+            + indices[:, 2] * (self.shape[1] * self.shape[2]) \
             + indices[:, 0] * self.shape[2] + indices[:, 1]
-        occupied.index_fill_(0, flat, True)
-        return occupied.reshape(self.shape).cpu().numpy()
+        occupied.view(-1).index_fill_(0, flat, True)
+        return [item.cpu().numpy().reshape(self.shape) for item in occupied]
 
     def _scene_voxels_cpu(self, points, ego_pose):
         local = transform_points(points, world_to_ego(ego_pose))
@@ -515,6 +633,45 @@ class DrivingOccupancyCache:
             visible[ids] |= blocked == 0
         return visible.cpu().numpy().reshape(self.shape)
 
+    def _lookup_visibility_torch_batch(self, occupied, tables):
+        """对多个样本共享的射线表执行 Batch gather 和分段规约。"""
+        if self._ray_gpu_tables is None:
+            self._ray_gpu_tables = [(
+                torch.as_tensor(ids, device=self.device),
+                torch.as_tensor(np.diff(offsets), device=self.device),
+                torch.as_tensor(indices.view(np.int32), device=self.device))
+                for ids, offsets, indices in tables]
+        flat = torch.as_tensor(occupied.reshape(len(occupied), -1), device=self.device)
+        visible = torch.zeros_like(flat, dtype=torch.bool)
+        for ids, lengths, indices in self._ray_gpu_tables:
+            path_occupied = flat.index_select(1, indices).to(torch.float32)
+            blocked = torch.segment_reduce(
+                path_occupied.reshape(-1), "max", lengths=lengths.repeat(len(occupied)),
+                initial=0).reshape(len(occupied), -1)
+            visible[:, ids] |= blocked == 0
+        return visible.cpu().numpy().reshape((len(occupied),) + self.shape)
+
+    def _visibility_batch(self, occupied, records):
+        """相同相机标定时批量查询多个场景，否则逐样本保留精确回退。"""
+        if not records:
+            return []
+        views = [self._camera_candidates(record["intrinsics"], record["extrinsics"],
+                                          record["image_shape"])
+                 for record in records]
+        same_views = all(
+            len(candidate) == len(views[0]) and all(
+                np.array_equal(item[0], reference[0]) and
+                np.array_equal(item[1], reference[1])
+                for item, reference in zip(candidate, views[0]))
+            for candidate in views[1:])
+        if self.device.type == "cuda" and same_views:
+            tables = self._build_ray_tables(views[0])
+            if tables is not None:
+                return list(self._lookup_visibility_torch_batch(occupied, tables))
+        return [self._visibility(item, record["intrinsics"], record["extrinsics"],
+                                 record["image_shape"])
+                for item, record in zip(occupied, records)]
+
     def _visibility(self, occupied, intrinsics, extrinsics, image_shape):
         centers = self._grid_centers()
         views = self._camera_candidates(intrinsics, extrinsics, image_shape)
@@ -588,10 +745,21 @@ class _OccupancyWarmupDataset(Dataset):
         self.dataset._prepare_occupancy_sample(index)
         return index
 
+    def __getitems__(self, positions):
+        """DataLoader 批量索引入口；CUDA 预生成在这里合并样本张量。"""
+        indices = [self.indices[position] for position in positions]
+        self.dataset._prepare_occupancy_batch(indices)
+        return indices
+
+
+def _keep_warmup_indices(batch):
+    """保留批量索引，避免 DataLoader 对进度统计做额外张量拼接。"""
+    return batch
+
 
 def prepare_driving_occupancy_cache(dataset, num_workers, prefetch_factor,
                                     in_order, progress_every):
-    """只为缺失帧生成场景与 Agent 缓存，不构建训练模型或其他监督。"""
+    """只为缺失帧生成场景与 Agent 缓存；CUDA 时按样本 Batch 计算。"""
     check_cache_prepare(dataset, num_workers, prefetch_factor, progress_every)
     total = len(dataset)
     missing = []
@@ -608,15 +776,24 @@ def prepare_driving_occupancy_cache(dataset, num_workers, prefetch_factor,
     dataset._occupancy._fused.clear()
     if not missing:
         return {"existing": total, "built": 0, "total": total}
-    workers = 0 if dataset._occupancy.device.type == "cuda" else num_workers
-    kwargs = {"batch_size": None, "num_workers": workers,
+    use_cuda_batch = dataset._occupancy.device.type == "cuda"
+    workers = 0 if use_cuda_batch else num_workers
+    kwargs = {"batch_size": (dataset._occupancy.gpu_batch_size
+                              if use_cuda_batch else None),
+              "num_workers": workers,
               "persistent_workers": False}
+    if use_cuda_batch:
+        kwargs["collate_fn"] = _keep_warmup_indices
     if workers:
         kwargs.update(prefetch_factor=prefetch_factor, in_order=in_order)
     loader = DataLoader(_OccupancyWarmupDataset(dataset, missing), **kwargs)
-    for built, index in enumerate(loader, 1):
-        if built == 1 or built % progress_every == 0 or built == len(missing):
+    built = 0
+    for batch in loader:
+        batch_size = len(batch) if use_cuda_batch else 1
+        built += batch_size
+        if built == batch_size or built % progress_every == 0 or built == len(missing):
+            last_index = int(batch[-1]) if use_cuda_batch else int(batch)
             print("[driving-cache] build={}/{} frame={}/{}".format(
-                built, len(missing), int(index) + 1, total), flush=True)
+                built, len(missing), last_index + 1, total), flush=True)
     return {"existing": total - len(missing), "built": len(missing), "total": total}
 

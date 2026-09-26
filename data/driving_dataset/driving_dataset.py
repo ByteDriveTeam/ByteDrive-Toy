@@ -199,11 +199,29 @@ class DrivingDataset(SingleFrameSceneBase):
             "detect_future_valid": torch.from_numpy(detect_future_valid),
         }
 
+    def __getitems__(self, indices):
+        """DataLoader 批量索引入口；CUDA 时先合并缺失占用再读取完整样本。"""
+        if self._occupancy.device.type == "cuda" and len(indices) > 1:
+            self._prepare_occupancy_batch(indices)
+        return [self.__getitem__(index) for index in indices]
+
     def _prepare_occupancy_sample(self, i: int) -> None:
         """只读取当前帧并预生成两份占用缓存，跳过历史图像、地图和轨迹监督。"""
+        self._prepare_occupancy_batch([i])
+
+    def _prepare_occupancy_batch(self, indices) -> None:
+        """读取一批轻量帧记录，交给占用缓存统一进行 GPU 张量预处理。"""
+        records = [self._occupancy_record(i) for i in indices]
+        records = [record for record in records
+                   if not self._occupancy.contains(record["scene_dir"], record["frame_idx"])]
+        if records:
+            self._occupancy.prepare_batch(records)
+
+    def _occupancy_record(self, i):
+        """读取占用预生成所需的 CPU 元数据和可见 Agent 标记。"""
         scene_dir, frame_idx = self.frame_index[i]
         if self._occupancy.contains(scene_dir, frame_idx):
-            return
+            return {"scene_dir": scene_dir, "frame_idx": frame_idx, "skip": True}
         reader = self.reader(scene_dir)
         meta = reader.meta
         cameras = self._cameras
@@ -216,13 +234,18 @@ class DrivingDataset(SingleFrameSceneBase):
         image_shape = self._image_shape
         moving = [box for box in frame["bboxes"]
                   if box.get("semantic") in ("vehicle", "pedestrian")]
-        scene_occ, _ = self._occupancy.scene(
-            scene_dir, frame_idx, pose, intrinsics, extrinsics, image_shape)
-        self._occupancy.agent(
-            scene_dir, frame_idx, pose, moving,
-            lambda: self._visible_agents_for_frame(
-                frame, meta, cameras, intrinsics, extrinsics, pose, moving),
-            scene_occ, intrinsics, extrinsics, image_shape)
+        visible = self._visible_agents_for_frame(
+            frame, meta, cameras, intrinsics, extrinsics, pose, moving)
+        return {
+            "scene_dir": scene_dir,
+            "frame_idx": frame_idx,
+            "pose": pose,
+            "boxes": moving,
+            "visible": np.asarray(visible, dtype=bool),
+            "intrinsics": intrinsics,
+            "extrinsics": extrinsics,
+            "image_shape": image_shape,
+        }
 
     def _visible_agents_for_frame(self, frame, meta, cameras, intrinsics,
                                   extrinsics, pose, moving):

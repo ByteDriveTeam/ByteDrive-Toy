@@ -530,6 +530,7 @@ model:
       ray_lookup_enabled: true   # 相机固定标定下预计算逐体素遮挡路径，CPU/GPU 共用
       ray_lookup_max_size_gb: 5.0 # 单 worker 表与 GPU 查询临时内存预算；超限回退 DDA
       gpu_min_batch_voxels: 4096 # 当前帧候选框体素总量低于此值时留在 CPU，避免小 kernel 变慢
+      gpu_batch_size: 8           # CUDA 预生成一次合并的样本数；显存不足时调小
       prebuild: false            # true=训练前预生成缺失占用；false=首轮按需写入
       progress_every: 100        # 预生成进度输出间隔（帧）
       visibility_chunk: 4096    # 向量化精确 DDA 的单批射线数

@@ -564,6 +564,7 @@ class OccupancyCfg:
     ray_lookup_enabled: bool
     ray_lookup_max_size_gb: float
     gpu_min_batch_voxels: int
+    gpu_batch_size: int
     prebuild: bool
     progress_every: int
     visibility_chunk: int
@@ -1872,6 +1873,9 @@ def _validate_driving(dv):
         and isinstance(occ.gpu_min_batch_voxels, int) \
         and not isinstance(occ.gpu_min_batch_voxels, bool) \
         and occ.gpu_min_batch_voxels > 0 \
+        and isinstance(occ.gpu_batch_size, int) \
+        and not isinstance(occ.gpu_batch_size, bool) \
+        and occ.gpu_batch_size > 0 \
         and (not occ.prebuild or occ.cache_enabled), \
         "占用网格须与 LiDAR 体素对齐且缓存容量为正"
     assert det.num_queries > 0 and det.num_classes == 2 and 0 < det.no_object_weight <= 1 \
