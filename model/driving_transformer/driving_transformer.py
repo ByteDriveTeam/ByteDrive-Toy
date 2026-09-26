@@ -161,14 +161,10 @@ class DrivingTransformer(nn.Module):
         tokens = torch.cat((self.bev_tokens, self.detect_tokens), 1).expand(batch, -1, -1)
         query_hint = self.query_ray_mlp(_symlog(query_rays.float(), self.scale).flatten(2))
         image_hint = self.key_ray_mlp(_symlog(image_rays.float(), self.scale).flatten(2))
-        q_pos = xyz.clone()
-        q_pos[..., 2] = 0
-        k_pos = image_rays[:, :, 0, 0].clone()
-        k_pos[..., 2] = image_time
-        ca_q_pos = q_pos.clone()
-        ca_k_pos = k_pos.clone()
-        ca_q_pos[..., :2] = _symlog(ca_q_pos[..., :2], self.scale)
-        ca_k_pos[..., :2] = _symlog(ca_k_pos[..., :2], self.scale)
+        q_pos = torch.cat((xyz[..., :2], torch.zeros_like(xyz[..., 2:])), dim=-1)
+        k_pos = torch.cat((image_rays[:, :, 0, 0, :2], image_time.unsqueeze(-1)), dim=-1)
+        ca_q_pos = torch.cat((_symlog(q_pos[..., :2], self.scale), q_pos[..., 2:]), dim=-1)
+        ca_k_pos = torch.cat((_symlog(k_pos[..., :2], self.scale), k_pos[..., 2:]), dim=-1)
         bev_layers, detect_layers = [], []
         for index, layer in enumerate(self.layers):
             fuse = None if lidar_fusers is None or index not in (0, 2, 4) else lidar_fusers[index // 2]
