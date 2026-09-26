@@ -339,7 +339,7 @@ class DrivingOccupancyCache:
                 selected = index[inside]
                 occupied[selected[:, 2], selected[:, 0], selected[:, 1]] = True
             # 负样本只来自场景与 Agent 都无遮挡的相机可见区域；正样本全框监督。
-            if self.device.type == "cuda":
+            if isinstance(occupied, torch.Tensor):
                 occupied = occupied.cpu().numpy()
             mask = self._visibility(scene_occupied | occupied, intrinsics,
                                     extrinsics, image_shape) | occupied
