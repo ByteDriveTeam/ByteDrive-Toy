@@ -519,7 +519,9 @@ def _normalize_dynamic(local_xyz, tags, model_actors, poses):
     sorted_pose_actor = poses["actor_id"][pose_actor_order]
     first_pose = torch.searchsorted(sorted_pose_actor, actor_id)
     first_pose_indices = pose_actor_order[first_pose]
-    point_object = torch.searchsorted(actor_id, model_actors)
+        # model_actors 可能是切片或 permute 产生的非连续视图；显式连续化，
+        # 避免 searchsorted 在内部重复触发隐式拷贝。
+        point_object = torch.searchsorted(actor_id, model_actors.contiguous())
     point_order = torch.argsort(point_object)
     point_counts = torch.bincount(point_object, minlength=len(actor_id)).to(torch.int64)
     point_offsets = torch.cat((torch.zeros(1, dtype=torch.int64), torch.cumsum(point_counts, 0)))
