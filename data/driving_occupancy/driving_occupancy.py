@@ -9,7 +9,8 @@
 说明: 静态占用只取融合 PT 的 static.xyz；两种监督分开生成、分开存储。
       Agent 缓存同时保存逐框可见性，供 Detect 监督复用；旧 Agent 缓存按版本自动重建。
       可见性按每个体素中心到相机的精确网格穿越计算，目标体素不算遮挡。
-      固定标定的完整 DDA 路径预计算后由 CPU/GPU 共用；超限回退逐射线 DDA。
+      固定标定的完整 DDA 路径预计算后由 CPU/GPU 共用；超限回退到 CPU 逐射线 DDA。
+      CUDA 栅格化把同一帧的全部 Agent 框合成一次 Batch 矩阵乘法，避免逐框小 kernel。
 """
 
 from __future__ import annotations
@@ -165,6 +166,7 @@ class DrivingOccupancyCache:
         self.cpu_threads = occ.cpu_threads
         self.ray_lookup_enabled = occ.ray_lookup_enabled
         self.ray_lookup_max_bytes = int(occ.ray_lookup_max_size_gb * 1024 ** 3)
+        self.gpu_min_batch_voxels = occ.gpu_min_batch_voxels
         if self.ray_lookup_enabled and njit is None:
             warnings.warn("驾驶占用路径查表需要 Numba；当前退回逐射线 DDA，请安装 numba>=0.67,<0.68。",
                           RuntimeWarning, stacklevel=2)
@@ -307,11 +309,18 @@ class DrivingOccupancyCache:
         """命中时复用可见性；未命中才判定运动框并栅格化完整 OBB。"""
         def build(_payload):
             visible = np.asarray(visibility_builder(), dtype=bool)
-            occupied = (torch.zeros(self.shape, dtype=torch.bool, device=self.device)
-                        if self.device.type == "cuda" else np.zeros(self.shape, dtype=bool))
             ego_to_world = transform_matrix(ego_pose)
+            use_gpu = self.device.type == "cuda"
+            if self.device.type == "cuda":
+                occupied = self._agent_occupancy_gpu(boxes, visible, ego_pose,
+                                                     ego_to_world)
+                use_gpu = occupied is not None
+                if not use_gpu:
+                    occupied = np.zeros(self.shape, dtype=bool)
+            else:
+                occupied = np.zeros(self.shape, dtype=bool)
             for box, keep in zip(boxes, visible):
-                if not keep:
+                if not keep or use_gpu:
                     continue
                 world_to_box = np.linalg.inv(transform_matrix([
                     *box["location"], *box["rotation"]]))
@@ -325,24 +334,74 @@ class DrivingOccupancyCache:
                 x, y, z = np.mgrid[low[0]:high[0]+1, low[1]:high[1]+1, low[2]:high[2]+1]
                 index = np.stack((x, y, z), -1).reshape(-1, 3)
                 centers = self.lo + (index + .5) * self.step
-                if self.device.type == "cuda":
-                    xyz = torch.as_tensor(centers, device=self.device, dtype=torch.float64)
-                    matrix = torch.as_tensor(local_to_box, device=self.device, dtype=torch.float64)
-                    extent = torch.as_tensor(box["extent"], device=self.device, dtype=torch.float64)
-                    inside = ((xyz @ matrix[:3, :3].T + matrix[:3, 3]).abs() <= extent).all(1)
-                    selected = torch.as_tensor(index, device=self.device)[inside]
-                else:
-                    box_local = transform_points(centers, local_to_box)
-                    inside = np.all(np.abs(box_local) <= np.asarray(box["extent"]), axis=1)
-                    selected = index[inside]
+                box_local = transform_points(centers, local_to_box)
+                inside = np.all(np.abs(box_local) <= np.asarray(box["extent"]), axis=1)
+                selected = index[inside]
                 occupied[selected[:, 2], selected[:, 0], selected[:, 1]] = True
+            # 负样本只来自场景与 Agent 都无遮挡的相机可见区域；正样本全框监督。
             if self.device.type == "cuda":
                 occupied = occupied.cpu().numpy()
-            # 负样本只来自场景与 Agent 都无遮挡的相机可见区域；正样本全框监督。
             mask = self._visibility(scene_occupied | occupied, intrinsics,
                                     extrinsics, image_shape) | occupied
             return occupied, mask, visible
         return self._read_or_build("agent", scene_dir, frame_idx, build)
+
+    def _agent_occupancy_gpu(self, boxes, visible, ego_pose, ego_to_world):
+        """把当前帧所有可见框合成一次 GPU Batch OBB 测试。
+
+        框的数量和包围盒范围属于 CPU 控制流；体素中心到 Box 坐标的刚性变换
+        才是规则的数值密集部分，因此一次性用 ``bmm`` 处理全部候选体素。
+        """
+        candidates = []
+        for box, keep in zip(boxes, visible):
+            if not keep:
+                continue
+            world_to_box = np.linalg.inv(transform_matrix([
+                *box["location"], *box["rotation"]]))
+            local_to_box = world_to_box @ ego_to_world
+            corners = transform_points(bbox_corners(box), world_to_ego(ego_pose))
+            low = np.maximum(np.floor((corners.min(0) - self.lo) / self.step).astype(int), 0)
+            high = np.minimum(np.ceil((corners.max(0) - self.lo) / self.step).astype(int),
+                              self.dims - 1)
+            if np.any(low > high):
+                continue
+            x, y, z = np.mgrid[low[0]:high[0] + 1,
+                                low[1]:high[1] + 1,
+                                low[2]:high[2] + 1]
+            index = np.stack((x, y, z), -1).reshape(-1, 3)
+            centers = self.lo + (index + .5) * self.step
+            candidates.append((centers, index, local_to_box, box["extent"]))
+        if not candidates:
+            return np.zeros(self.shape, dtype=bool)
+        if sum(len(item[0]) for item in candidates) < self.gpu_min_batch_voxels:
+            return None
+        occupied = torch.zeros(int(np.prod(self.shape)), dtype=torch.bool,
+                               device=self.device)
+        max_count = max(len(item[0]) for item in candidates)
+        count = len(candidates)
+        centers = np.zeros((count, max_count, 3), dtype=np.float64)
+        indices = np.zeros((count, max_count, 3), dtype=np.int64)
+        valid = np.zeros((count, max_count), dtype=bool)
+        for row, (item_centers, item_indices, _, _) in enumerate(candidates):
+            size = len(item_centers)
+            centers[row, :size] = item_centers
+            indices[row, :size] = item_indices
+            valid[row, :size] = True
+        matrices = torch.as_tensor(np.stack([item[2][:3, :3] for item in candidates]),
+                                   device=self.device, dtype=torch.float64)
+        translations = torch.as_tensor(np.stack([item[2][:3, 3] for item in candidates]),
+                                       device=self.device, dtype=torch.float64)
+        extents = torch.as_tensor(np.stack([item[3] for item in candidates]),
+                                  device=self.device, dtype=torch.float64)
+        centers_gpu = torch.as_tensor(centers, device=self.device, dtype=torch.float64)
+        local = torch.bmm(centers_gpu, matrices.transpose(1, 2)) + translations[:, None]
+        inside = ((local.abs() <= extents[:, None]).all(2)
+                  & torch.as_tensor(valid, device=self.device))
+        indices = torch.as_tensor(indices, device=self.device, dtype=torch.int64)[inside]
+        flat = indices[:, 2] * (self.shape[1] * self.shape[2]) \
+            + indices[:, 0] * self.shape[2] + indices[:, 1]
+        occupied.index_fill_(0, flat, True)
+        return occupied.reshape(self.shape).cpu().numpy()
 
     def _scene_voxels_cpu(self, points, ego_pose):
         local = transform_points(points, world_to_ego(ego_pose))
@@ -465,18 +524,16 @@ class DrivingOccupancyCache:
                     if self.device.type == "cuda" else self._lookup_visibility_cpu(
                         occupied, tables))
         visible = np.zeros(len(centers), dtype=bool)
-        occupied_gpu = (torch.as_tensor(occupied, device=self.device)
-                        if self.device.type == "cuda" else None)
         for in_view, origin in views:
             candidates = in_view[~visible[in_view]]
-            batches = ([candidates] if occupied_gpu is None and njit is not None
-                       else np.array_split(candidates, max(1, int(np.ceil(len(candidates) / self.chunk)))))
+            batches = ([candidates] if njit is not None else
+                       np.array_split(candidates, max(1, int(np.ceil(len(candidates) / self.chunk)))))
             for indices in batches:
                 if len(indices):
-                    visible[indices] = (self._unblocked_gpu(
-                        occupied_gpu, origin, centers[indices])
-                        if occupied_gpu is not None else self._unblocked(
-                            occupied, origin, centers[indices]))
+                    # 逐射线 DDA 有动态循环和大量布尔分支；GPU 上会因 kernel
+                    # 发射及同步成本变慢，故只让 CPU/Numba 执行这个回退路径。
+                    visible[indices] = self._unblocked(
+                        occupied, origin, centers[indices])
         return visible.reshape(self.shape)
 
     def _unblocked(self, occupied, origin, targets):
@@ -517,44 +574,6 @@ class DrivingOccupancyCache:
             tmax[rows] = np.where(advance, tmax[rows] + tdelta[rows], tmax[rows])
             active[rows] = np.any(current[rows] != target_index[rows], axis=1)
         return ~blocked
-
-    def _unblocked_gpu(self, occupied, origin, targets):
-        """与 CPU 相同的逐轴 DDA；仅将每批射线状态放在 CUDA。"""
-        device = self.device
-        xyz = torch.as_tensor(targets, device=device, dtype=torch.float64)
-        low = torch.as_tensor(self.lo, device=device)
-        origin = torch.as_tensor(origin, device=device, dtype=torch.float64)
-        dims = torch.as_tensor(self.dims, device=device)
-        start = (origin - low) / self.step
-        target_index = torch.floor((xyz - low) / self.step).to(torch.int64)
-        delta = (xyz - origin) / self.step
-        step = torch.sign(delta).to(torch.int64)
-        safe_delta = torch.where(delta == 0, 1, delta)
-        current = torch.floor(start).to(torch.int64).expand_as(target_index).clone()
-        boundary = current + (step > 0)
-        inf = torch.full_like(delta, float("inf"))
-        tmax = torch.where(step == 0, inf, (boundary - start) / safe_delta)
-        tdelta = torch.where(step == 0, inf, (1 / safe_delta).abs())
-        blocked = torch.zeros(len(targets), dtype=torch.bool, device=device)
-        active = (current != target_index).any(1)
-        while bool(active.any()):
-            rows = torch.nonzero(active).flatten()
-            cells = current[rows]
-            inside = ((cells >= 0) & (cells < dims)).all(1)
-            valid_rows = rows[inside]
-            valid_cells = current[valid_rows]
-            blocked[valid_rows] |= occupied[
-                valid_cells[:, 2], valid_cells[:, 0], valid_cells[:, 1]]
-            active &= ~blocked
-            rows = torch.nonzero(active).flatten()
-            if not len(rows):
-                break
-            advance = tmax[rows] == tmax[rows].min(1, keepdim=True).values
-            current[rows] += step[rows] * advance
-            tmax[rows] = torch.where(advance, tmax[rows] + tdelta[rows], tmax[rows])
-            active[rows] = (current[rows] != target_index[rows]).any(1)
-        return (~blocked).cpu().numpy()
-
 
 class _OccupancyWarmupDataset(Dataset):
     def __init__(self, dataset, indices):

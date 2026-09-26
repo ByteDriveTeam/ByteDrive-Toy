@@ -33,7 +33,7 @@ This is the single navigation entry for project documentation and source files. 
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 五帧三目驾驶数据集：分离占用、语义道路线、检测与轨迹监督。
 - [data/driving_occupancy/__init__.py](../data/driving_occupancy/__init__.py) — 重导出驾驶场景与 Agent 独立体素缓存及预生成入口。
-- [data/driving_occupancy/driving_occupancy.py](../data/driving_occupancy/driving_occupancy.py) — 场景和 Agent 独立生成并支持按需或预生成二值 3D 占用监督。
+- [data/driving_occupancy/driving_occupancy.py](../data/driving_occupancy/driving_occupancy.py) — 场景和 Agent 独立生成、固定相机射线查表，并支持 CUDA Batch 栅格化的二值 3D 占用监督。
 - [data/driving_occupancy/checks/__init__.py](../data/driving_occupancy/checks/__init__.py) — 独立占用缓存校验包。
 - [data/driving_occupancy/checks/driving_occupancy_checks.py](../data/driving_occupancy/checks/driving_occupancy_checks.py) — 独立占用缓存的数据来源、设备与预生成参数校验。
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz

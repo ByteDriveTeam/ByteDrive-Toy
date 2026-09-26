@@ -525,10 +525,11 @@ model:
       cache_dir: output/driving-occ-cache
       cache_max_size_gb: 32.0
       cache_enabled: true
-      compute_device: cpu        # cpu / auto / cuda；CUDA 路径需在目标机器实测后选择
+      compute_device: auto       # cpu / auto / cuda；auto 在可用时启用 CUDA 批量张量栅格化
       cpu_threads: 4             # 每个数据 worker 的 Numba DDA 线程数；4 worker 时总计约 16 线程
       ray_lookup_enabled: true   # 相机固定标定下预计算逐体素遮挡路径，CPU/GPU 共用
       ray_lookup_max_size_gb: 5.0 # 单 worker 表与 GPU 查询临时内存预算；超限回退 DDA
+      gpu_min_batch_voxels: 4096 # 当前帧候选框体素总量低于此值时留在 CPU，避免小 kernel 变慢
       prebuild: false            # true=训练前预生成缺失占用；false=首轮按需写入
       progress_every: 100        # 预生成进度输出间隔（帧）
       visibility_chunk: 4096    # 向量化精确 DDA 的单批射线数
