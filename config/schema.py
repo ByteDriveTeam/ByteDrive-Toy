@@ -588,6 +588,17 @@ class BevSegModelCfg:
 
 
 @dataclass
+class PrivilegedBevVaeModelCfg:
+    """特权 BEV 连续 latent VAE 的编码、瓶颈和解码参数。"""
+    in_layers: int
+    encoder_dim: int
+    downsample_kernel: int
+    encoder_residual_blocks: List[int]
+    latent_dim: int
+    decoder_channels: List[int]
+
+
+@dataclass
 class BevSegCacheCfg:
     """BEVSeg 压缩栅格磁盘缓存参数。"""
     enabled: bool
@@ -646,6 +657,25 @@ class BevSegGradientMonitorCfg:
 
 
 @dataclass
+class PrivilegedBevVaeNoiseCfg:
+    """特权 BEV VAE latent 噪声测定参数。"""
+    enabled: bool
+    max_samples: int
+    batch_size: int
+    seed: int
+    noise_scale: float
+    near_zero_std_threshold: float
+    output_dir: str
+
+
+@dataclass
+class PrivilegedBevVaeTrainCfg:
+    """特权 BEV VAE 的 KL 正则与噪声测定参数。"""
+    kl_weight: float
+    noise: PrivilegedBevVaeNoiseCfg
+
+
+@dataclass
 class DinoV3BackboneCfg:
     model_dir: str
     patch_size: int
@@ -687,6 +717,7 @@ class ModelCfg:
     physics: PhysicsCfg
     driving: DrivingCfg
     bevseg: BevSegModelCfg
+    privileged_bev_vae: PrivilegedBevVaeModelCfg
 
 
 @dataclass
@@ -812,6 +843,7 @@ class TrainCfg:
     loss_weights: LossWeightsCfg
     driving_loss_weights: DrivingLossWeightsCfg
     bevseg_loss_weights: BevSegLossWeightsCfg
+    privileged_bev_vae: PrivilegedBevVaeTrainCfg
 
 
 @dataclass
@@ -1193,10 +1225,12 @@ def validate_config(cfg):
     _validate_data_vis(cfg.data_vis)
     _validate_model(cfg.model)
     _validate_bevseg_model(cfg.model.bevseg)
+    _validate_privileged_bev_vae_model(cfg.model.privileged_bev_vae, cfg.data.bevseg)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
     _validate_bevseg_data(cfg.data.bevseg)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_bevseg_loss(cfg.train.bevseg_loss_weights, cfg.data.bevseg.layers)
+    _validate_privileged_bev_vae_train(cfg.train.privileged_bev_vae)
     _validate_bevseg_vis(cfg.bevseg_vis)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
@@ -1559,6 +1593,26 @@ def _validate_bevseg_model(model):
         "model.bevseg candidate/sample Top-k must be 8 and in 2..8"
 
 
+def _validate_privileged_bev_vae_model(model, data):
+    """校验对象: cfg.model.privileged_bev_vae —— 连续 latent VAE 结构。"""
+    assert model.in_layers == len(data.layers) + 2, \
+        "model.privileged_bev_vae.in_layers 必须等于语义层加方向层"
+    assert model.encoder_dim > 0 and model.encoder_dim % 2 == 0, \
+        "model.privileged_bev_vae.encoder_dim 必须为正偶数"
+    assert model.downsample_kernel == 2, \
+        "model.privileged_bev_vae.downsample_kernel 必须为 2"
+    assert len(model.encoder_residual_blocks) == 4 \
+        and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                for count in model.encoder_residual_blocks), \
+        "model.privileged_bev_vae.encoder_residual_blocks 必须为四个非负整数"
+    assert model.latent_dim > 0, "model.privileged_bev_vae.latent_dim 必须 > 0"
+    assert len(model.decoder_channels) == len(model.encoder_residual_blocks) \
+        and all(channel > 0 for channel in model.decoder_channels), \
+        "model.privileged_bev_vae.decoder_channels 必须与四级上采样对应"
+    assert data.resolution % (2 ** len(model.encoder_residual_blocks)) == 0, \
+        "data.bevseg.resolution 必须能被 VAE 下采样倍率整除"
+
+
 def _validate_bevseg_data(data):
     """鏍￠獙瀵硅薄: cfg.data.bevseg 鈥斺€?坐标和驾驶语义层契约。"""
     assert data.extent_m > 0 and data.resolution > 0, "data.bevseg 范围和分辨率非法"
@@ -1615,6 +1669,22 @@ def _validate_model(model):
     _validate_heads(model.heads)
     _validate_physics(model.physics)
     _validate_driving(model.driving)
+
+
+def _validate_privileged_bev_vae_train(train):
+    """校验对象: cfg.train.privileged_bev_vae —— KL 与噪声测定参数。"""
+    assert math.isfinite(train.kl_weight) and train.kl_weight >= 0, \
+        "train.privileged_bev_vae.kl_weight 必须为有限非负数"
+    noise = train.noise
+    assert isinstance(noise.enabled, bool), "privileged_bev_vae.noise.enabled 必须为布尔值"
+    assert noise.max_samples > 0 and noise.batch_size > 0, \
+        "privileged_bev_vae.noise.max_samples/batch_size 必须 > 0"
+    assert noise.seed >= 0 and math.isfinite(noise.noise_scale) and noise.noise_scale >= 0, \
+        "privileged_bev_vae.noise.seed/noise_scale 非法"
+    assert math.isfinite(noise.near_zero_std_threshold) \
+        and noise.near_zero_std_threshold >= 0, \
+        "privileged_bev_vae.noise.near_zero_std_threshold 非法"
+    assert noise.output_dir, "privileged_bev_vae.noise.output_dir 不能为空"
 
 
 def _validate_dinov3_backbone(bb):

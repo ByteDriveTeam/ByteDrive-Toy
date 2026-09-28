@@ -5,6 +5,7 @@
 读取配置: model.bevseg.stochastic_sampling, train.bevseg_loss_weights,
           train.bevseg_gradient_monitor, train.grad_accum_steps/log_every/grad_clip_norm
 对外接口:
+    - compute_bevseg_reconstruction_losses(logits, batch, cfg) -> (Tensor, dict)
     - compute_bevseg_losses(outputs, batch, cfg) -> (Tensor, dict)
     - train_bevseg_epoch(model, loader, optimizer, cfg, device) -> dict
     - evaluate_bevseg(model, loader, cfg, device) -> dict
@@ -17,6 +18,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from train.bevseg.checks.bevseg_checks import check_bevseg_batch
+
+
+def compute_bevseg_reconstruction_losses(logits, batch, cfg):
+    """计算共享的 BEVSeg 语义 BCE 与方向监督重建损失。"""
+    check_bevseg_batch(batch)
+    weights = cfg.train.bevseg_loss_weights
+    logits = logits.reshape_as(batch["bevseg"])
+    semantic_logits = logits[:, :10]
+    semantic_target = batch["semantic"]
+    class_losses = []
+    class_weights = []
+    for index, name in enumerate(cfg.data.bevseg.layers):
+        item = weights.semantic_classes[name]
+        bce = F.binary_cross_entropy_with_logits(
+            semantic_logits[:, index], semantic_target[:, index], reduction="none")
+        pixel_weight = 1.0 + (item.positive_weight - 1.0) * semantic_target[:, index]
+        class_losses.append((bce * pixel_weight).sum() /
+                            pixel_weight.sum().clamp_min(1.0) * item.bce_weight)
+        class_weights.append(item.bce_weight)
+    semantic = torch.stack(class_losses).sum() / torch.as_tensor(
+        class_weights, device=logits.device, dtype=logits.dtype).sum().clamp_min(1e-8)
+    direction_pred = logits[:, 10:12]
+    lane_mask = semantic_target[:, 1:5].amax(1, keepdim=True)
+    direction = (F.smooth_l1_loss(
+        direction_pred, batch["direction"], reduction="none") * lane_mask).sum()
+    direction = direction / lane_mask.expand_as(direction_pred).sum().clamp_min(1.0)
+    return semantic + weights.direction * direction, {
+        "semantic": semantic, "direction": direction,
+    }
 
 
 def compute_bevseg_losses(outputs, batch, cfg):

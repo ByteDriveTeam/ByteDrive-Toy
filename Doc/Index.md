@@ -16,6 +16,13 @@ This is the single navigation entry for project documentation and source files. 
 - [site/index.html](../site/index.html) — English primary project website
 - [site/index.zh-CN.html](../site/index.zh-CN.html) — Simplified Chinese project website
 
+## Privileged BEV VAE
+
+- [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) - Continuous-latent privileged BEV VAE and noise measurement
+- [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) - Continuous Gaussian latent VAE with four-stage encoder and decoder
+- [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) - Privileged BEV VAE reconstruction, KL loss, and epoch loop
+- [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) - Latent covariance, effective-rank, and perturbation measurement
+
 ## config/ — configuration and validation
 
 - [config/default.yaml](../config/default.yaml) — Default values for every ByteDrive parameter; the single value source

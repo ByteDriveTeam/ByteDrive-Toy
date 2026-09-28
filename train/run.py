@@ -10,6 +10,7 @@
         shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer /
         float32_matmul_precision / ckpt_dir / resume
     data.bevseg.cache.prebuild/progress_every
+    train.privileged_bev_vae.noise.enabled/output_dir (privileged_bev_vae task)
     （其余训练/模型/数据参数由各构造件各自读取）
 对外接口:
     - main(argv=None) -> None      # 命令行入口
@@ -38,10 +39,13 @@ from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
 from model.perception_model import PerceptionModel
 from model.bevseg_compressor import BEVSegCompressor
+from model.privileged_bev_vae import PrivilegedBEVVAE
 from train.checks.run_checks import check_runtime
 from train.loop import train_driving_epoch, train_one_epoch
 from train.bevseg import train_bevseg_epoch
+from train.privileged_bev_vae import train_privileged_bev_vae_epoch
 from train.optimizer import build_optimizer
+from tools.privileged_bev_vae_noise import measure_latent_noise
 
 _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
 
@@ -50,6 +54,8 @@ _TASKS = {
     "perception": (PerceptionModel, PerceptionDataset, train_one_epoch),
     "driving": (DrivingModel, DrivingDataset, train_driving_epoch),
     "bevseg": (BEVSegCompressor, BevSegDataset, train_bevseg_epoch),
+    "privileged_bev_vae": (PrivilegedBEVVAE, BevSegDataset,
+                            train_privileged_bev_vae_epoch),
 }
 
 
@@ -276,11 +282,12 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config, args.env)
-    if args.prepare_bevseg_cache and args.task != "bevseg":
+    if args.prepare_bevseg_cache and args.task not in ("bevseg", "privileged_bev_vae"):
         parser.error("--prepare-bevseg-cache 仅可与 --task bevseg 一起使用")
     model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
-    dataset = dataset_cls(cfg) if args.task == "bevseg" else None
-    if args.task == "bevseg" and (args.prepare_bevseg_cache or cfg.data.bevseg.cache.prebuild):
+    bev_task = args.task in ("bevseg", "privileged_bev_vae")
+    dataset = dataset_cls(cfg) if bev_task else None
+    if bev_task and (args.prepare_bevseg_cache or cfg.data.bevseg.cache.prebuild):
         try:
             stats = prepare_bevseg_cache(
                 dataset, cfg.train.num_workers, cfg.train.prefetch_factor,
@@ -328,12 +335,16 @@ def main(argv=None) -> None:
 
     for epoch in range(start_epoch, cfg.train.epochs):
         stats = (epoch_fn(model, loader, optimizer, cfg, device, epoch=epoch)
-                 if args.task == "bevseg"
+                 if args.task in ("bevseg", "privileged_bev_vae")
                  else epoch_fn(model, loader, optimizer, cfg, device))
         print("[train:{}] epoch {}/{} {}".format(
             args.task, epoch + 1, cfg.train.epochs,
             "  ".join("{}={:.4f}".format(k, v) for k, v in stats.items())))
         _save_checkpoint(model, optimizer, ckpt_dir / "epoch_{:03d}.pt".format(epoch + 1), epoch + 1)
+        if args.task == "privileged_bev_vae" and cfg.train.privileged_bev_vae.noise.enabled:
+            noise = measure_latent_noise(model, dataset, cfg, device, epoch=epoch)
+            print("[privileged_bev_vae-noise] epoch={} effective_rank={:.3f} near_zero={}".format(
+                noise["epoch"], noise["effective_rank"], noise["near_zero_count"]), flush=True)
 
 
 if __name__ == "__main__":

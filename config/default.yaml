@@ -537,6 +537,15 @@ model:
     sharpening_start: 0.0
     sharpening_end: 1.0
 
+  # 特权 BEV 连续 latent VAE：四级 2 倍下采样得到 16×16 空间 latent
+  privileged_bev_vae:
+    in_layers: 12
+    encoder_dim: 384
+    downsample_kernel: 2
+    encoder_residual_blocks: [2, 3, 2, 1]
+    latent_dim: 24
+    decoder_channels: [256, 192, 128, 96]
+
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
 # ============================================================
@@ -698,6 +707,18 @@ train:
       stop_line_red: {bce_weight: 1.0, positive_weight: 2.0}
       stop_line_yellow: {bce_weight: 1.0, positive_weight: 2.0}
       stop_line_green: {bce_weight: 1.0, positive_weight: 2.0}
+
+  # 特权 BEV VAE：监督重建 + 标准高斯 KL 正则；噪声测定在每个 epoch 后运行
+  privileged_bev_vae:
+    kl_weight: 0.0001
+    noise:
+      enabled: true
+      max_samples: 256
+      batch_size: 8
+      seed: 20260928
+      noise_scale: 1.0
+      near_zero_std_threshold: 0.0001
+      output_dir: output/privileged_bev_vae-noise
 
 # ============================================================
 # bevseg_vis —— BEVSeg 压缩器重建与量化特征 PCA 可视化
