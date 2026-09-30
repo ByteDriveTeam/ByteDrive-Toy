@@ -38,7 +38,10 @@ from data.bevseg_cache.checks.bevseg_cache_checks import (
 __all__ = ["BevSegDiskCache", "prepare_bevseg_cache"]
 
 
-_FORMAT_VERSION = 1
+# Version 2 stores the complete two-channel direction field.  Bumping this
+# value moves readers to a new namespace so entries written by format 1 cannot
+# be mistaken for valid cache payloads.
+_FORMAT_VERSION = 2
 _STATE_VERSION = 1
 
 
@@ -171,7 +174,7 @@ class BevSegDiskCache:
         semantic_bits = np.packbits(semantic.astype(np.uint8).reshape(-1), bitorder="little")
         buffer = io.BytesIO()
         arrays = {"semantic_bits": semantic_bits,
-                  "direction": np.ascontiguousarray(direction[0])}
+                  "direction": np.ascontiguousarray(direction)}
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED,
                              compresslevel=self.compression_level) as archive:
             for name, array in arrays.items():
