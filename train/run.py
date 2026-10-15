@@ -1,25 +1,25 @@
-"""训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重。
+"""统一训练入口 CLI：按任务加载配置，构建模型与数据，逐 epoch 训练并保存检查点。
 
 模块: train/run.py
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
       model.driving_model.DrivingModel, data.perception_dataset.PerceptionDataset,
       data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
-      data.bevseg_cache, train.optimizer, train.loop, train.checks.run_checks
+      data.bevseg_cache, train.optimizer, train.loop, train.bevseg,
+      train.privileged_bev_vae, train.bevseg_vae64, train.checks.run_checks
 读取配置:
-    train.device / epochs / batch_size / grad_accum_steps / num_workers / prefetch_factor / in_order /
-        shuffle / drop_last / pin_memory / persistent_workers / compile / fused_optimizer /
-        float32_matmul_precision / ckpt_dir / resume
-    data.bevseg.cache.prebuild/progress_every
-    train.privileged_bev_vae.noise.enabled/output_dir (privileged_bev_vae task)
-    train.bevseg_vae64.noise.enabled/output_dir (bevseg_vae64 task)
-    （其余训练/模型/数据参数由各构造件各自读取）
+    train.device / train.compile / train.float32_matmul_precision /
+        train.batch_size / train.num_workers / train.prefetch_factor / train.in_order /
+        train.shuffle / train.drop_last / train.pin_memory / train.persistent_workers /
+        train.ckpt_dir / train.resume / train.epochs
+    data.bevseg.cache.prebuild / data.bevseg.cache.progress_every
+    train.privileged_bev_vae.noise.enabled / train.bevseg_vae64.noise.enabled
+    （优化器、数据集和 epoch 函数读取的其余配置由对应模块负责）
 对外接口:
-    - main(argv=None) -> None      # 命令行入口
-说明: 全项目唯一的训练启动点，感知与驾驶两条路径共用装配/续训/保存逻辑，仅模型/数据集/epoch 函数不同
-      （--task 选择）。设备取 config，CUDA 不可用回退 CPU。检查点只保存非骨干权重（排除任何含 `backbone.`
-      的键），故驾驶模型也不落几十 M 的 DINO 权重、可断点续训。驾驶训练可用 --perception-ckpt 以感知预训练权重
-      初始化其视觉 fusion/trunk；语义/深度头权重不会加载到 Driving。num_workers>0 时 DataLoader 在 worker 内惰性建 SceneReader，
-      故入口置于 __main__ 守卫下。BEVSeg 可在构建模型前自动检测并预生成缺失栅格缓存。
+    - main(argv=None) -> None
+说明: 支持 perception、driving、bevseg、privileged_bev_vae 和 bevseg_vae64 五项任务。
+      相对检查点目录按任务分目录保存；检查点排除 `backbone.` 权重但保留优化器状态，支持兼容续训。
+      `--perception-ckpt` 只用于 driving 的 fusion/trunk 初始化；三个 BEV 任务可在建模前预热共享栅格缓存。
+      设备和 DataLoader 行为由 config 控制，CUDA 不可用时回退 CPU；多 worker 入口受 `__main__` 守卫保护。
 """
 
 from __future__ import annotations
@@ -52,7 +52,15 @@ from tools.privileged_bev_vae_noise import measure_latent_noise
 
 _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
 
-# 任务名 → (模型类, 数据集类, 训练 epoch 函数)；感知与驾驶共用其余装配逻辑
+_TASK_DESCRIPTIONS = {
+    "perception": "单帧相机感知（语义与深度）",
+    "driving": "双帧三目 + LiDAR 驾驶多任务",
+    "bevseg": "BEVSeg 离散压缩器",
+    "privileged_bev_vae": "特权 BEV 连续 latent VAE",
+    "bevseg_vae64": "整幅 BEV 64x 连续 latent VAE",
+}
+
+# 任务名 → (模型类, 数据集类, epoch 函数)；公共装配、续训和保存逻辑只保留一份。
 _TASKS = {
     "perception": (PerceptionModel, PerceptionDataset, train_one_epoch),
     "driving": (DrivingModel, DrivingDataset, train_driving_epoch),
@@ -62,6 +70,7 @@ _TASKS = {
     "bevseg_vae64": (BEVSegVAE64, BevSegDataset,
                       train_bevseg_vae64_epoch),
 }
+_BEV_TASKS = frozenset(("bevseg", "privileged_bev_vae", "bevseg_vae64"))
 
 
 def _compact_collate(samples):
@@ -103,7 +112,7 @@ def _resolve_device(requested: str) -> torch.device:
 
 
 def _resolve_ckpt_dir(ckpt_dir: str, task: str) -> Path:
-    """把相对检查点目录解析到仓库根下，并按 task 分子目录（感知/驾驶权重不混放）。"""
+    """把相对检查点目录解析到仓库根下，并按任务分子目录隔离。"""
     path = Path(ckpt_dir)
     base = path if path.is_absolute() else Path(__file__).resolve().parents[1] / path
     return base / task
@@ -272,25 +281,68 @@ def _load_perception_weights(model: DrivingModel, path) -> None:
             len(skipped_features), skipped_features[:5]))
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    """构造训练 CLI；参数默认值仍由配置文件提供。"""
+    task_lines = "\n".join(
+        "  {:<20} {}".format(name, _TASK_DESCRIPTIONS[name])
+        for name in _TASKS)
+    parser = argparse.ArgumentParser(
+        prog="python -m train.run",
+        description="ByteDrive 统一训练入口：构建数据、模型和优化器，按 epoch 保存检查点。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "任务说明:\n"
+            + task_lines
+            + "\n\n常用命令:\n"
+              "  python -m train.run --task perception --env <name>\n"
+              "  python -m train.run --task driving --env <name> --perception-ckpt <path>\n"
+              "  python -m train.run --task bevseg --prepare-bevseg-cache"
+        ),
+    )
+    parser.add_argument(
+        "--task", default="perception", choices=sorted(_TASKS),
+        help="训练任务（默认：perception；完整任务说明见命令末尾）",
+    )
+    parser.add_argument(
+        "--config", default=None, metavar="PATH",
+        help="主配置文件路径（默认：config/default.yaml）",
+    )
+    parser.add_argument(
+        "--env", default=None, metavar="NAME",
+        help="环境覆盖名，叠加 config/<NAME>.yaml",
+    )
+    parser.add_argument(
+        "--resume", default=None, metavar="PATH",
+        help="显式恢复检查点；省略时按 train.resume 自动选择任务目录中的最新检查点",
+    )
+    parser.add_argument(
+        "--perception-ckpt", default=None, metavar="PATH",
+        help="仅用于 driving：从感知检查点初始化 fusion/trunk",
+    )
+    parser.add_argument(
+        "--prepare-bevseg-cache", action="store_true",
+        help="仅预热三个 BEV 任务共享的栅格缓存，然后退出",
+    )
+    return parser
+
+
+def _validate_cli_args(parser: argparse.ArgumentParser, args) -> None:
+    """校验参数之间的关系，避免无效选项被静默忽略。"""
+    if args.prepare_bevseg_cache and args.task not in _BEV_TASKS:
+        parser.error("--prepare-bevseg-cache 仅可与 bevseg、privileged_bev_vae 或 bevseg_vae64 一起使用")
+    if args.perception_ckpt and args.task != "driving":
+        parser.error("--perception-ckpt 仅可与 --task driving 一起使用")
+
+
 def main(argv=None) -> None:
-    """训练主流程（感知或驾驶）。"""
-    parser = argparse.ArgumentParser(description="ByteDrive 训练（感知 / 驾驶）")
-    parser.add_argument("--task", default="perception", choices=sorted(_TASKS),
-                        help="训练目标：perception、driving 或 bevseg（BEVSeg 压缩器）")
-    parser.add_argument("--config", default=None, help="主配置文件路径（缺省用 config/default.yaml）")
-    parser.add_argument("--env", default=None, help="环境覆盖名（叠加 config/<env>.yaml）")
-    parser.add_argument("--resume", default=None, help="显式指定要恢复的检查点路径（覆盖自动续训）")
-    parser.add_argument("--perception-ckpt", default=None,
-                        help="驾驶训练时用于初始化感知子模块的感知检查点路径")
-    parser.add_argument("--prepare-bevseg-cache", action="store_true",
-                        help="仅预热 BEVSeg 压缩栅格缓存，不构建模型或开始训练")
+    """解析训练参数，构建对应任务并执行配置指定的 epoch 数。"""
+    parser = _build_parser()
     args = parser.parse_args(argv)
+    _validate_cli_args(parser, args)
 
     cfg = load_config(args.config, args.env)
-    if args.prepare_bevseg_cache and args.task not in ("bevseg", "privileged_bev_vae", "bevseg_vae64"):
-        parser.error("--prepare-bevseg-cache 仅可与 --task bevseg 一起使用")
     model_cls, dataset_cls, epoch_fn = _TASKS[args.task]
-    bev_task = args.task in ("bevseg", "privileged_bev_vae", "bevseg_vae64")
+    bev_task = args.task in _BEV_TASKS
     dataset = dataset_cls(cfg) if bev_task else None
     if bev_task and (args.prepare_bevseg_cache or cfg.data.bevseg.cache.prebuild):
         try:

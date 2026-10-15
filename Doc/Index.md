@@ -133,7 +133,7 @@ Python 3.12 collector:
 - [train/losses/losses.py](../train/losses/losses.py) — Multitask perception, field, lane, traffic-control, trajectory, behavior, and safety losses
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
-- [train/run.py](../train/run.py) — Unified task CLI for configuration, model/data/optimizer construction, epochs, and checkpoints
+- [train/run.py](../train/run.py) — Unified training CLI for perception, driving, BEVSeg, and continuous-latent VAE tasks, with cache warmup and checkpoint resume
 - [train/bevseg/bevseg.py](../train/bevseg/bevseg.py) — Weighted semantic reconstruction, direction, entropy regularization, and BEVSeg epoch loop
 
 ## clone_loop/ — behavior-cloning closed loop

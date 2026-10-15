@@ -115,7 +115,7 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
-- [train/run.py](../train/run.py) — 训练入口 CLI：按 --task 选择感知/驾驶目标，加载配置 → 建模型/数据/优化器 → 逐 epoch 训练并保存权重。
+- [train/run.py](../train/run.py) — 统一训练入口 CLI：按 --task 选择感知、驾驶、BEVSeg 或连续 latent VAE 任务，支持缓存预热、断点续训和逐 epoch 保存权重。
 
 ## clone_loop/ — 行为克隆闭环
 
