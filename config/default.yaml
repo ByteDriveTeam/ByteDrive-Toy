@@ -546,6 +546,15 @@ model:
     latent_dim: 24
     decoder_channels: [256, 192, 128, 96]
 
+  # 整幅 BEV 连续 latent VAE：六级 2 倍下采样得到 4×4、64 通道 latent
+  bevseg_vae64:
+    in_layers: 12
+    encoder_dim: 384
+    downsample_kernel: 2
+    encoder_residual_blocks: [2, 3, 2, 1, 1, 1]
+    latent_dim: 64
+    decoder_channels: [256, 192, 128, 96, 64, 32]
+
 # ============================================================
 # data —— 数据读取与预处理（data/ 实现文件只读本节，从 config 取参）
 # ============================================================
@@ -720,6 +729,18 @@ train:
       near_zero_std_threshold: 0.0001
       output_dir: output/privileged_bev_vae-noise
 
+  # 整幅 BEV VAE：监督重建与现有 BEV VAE 使用相同损失流程
+  bevseg_vae64:
+    kl_weight: 0.0001
+    noise:
+      enabled: false
+      max_samples: 256
+      batch_size: 8
+      seed: 20260928
+      noise_scale: 1.0
+      near_zero_std_threshold: 0.0001
+      output_dir: output/bevseg_vae64-noise
+
 # ============================================================
 # bevseg_vis —— BEVSeg 压缩器重建与量化特征 PCA 可视化
 # ============================================================
@@ -736,6 +757,17 @@ bevseg_vis:
 # ============================================================
 # pred_vis —— 感知模型预测可视化（加载权重，渲染三头预测，可并列 GT）
 # ============================================================
+
+# 特权 BEV VAE 可视化：复用 BEVSeg 的 target/reconstruction/detail/PCA 布局
+privileged_bev_vae_vis:
+  checkpoint: train/ckpt/privileged_bev_vae/epoch_010.pt
+  scene: ''
+  frame: -1
+  save_dir: vis/privileged_bev_vae_vis/out
+  device: cuda
+  semantic_threshold: 0.5
+  prior_samples: 0                         # >0 时额外渲染 z~N(0,I) 的先验采样重建
+  prior_seed: 20260928                     # 先验采样随机种子，便于复现实验
 
 pred_vis:
   checkpoint: train/ckpt/perception/epoch_010.pt  # 要加载的检查点（不存在则随机初始化并告警）

@@ -24,6 +24,8 @@ import numpy as np
 from vis.bevseg_vis.checks.bevseg_vis_checks import (
     check_bevseg_history,
     check_bevseg_reconstruction,
+    check_privileged_bev_vae_reconstruction,
+    check_privileged_bev_vae_prior_samples,
 )
 
 
@@ -32,6 +34,8 @@ __all__ = [
     "save_bevseg_history",
     "render_bevseg_reconstruction",
     "save_bevseg_reconstruction",
+    "render_privileged_bev_vae_reconstruction",
+    "save_privileged_bev_vae_reconstruction",
 ]
 
 
@@ -331,3 +335,171 @@ def _save_image(image, output_path):
     if not cv2.imwrite(str(output_path), image):
         raise IOError("无法写入 BEVSeg 可视化: {}".format(output_path))
     return output_path
+
+
+def _feature_pca_panel(features, title):
+    """将空间 latent 的前三个 PCA 分量绘制为与 BEVSeg 相同尺寸的面板。"""
+    features = np.asarray(features)
+    if features.ndim == 3:
+        channels, height, width = features.shape
+        samples = features.transpose(1, 2, 0).reshape(height * width, channels)
+    else:
+        samples = features
+        height = width = int(round(np.sqrt(samples.shape[0])))
+    if samples.shape[1] < 3:
+        samples = np.pad(samples, ((0, 0), (0, 3 - samples.shape[1])), mode="constant")
+    image = cv2.resize(_pca_rgb(samples), (_PANEL_SIZE, _PANEL_SIZE),
+                       interpolation=cv2.INTER_NEAREST)
+    step = _PANEL_SIZE // max(height, 1)
+    for coordinate in range(step, _PANEL_SIZE, step):
+        cv2.line(image, (coordinate, 0), (coordinate, _PANEL_SIZE - 1), (35, 35, 35), 1)
+        cv2.line(image, (0, coordinate), (_PANEL_SIZE - 1, coordinate), (35, 35, 35), 1)
+    cv2.rectangle(image, (0, 0), (_PANEL_SIZE - 1, 22), (10, 12, 15), -1)
+    cv2.putText(image, title, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                (235, 235, 235), 1, cv2.LINE_AA)
+    return image
+
+
+def _vae_info_panel(metrics, latent_mu, latent_logvar, metadata):
+    """绘制 VAE 重建指标、posterior 噪声和 latent 有效秩摘要。"""
+    panel = np.full((_PANEL_SIZE, _PANEL_SIZE, 3), _BACKGROUND, np.uint8)
+    flat = latent_mu.transpose(1, 2, 0).reshape(-1, latent_mu.shape[0]).astype(np.float64)
+    centered = flat - flat.mean(axis=0, keepdims=True)
+    covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
+    eigenvalues = np.linalg.eigvalsh(covariance).clip(0)[::-1]
+    effective_rank = ((eigenvalues.sum() ** 2) /
+                      max((eigenvalues ** 2).sum(), np.finfo(np.float64).eps))
+    posterior_std = np.exp(0.5 * np.clip(latent_logvar.astype(np.float64), -30.0, 20.0))
+    kl = 0.5 * (latent_mu.astype(np.float64) ** 2 +
+                np.exp(np.clip(latent_logvar.astype(np.float64), -30.0, 20.0)) -
+                1.0 - latent_logvar.astype(np.float64)).mean()
+    direction_text = "{:.4f}".format(metrics[1]) if metrics[1] is not None else "n/a"
+    lines = [
+        "VAE reconstruction summary",
+        "semantic mIoU  {:.4f}".format(metrics[0]),
+        "direction cos  {}".format(direction_text),
+        "semantic MAE   {:.4f}".format(metrics[2]),
+        "latent         {}x{}x{}".format(*latent_mu.shape),
+        "effective rank {:.2f}".format(effective_rank),
+        "posterior std  {:.4f}".format(posterior_std.mean()),
+        "KL raw         {:.4f}".format(kl),
+    ]
+    lines.extend("{}  {}".format(key, value) for key, value in (metadata or {}).items())
+    for index, line in enumerate(lines[:10]):
+        color = (235, 235, 235) if index == 0 else (205, 210, 215)
+        cv2.putText(panel, str(line), (7, 18 + index * 19), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.37, color, 1, cv2.LINE_AA)
+    return panel
+
+
+def _vae_prior_info_panel(metrics, sample_id, metadata):
+    """绘制标准正态先验采样的重建指标。"""
+    panel = np.full((_PANEL_SIZE, _PANEL_SIZE, 3), _BACKGROUND, np.uint8)
+    direction_text = "{:.4f}".format(metrics[1]) if metrics[1] is not None else "n/a"
+    lines = [
+        "prior sample {}".format(sample_id),
+        "semantic mIoU  {:.4f}".format(metrics[0]),
+        "direction cos  {}".format(direction_text),
+        "semantic MAE   {:.4f}".format(metrics[2]),
+        "z ~ N(0,I)",
+    ]
+    lines.extend("{}  {}".format(key, value) for key, value in (metadata or {}).items())
+    for index, line in enumerate(lines[:10]):
+        color = (235, 235, 235) if index == 0 else (205, 210, 215)
+        cv2.putText(panel, str(line), (7, 18 + index * 19), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.37, color, 1, cv2.LINE_AA)
+    return panel
+
+
+def render_privileged_bev_vae_reconstruction(
+        history, reconstruction_logits, latent_mu, latent_logvar,
+        semantic_layers, semantic_threshold, frame_ids=None, metadata=None,
+        prior_reconstruction_logits=None, prior_sample_ids=None):
+    """渲染特权 BEV VAE 的 target、重建、latent PCA 和逐层语义细节。"""
+    check_privileged_bev_vae_reconstruction(
+        history, reconstruction_logits, latent_mu, latent_logvar,
+        semantic_layers, semantic_threshold)
+    if prior_reconstruction_logits is not None:
+        check_privileged_bev_vae_prior_samples(
+            history, prior_reconstruction_logits, semantic_layers, semantic_threshold)
+    frame_ids = list(range(len(history))) if frame_ids is None else list(frame_ids)
+    if len(frame_ids) != len(history):
+        raise ValueError("frame_ids 数量必须与特权 BEV VAE 历史帧一致")
+    target_semantic = np.stack([sample["semantic"] for sample in history])
+    target_direction = np.stack([sample["direction"] for sample in history])
+    semantic_logits = reconstruction_logits[:, :len(semantic_layers)]
+    pred_semantic = 1.0 / (1.0 + np.exp(-np.clip(semantic_logits, -30.0, 30.0)))
+    pred_direction = reconstruction_logits[:, len(semantic_layers):]
+    lane_mask = pred_semantic[:, 1:5].max(axis=1, keepdims=True) > semantic_threshold
+    pred_direction = pred_direction * lane_mask
+    target_panels = [_composite_panel(semantic, direction, semantic_layers,
+                                      "target frame {}".format(frame_id), 0.5)
+                     for semantic, direction, frame_id in
+                     zip(target_semantic, target_direction, frame_ids)]
+    pred_panels = [_composite_panel(semantic, direction, semantic_layers,
+                                    "recon frame {}".format(frame_id), semantic_threshold)
+                   for semantic, direction, frame_id in
+                   zip(pred_semantic, pred_direction, frame_ids)]
+    metrics = _quality_metrics(target_semantic, pred_semantic, target_direction,
+                               pred_direction, semantic_threshold)
+    target_details = _detail_rows(
+        target_semantic[-1], target_direction[-1], semantic_layers, "target", 0.5)
+    pred_details = _detail_rows(
+        pred_semantic[-1], pred_direction[-1], semantic_layers, "recon", semantic_threshold)
+    rows = [
+        np.hstack(target_panels + [_vae_info_panel(metrics, latent_mu, latent_logvar, metadata)]),
+        *target_details,
+        np.hstack(pred_panels + [_feature_pca_panel(
+            latent_mu, "latent mu PCA ({}x{})".format(latent_mu.shape[1], latent_mu.shape[2]))]),
+        *pred_details,
+    ]
+    if prior_reconstruction_logits is not None:
+        prior_sample_ids = (list(range(1, prior_reconstruction_logits.shape[0] + 1))
+                            if prior_sample_ids is None else list(prior_sample_ids))
+        if len(prior_sample_ids) != prior_reconstruction_logits.shape[0]:
+            raise ValueError("prior_sample_ids 数量必须与先验采样数量一致")
+        for sample_logits, sample_id in zip(prior_reconstruction_logits, prior_sample_ids):
+            sample_semantic_logits = sample_logits[:, :len(semantic_layers)]
+            sample_semantic = 1.0 / (1.0 + np.exp(-np.clip(sample_semantic_logits, -30.0, 30.0)))
+            sample_direction = sample_logits[:, len(semantic_layers):]
+            sample_lane_mask = sample_semantic[:, 1:5].max(axis=1, keepdims=True) > semantic_threshold
+            sample_direction = sample_direction * sample_lane_mask
+            sample_panels = [
+                _composite_panel(semantic, direction, semantic_layers,
+                                 "prior #{} frame {}".format(sample_id, frame_id),
+                                 semantic_threshold)
+                for semantic, direction, frame_id in
+                zip(sample_semantic, sample_direction, frame_ids)]
+            sample_metrics = _quality_metrics(
+                target_semantic, sample_semantic, target_direction,
+                sample_direction, semantic_threshold)
+            rows.extend([
+                np.hstack(sample_panels + [_vae_prior_info_panel(
+                    sample_metrics, sample_id, metadata)]),
+                *_detail_rows(sample_semantic[-1], sample_direction[-1],
+                              semantic_layers, "prior #{}".format(sample_id),
+                              semantic_threshold),
+            ])
+    width = max(row.shape[1] for row in rows)
+    rows = [row if row.shape[1] == width else cv2.copyMakeBorder(
+        row, 0, 0, 0, width - row.shape[1], cv2.BORDER_CONSTANT, value=_BACKGROUND)
+            for row in rows]
+    canvas = np.vstack(rows + [_legend_panel(semantic_layers, width)])
+    prior_footer = " | prior z~N(0,I) samples={}".format(
+        prior_reconstruction_logits.shape[0]) if prior_reconstruction_logits is not None else ""
+    cv2.putText(canvas, "Privileged BEV VAE | X=right, Y=front | ego=center" + prior_footer,
+                (8, canvas.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                0.48, (220, 220, 220), 1, cv2.LINE_AA)
+    return canvas
+
+
+def save_privileged_bev_vae_reconstruction(
+        history, reconstruction_logits, latent_mu, latent_logvar,
+        semantic_layers, semantic_threshold, output_path, frame_ids=None, metadata=None,
+        prior_reconstruction_logits=None, prior_sample_ids=None):
+    """保存特权 BEV VAE 的 target/重建/latent PCA 画布。"""
+    image = render_privileged_bev_vae_reconstruction(
+        history, reconstruction_logits, latent_mu, latent_logvar,
+        semantic_layers, semantic_threshold, frame_ids, metadata,
+        prior_reconstruction_logits, prior_sample_ids)
+    return _save_image(image, output_path)

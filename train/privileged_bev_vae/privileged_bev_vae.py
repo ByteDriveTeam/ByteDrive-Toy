@@ -20,7 +20,7 @@ from train.bevseg import compute_bevseg_reconstruction_losses
 from train.privileged_bev_vae.checks.privileged_bev_vae_checks import check_privileged_bev_vae_batch
 
 
-def compute_privileged_bev_vae_losses(outputs, batch, cfg):
+def compute_privileged_bev_vae_losses(outputs, batch, cfg, train_config_key="privileged_bev_vae"):
     """计算 BEVSeg 监督重建损失与连续高斯 latent 的 KL 正则。"""
     check_privileged_bev_vae_batch(batch)
     reconstruction, components = compute_bevseg_reconstruction_losses(
@@ -28,11 +28,14 @@ def compute_privileged_bev_vae_losses(outputs, batch, cfg):
     weights = cfg.train.bevseg_loss_weights
     kl = -0.5 * (1.0 + outputs["logvar"] - outputs["mu"].square() -
                  outputs["logvar"].exp()).mean()
-    total = reconstruction + cfg.train.privileged_bev_vae.kl_weight * kl
+    train_cfg = getattr(cfg.train, train_config_key)
+    total = reconstruction + train_cfg.kl_weight * kl
     return total, {**components, "kl": kl, "total": total}
 
 
-def train_privileged_bev_vae_epoch(model, loader, optimizer, cfg, device, epoch=0):
+def train_privileged_bev_vae_epoch(
+        model, loader, optimizer, cfg, device, epoch=0,
+        train_config_key="privileged_bev_vae", log_prefix="privileged_bev_vae"):
     """训练一个特权 BEV VAE epoch，并返回样本加权平均损失。"""
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -42,7 +45,7 @@ def train_privileged_bev_vae_epoch(model, loader, optimizer, cfg, device, epoch=
     for step, batch in enumerate(loader):
         batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
         total, components = compute_privileged_bev_vae_losses(
-            model(batch["bevseg"], sample=True), batch, cfg)
+            model(batch["bevseg"], sample=True), batch, cfg, train_config_key)
         window = min(accumulation, steps - (step // accumulation) * accumulation)
         (total / window).backward()
         if (step + 1) % accumulation == 0 or step + 1 == steps:
@@ -58,7 +61,8 @@ def train_privileged_bev_vae_epoch(model, loader, optimizer, cfg, device, epoch=
         if step == 0 or (step + 1) % cfg.train.log_every == 0 or step + 1 == steps:
             formatted = "  ".join("{}={:.4f}".format(name, value.detach().item())
                                   for name, value in components.items())
-            print("[privileged_bev_vae] epoch {}/{} step {}/{} ({:.2f}%) {}".format(
+            print("[{}] epoch {}/{} step {}/{} ({:.2f}%) {}".format(
+                log_prefix,
                 epoch + 1, cfg.train.epochs, step + 1, steps,
                 (step + 1) * 100.0 / max(steps, 1), formatted), flush=True)
     return {name: (value / max(count, 1)).item() for name, value in sums.items()}

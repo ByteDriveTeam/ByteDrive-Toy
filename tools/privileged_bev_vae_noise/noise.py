@@ -41,9 +41,10 @@ def _write_reports(summary, output_dir, epoch):
 
 
 @torch.no_grad()
-def measure_latent_noise(model, dataset, cfg, device, epoch=0):
+def measure_latent_noise(
+        model, dataset, cfg, device, epoch=0, train_config_key="privileged_bev_vae"):
     """在固定 probe 子集上测量 posterior 噪声和 latent 维度冗余。"""
-    noise_cfg = cfg.train.privileged_bev_vae.noise
+    noise_cfg = getattr(cfg.train, train_config_key).noise
     limit = min(int(noise_cfg.max_samples), len(dataset))
     probe = DataLoader(
         Subset(dataset, range(limit)), batch_size=noise_cfg.batch_size,

@@ -15,6 +15,8 @@ from vis.bevseg_vis.bevseg_vis import (
     render_bevseg_reconstruction,
     save_bevseg_history,
     save_bevseg_reconstruction,
+    render_privileged_bev_vae_reconstruction,
+    save_privileged_bev_vae_reconstruction,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "save_bevseg_history",
     "render_bevseg_reconstruction",
     "save_bevseg_reconstruction",
+    "render_privileged_bev_vae_reconstruction",
+    "save_privileged_bev_vae_reconstruction",
 ]

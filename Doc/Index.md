@@ -22,6 +22,13 @@ This is the single navigation entry for project documentation and source files. 
 - [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) - Continuous Gaussian latent VAE with four-stage encoder and decoder
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) - Privileged BEV VAE reconstruction, KL loss, and epoch loop
 - [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) - Latent covariance, effective-rank, and perturbation measurement
+- [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) - Privileged BEV VAE target/reconstruction/detail/latent-PCA renderer
+
+## BEVSeg 64x VAE
+
+- [Doc/BEVSegVAE64.md](BEVSegVAE64.md) - Additional full-BEV continuous-latent VAE with 64x spatial compression
+- [model/bevseg_vae64/bevseg_vae64.py](../model/bevseg_vae64/bevseg_vae64.py) - 64-channel 4x4 latent VAE over the complete BEVSeg raster
+- [train/bevseg_vae64/bevseg_vae64.py](../train/bevseg_vae64/bevseg_vae64.py) - Training adapter using the shared BEV VAE reconstruction and KL losses
 
 ## config/ — configuration and validation
 

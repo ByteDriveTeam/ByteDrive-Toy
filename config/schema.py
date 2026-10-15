@@ -718,6 +718,7 @@ class ModelCfg:
     driving: DrivingCfg
     bevseg: BevSegModelCfg
     privileged_bev_vae: PrivilegedBevVaeModelCfg
+    bevseg_vae64: PrivilegedBevVaeModelCfg
 
 
 @dataclass
@@ -844,6 +845,7 @@ class TrainCfg:
     driving_loss_weights: DrivingLossWeightsCfg
     bevseg_loss_weights: BevSegLossWeightsCfg
     privileged_bev_vae: PrivilegedBevVaeTrainCfg
+    bevseg_vae64: PrivilegedBevVaeTrainCfg
 
 
 @dataclass
@@ -856,6 +858,19 @@ class BevSegVisCfg:
     save_dir: str
     device: str
     semantic_threshold: float
+
+
+@dataclass
+class PrivilegedBevVaeVisCfg:
+    """特权 BEV VAE 重建与连续 latent PCA 可视化参数。"""
+    checkpoint: str
+    scene: str
+    frame: int
+    save_dir: str
+    device: str
+    semantic_threshold: float
+    prior_samples: int
+    prior_seed: int
 
 
 @dataclass
@@ -1070,6 +1085,7 @@ class Config:
     data: DataCfg
     train: TrainCfg
     bevseg_vis: BevSegVisCfg
+    privileged_bev_vae_vis: PrivilegedBevVaeVisCfg
     pred_vis: PredVisCfg
     driving_vis: DrivingVisCfg
     clone_loop: CloneLoopCfg
@@ -1226,12 +1242,15 @@ def validate_config(cfg):
     _validate_model(cfg.model)
     _validate_bevseg_model(cfg.model.bevseg)
     _validate_privileged_bev_vae_model(cfg.model.privileged_bev_vae, cfg.data.bevseg)
+    _validate_bevseg_vae64_model(cfg.model.bevseg_vae64, cfg.data.bevseg)
     _validate_data(cfg.data, cfg.model.driving.lane_map, cc.cameras.rig)
     _validate_bevseg_data(cfg.data.bevseg)
     _validate_train(cfg.train, cfg.model.driving.lane_map)
     _validate_bevseg_loss(cfg.train.bevseg_loss_weights, cfg.data.bevseg.layers)
     _validate_privileged_bev_vae_train(cfg.train.privileged_bev_vae)
+    _validate_bevseg_vae64_train(cfg.train.bevseg_vae64)
     _validate_bevseg_vis(cfg.bevseg_vis)
+    _validate_privileged_bev_vae_vis(cfg.privileged_bev_vae_vis)
     _validate_pred_vis(cfg.pred_vis)
     _validate_driving_vis(
         cfg.driving_vis, cfg.model.driving.lane_map, cfg.model.driving.traffic_control)
@@ -1613,6 +1632,26 @@ def _validate_privileged_bev_vae_model(model, data):
         "data.bevseg.resolution 必须能被 VAE 下采样倍率整除"
 
 
+def _validate_bevseg_vae64_model(model, data):
+    """校验对象: cfg.model.bevseg_vae64 —— 整幅 BEV 64 倍压缩 VAE。"""
+    assert model.in_layers == len(data.layers) + 2, \
+        "model.bevseg_vae64.in_layers 必须等于语义层加方向层"
+    assert model.encoder_dim > 0 and model.encoder_dim % 2 == 0, \
+        "model.bevseg_vae64.encoder_dim 必须为正偶数"
+    assert model.downsample_kernel == 2, \
+        "model.bevseg_vae64.downsample_kernel 必须为 2"
+    assert len(model.encoder_residual_blocks) == 6 \
+        and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                for count in model.encoder_residual_blocks), \
+        "model.bevseg_vae64.encoder_residual_blocks 必须为六个非负整数"
+    assert model.latent_dim == 64, "model.bevseg_vae64.latent_dim 必须为 64"
+    assert len(model.decoder_channels) == 6 \
+        and all(channel > 0 for channel in model.decoder_channels), \
+        "model.bevseg_vae64.decoder_channels 必须与六级上采样对应"
+    assert data.resolution % (2 ** len(model.encoder_residual_blocks)) == 0, \
+        "data.bevseg.resolution 必须能被整幅 BEV VAE 下采样倍率整除"
+
+
 def _validate_bevseg_data(data):
     """鏍￠獙瀵硅薄: cfg.data.bevseg 鈥斺€?坐标和驾驶语义层契约。"""
     assert data.extent_m > 0 and data.resolution > 0, "data.bevseg 范围和分辨率非法"
@@ -1685,6 +1724,24 @@ def _validate_privileged_bev_vae_train(train):
         and noise.near_zero_std_threshold >= 0, \
         "privileged_bev_vae.noise.near_zero_std_threshold 非法"
     assert noise.output_dir, "privileged_bev_vae.noise.output_dir 不能为空"
+
+
+def _validate_bevseg_vae64_train(train):
+    """校验对象: cfg.train.bevseg_vae64 —— 整幅 BEV VAE 训练参数。"""
+    assert math.isfinite(train.kl_weight) and train.kl_weight >= 0, \
+        "train.bevseg_vae64.kl_weight 必须为有限非负数"
+    noise = train.noise
+    assert isinstance(noise.enabled, bool), "bevseg_vae64.noise.enabled 必须为布尔值"
+    assert noise.max_samples > 0 and noise.batch_size > 0, \
+        "bevseg_vae64.noise.max_samples/batch_size 必须 > 0"
+    assert isinstance(noise.seed, int) and not isinstance(noise.seed, bool), \
+        "bevseg_vae64.noise.seed 必须为整数"
+    assert math.isfinite(noise.noise_scale) and noise.noise_scale >= 0, \
+        "bevseg_vae64.noise.noise_scale 非法"
+    assert math.isfinite(noise.near_zero_std_threshold) \
+        and noise.near_zero_std_threshold >= 0, \
+        "bevseg_vae64.noise.near_zero_std_threshold 非法"
+    assert noise.output_dir, "bevseg_vae64.noise.output_dir 不能为空"
 
 
 def _validate_dinov3_backbone(bb):
@@ -2026,6 +2083,28 @@ def _validate_bevseg_vis(vis):
     assert math.isfinite(vis.semantic_threshold) \
         and 0 < vis.semantic_threshold < 1, \
         "bevseg_vis.semantic_threshold 必须位于 (0,1)"
+
+
+def _validate_privileged_bev_vae_vis(vis):
+    """校验对象: cfg.privileged_bev_vae_vis —— 特权 BEV VAE 可视化参数。"""
+    assert isinstance(vis.checkpoint, str) and vis.checkpoint, \
+        "privileged_bev_vae_vis.checkpoint 不得为空"
+    assert isinstance(vis.scene, str) and isinstance(vis.save_dir, str) and vis.save_dir, \
+        "privileged_bev_vae_vis.scene/save_dir 类型或取值非法"
+    assert isinstance(vis.frame, int) and not isinstance(vis.frame, bool) and vis.frame >= -1, \
+        "privileged_bev_vae_vis.frame 必须 >= -1"
+    cuda_device = vis.device == "cuda" or (
+        vis.device.startswith("cuda:") and vis.device[5:].isdigit())
+    assert vis.device == "cpu" or cuda_device, \
+        "privileged_bev_vae_vis.device 仅支持 cpu/cuda[:序号]"
+    assert math.isfinite(vis.semantic_threshold) \
+        and 0 < vis.semantic_threshold < 1, \
+        "privileged_bev_vae_vis.semantic_threshold 必须位于 (0,1)"
+    assert isinstance(vis.prior_samples, int) and not isinstance(vis.prior_samples, bool) \
+        and vis.prior_samples >= 0, \
+        "privileged_bev_vae_vis.prior_samples 必须 >= 0"
+    assert isinstance(vis.prior_seed, int) and not isinstance(vis.prior_seed, bool), \
+        "privileged_bev_vae_vis.prior_seed 必须为整数"
 
 
 def _validate_driving_vis(dv, model_lane, model_traffic):

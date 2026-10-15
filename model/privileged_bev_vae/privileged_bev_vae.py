@@ -31,9 +31,9 @@ __all__ = ["PrivilegedBEVVAE"]
 class PrivilegedBEVVAE(nn.Module):
     """将 BEVSeg 特权栅格编码为连续高斯 latent 并重建栅格。"""
 
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, config_key="privileged_bev_vae") -> None:
         super().__init__()
-        model_cfg = cfg.model.privileged_bev_vae
+        model_cfg = getattr(cfg.model, config_key)
         data_cfg = cfg.data.bevseg
         self.in_channels = int(model_cfg.in_layers)
         self.encoder_dim = int(model_cfg.encoder_dim)

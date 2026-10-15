@@ -48,3 +48,33 @@ The same measurement is available independently:
 ```
 
 The tool reports redundancy only; it never changes `latent_dim` or model weights.
+
+## Visualization
+
+The VAE keeps the existing BEVSeg target/reconstruction/detail layout while
+replacing the discrete-code PCA panel with PCA of the spatial `latent_mu`
+(`16×16` by default). The summary panel also shows effective rank, posterior
+standard deviation, and raw KL.
+
+```powershell
+.\.venv\Scripts\python.exe -m vis.privileged_bev_vae_vis.run `
+  --checkpoint train/ckpt/privileged_bev_vae/epoch_010.pt `
+  --scene scene_000000 --frame 100
+```
+
+To inspect whether the standard-normal prior decodes to plausible BEV layouts,
+append a small number of prior samples. The output keeps the same target and
+reconstruction rows, then adds one composite/detail group per sampled latent:
+
+```powershell
+.\.venv\Scripts\python.exe -m vis.privileged_bev_vae_vis.run `
+  --checkpoint train/ckpt/privileged_bev_vae/epoch_033.pt `
+  --scene scene_000000 --frame 100 --prior-samples 4 --prior-seed 20260928
+```
+
+The default `prior_samples: 0` leaves the original VAE visualization unchanged.
+Each prior sample uses `z ~ N(0,I)` and is decoded without posterior statistics;
+its semantic mIoU, direction cosine, and semantic MAE are shown against the
+selected target frame.
+
+The original `vis.bevseg_vis` command and its output layout remain unchanged.
