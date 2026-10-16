@@ -8,6 +8,8 @@
 说明: 跨模块统一 `from model.driving_model import DrivingModel`；实现见 driving_model.py，校验见 checks/。
 """
 
-from model.driving_model.driving_model import DrivingModel
+from model.driving_model.unified_driving_model import UnifiedDrivingModel
 
-__all__ = ["DrivingModel"]
+DrivingModel = UnifiedDrivingModel
+
+__all__ = ["DrivingModel", "UnifiedDrivingModel"]

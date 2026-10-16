@@ -404,7 +404,7 @@ model:
     patch_size: 16            # ViT patch 边长；768×384 输入 → 48×24 patch 网格
     hidden_dim: 384           # 骨干单层输出通道（师生头共享的特征维度）
     num_register_tokens: 4    # DINOv3 ViT-S+ 的 register token 数（完整序列长与 patch 前缀校验用）
-    feature_layers: [3, 6, 12]  # 取 output_hidden_states 的第 3/6/12 层（12=ViT-S+/16 末层），供多层融合
+    feature_layers: [3, 6, 9, 12]  # 新模型融合第3/6/9/末层 DINOv3 特征
 
   # Pred 特征主干：完整保留 DINOv3 的 CLS/register/patch 序列，过 3 层 Pre-Norm Transformer
   feature_trunk:
@@ -430,6 +430,21 @@ model:
 
   # 驾驶系统：复用感知主干（trunk+DINO 原始特征）→ 深度 frustum 位置编码 → 当前图像/上一帧 BEV 交叉注意力
 # → BEV Transformer → 统一空间解码 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
+  unified_driving:
+    dim: 384
+    ffn_hidden: 1536
+    condition_hidden: 1536
+    geometry_hidden: 256
+    self_heads_2d: 6
+    self_heads_3d: 8
+    cross_heads: 8
+    num_register_tokens: 8
+    num_waypoints: 30
+    waypoint_dt_s: 0.1
+    bev_latent_dim: 24
+    rope_theta: 10000.0
+    cache_slice_s: 3.0
+
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
     freeze_perception: false     # false=感知子模块以 train.perception_lr_scale 慢更新；true=完全冻结（DINOv3 恒冻结）
@@ -639,10 +654,17 @@ data:
     box_layers: {vehicle: vehicle, pedestrian: pedestrian}
     state_layers: {red: stop_line_red, yellow: stop_line_yellow, green: stop_line_green}
 
+  driving_cache:
+    enabled: true
+    dir: output/driving-cache
+    version: v1-signed-log-four-frame
+    slice_duration_s: 3.0
+
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）
 # ============================================================
 train:
+  precision: bf16
   device: cuda               # 训练设备；autocast 设备类型由输入张量所在设备推导
   epochs: 10
   batch_size: 32

@@ -233,3 +233,6 @@ Python 3.7 simulation worker:
 - [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — Public mixed-size driving visualization renderer API
 - [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — Color and composite rendering for fields, lanes, traffic controls, trajectories, and camera modalities
 - [vis/driving_vis/run.py](../vis/driving_vis/run.py) — Three-camera + LiDAR driving visualization CLI
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧单目前向时空 Token 主干、AdaLN-Zero BEV/轨迹流匹配解码器
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 3秒 Signed-Log 驾驶训练切片缓存与直接读取数据集
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Signed-Log 轨迹与多帧 BEV 流匹配训练损失

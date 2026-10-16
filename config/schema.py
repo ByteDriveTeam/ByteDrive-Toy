@@ -694,6 +694,24 @@ class FeatureTrunkCfg:
 
 
 @dataclass
+class UnifiedDrivingCfg:
+    """新四帧单目时空模型的结构参数。"""
+    dim: int
+    ffn_hidden: int
+    condition_hidden: int
+    geometry_hidden: int
+    self_heads_2d: int
+    self_heads_3d: int
+    cross_heads: int
+    num_register_tokens: int
+    num_waypoints: int
+    waypoint_dt_s: float
+    bev_latent_dim: int
+    rope_theta: float
+    cache_slice_s: float
+
+
+@dataclass
 class HeadsCfg:
     reduce_channels: int
     up_channels: List[int]
@@ -715,6 +733,7 @@ class ModelCfg:
     feature_trunk: FeatureTrunkCfg
     heads: HeadsCfg
     physics: PhysicsCfg
+    unified_driving: UnifiedDrivingCfg
     driving: DrivingCfg
     bevseg: BevSegModelCfg
     privileged_bev_vae: PrivilegedBevVaeModelCfg
@@ -779,11 +798,21 @@ class DrivingDatasetCfg:
 
 
 @dataclass
+class DrivingCacheCfg:
+    """新驾驶训练缓存的直接读取参数。"""
+    enabled: bool
+    dir: str
+    version: str
+    slice_duration_s: float
+
+
+@dataclass
 class DataCfg:
     scene_cache_size: int
     dataset: DatasetCfg
     driving: DrivingDatasetCfg
     bevseg: BevSegDataCfg
+    driving_cache: DrivingCacheCfg
 
 
 @dataclass
@@ -820,6 +849,7 @@ class DrivingLossWeightsCfg:
 @dataclass
 class TrainCfg:
     device: str
+    precision: str
     epochs: int
     batch_size: int
     grad_accum_steps: int
@@ -1707,7 +1737,25 @@ def _validate_model(model):
     _validate_feature_trunk(model.feature_trunk)
     _validate_heads(model.heads)
     _validate_physics(model.physics)
+    _validate_unified_driving(model.unified_driving)
     _validate_driving(model.driving)
+
+
+def _validate_unified_driving(spec):
+    """校验对象: cfg.model.unified_driving —— 新模型的固定结构约束。"""
+    assert spec.dim == 384, "model.unified_driving.dim 必须为 384"
+    assert spec.ffn_hidden == 1536, "model.unified_driving.ffn_hidden 必须为 1536"
+    assert spec.self_heads_2d == 6 and spec.dim % spec.self_heads_2d == 0, \
+        "2D RoPE 注意力必须使用 6 头"
+    assert spec.self_heads_3d == 8 and (spec.dim // spec.self_heads_3d) % 6 == 0, \
+        "3D RoPE 注意力必须使用 8 头且每头维度能被 6 整除"
+    assert spec.cross_heads == 8 and spec.dim % spec.cross_heads == 0, \
+        "交叉注意力必须使用 8 头"
+    assert spec.num_register_tokens == 8, "视觉主干必须使用 8 个寄存器 Token"
+    assert spec.num_waypoints == 30 and math.isclose(spec.waypoint_dt_s, 0.1, abs_tol=1e-9), \
+        "轨迹输出必须为未来 3 秒、10Hz 的 30 个点"
+    assert spec.bev_latent_dim > 0 and spec.cache_slice_s > 0, \
+        "BEV latent 通道数和缓存切片时长必须为正"
 
 
 def _validate_privileged_bev_vae_train(train):
@@ -1849,9 +1897,14 @@ def _validate_data(data, model_lane, camera_rig):
         and bh.traffic_light_min_pixels > 0, \
         "data.driving.behavior 交通灯匹配半径/Seg 容差/最少像素数取值非法"
 
+    cache = data.driving_cache
+    assert cache.slice_duration_s > 0 and cache.version.strip(), \
+        "data.driving_cache.slice_duration_s must be positive and version must be non-empty"
+
 
 def _validate_train(train, model_lane):
     """校验对象: cfg.train —— 训练超参数。"""
+    assert train.precision in ("bf16", "fp32"), "train.precision 必须为 bf16 或 fp32"
     for name in ("epochs", "batch_size", "grad_accum_steps", "num_workers",
                  "prefetch_factor", "log_every"):
         assert getattr(train, name) >= (1 if name != "num_workers" else 0), \

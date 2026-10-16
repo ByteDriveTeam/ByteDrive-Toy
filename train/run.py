@@ -3,7 +3,6 @@
 模块: train/run.py
 依赖: argparse, pathlib, torch, config.load_config, model.perception_model.PerceptionModel,
       model.driving_model.DrivingModel, data.perception_dataset.PerceptionDataset,
-      data.driving_dataset.DrivingDataset, data.scene_batch_sampler.SceneBatchSampler,
       data.bevseg_cache, train.optimizer, train.loop, train.bevseg,
       train.privileged_bev_vae, train.bevseg_vae64, train.checks.run_checks
 读取配置:
@@ -18,7 +17,7 @@
     - main(argv=None) -> None
 说明: 支持 perception、driving、bevseg、privileged_bev_vae 和 bevseg_vae64 五项任务。
       相对检查点目录按任务分目录保存；检查点排除 `backbone.` 权重但保留优化器状态，支持兼容续训。
-      `--perception-ckpt` 只用于 driving 的 fusion/trunk 初始化；三个 BEV 任务可在建模前预热共享栅格缓存。
+      driving uses the four-frame cache and never loads legacy perception checkpoints.
       设备和 DataLoader 行为由 config 控制，CUDA 不可用时回退 CPU；多 worker 入口受 `__main__` 守卫保护。
 """
 
@@ -34,7 +33,7 @@ from torch.utils.data import DataLoader, default_collate
 from config import load_config
 from data.bevseg_cache import prepare_bevseg_cache
 from data.bevseg_dataset import BevSegDataset
-from data.driving_dataset import DrivingDataset
+from data.driving_cache import DrivingSliceDataset
 from data.perception_dataset import PerceptionDataset
 from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
@@ -43,7 +42,8 @@ from model.bevseg_compressor import BEVSegCompressor
 from model.privileged_bev_vae import PrivilegedBEVVAE
 from model.bevseg_vae64 import BEVSegVAE64
 from train.checks.run_checks import check_runtime
-from train.loop import train_driving_epoch, train_one_epoch
+from train.loop import train_one_epoch
+from train.unified_driving import train_unified_driving_epoch
 from train.bevseg import train_bevseg_epoch
 from train.privileged_bev_vae import train_privileged_bev_vae_epoch
 from train.bevseg_vae64 import train_bevseg_vae64_epoch
@@ -54,7 +54,7 @@ _CKPT_PATTERN = re.compile(r"epoch_(\d+)\.pt$")
 
 _TASK_DESCRIPTIONS = {
     "perception": "单帧相机感知（语义与深度）",
-    "driving": "双帧三目 + LiDAR 驾驶多任务",
+    "driving": "four-frame monocular BEV/trajectory flow-matching driving",
     "bevseg": "BEVSeg 离散压缩器",
     "privileged_bev_vae": "特权 BEV 连续 latent VAE",
     "bevseg_vae64": "整幅 BEV 64x 连续 latent VAE",
@@ -63,7 +63,7 @@ _TASK_DESCRIPTIONS = {
 # 任务名 → (模型类, 数据集类, epoch 函数)；公共装配、续训和保存逻辑只保留一份。
 _TASKS = {
     "perception": (PerceptionModel, PerceptionDataset, train_one_epoch),
-    "driving": (DrivingModel, DrivingDataset, train_driving_epoch),
+    "driving": (DrivingModel, DrivingSliceDataset, train_unified_driving_epoch),
     "bevseg": (BEVSegCompressor, BevSegDataset, train_bevseg_epoch),
     "privileged_bev_vae": (PrivilegedBEVVAE, BevSegDataset,
                             train_privileged_bev_vae_epoch),
@@ -254,32 +254,6 @@ def _is_legacy_feature_group(names):
     return bool(names) and all(name.startswith(prefixes) for name in names)
 
 
-def _load_perception_weights(model: DrivingModel, path) -> None:
-    """内存映射感知检查点，仅读取 fusion/trunk 初始化 Driving，排除语义与深度头。"""
-    ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    state = ckpt.get("model", ckpt)  # 兼容 {epoch,model,optimizer} 或纯 state_dict
-    current = model.perception.state_dict()
-    expected_features = {name for name in current
-                         if name.startswith(("fusion.", "trunk."))}
-    feature_state = {name: value for name, value in state.items()
-                     if name.startswith(("fusion.", "trunk."))
-                     and name in current and tuple(value.shape) == tuple(current[name].shape)}
-    skipped_features = [name for name in state
-                        if name.startswith(("fusion.", "trunk.")) and name not in feature_state]
-    missing_features = sorted(expected_features.difference(state))
-    ignored_heads = [name for name in state
-                     if name.startswith(("semantic_head.", "depth_head."))]
-    model.perception.load_state_dict(feature_state, strict=False)
-
-    print("[driving] 载入感知预训练权重 {}：仅 fusion/trunk {} 项已载入；双头 {} 项已排除".format(
-        path, len(feature_state), len(ignored_heads)))
-    if missing_features:
-        print("[driving]   ⚠ {} 个 fusion/trunk 参数在检查点中缺失：{}".format(
-            len(missing_features), missing_features[:5]))
-    if skipped_features:
-        print("[driving]   ⚠ {} 个 fusion/trunk 参数键或形状不兼容：{}".format(
-            len(skipped_features), skipped_features[:5]))
-
 
 def _build_parser() -> argparse.ArgumentParser:
     """构造训练 CLI；参数默认值仍由配置文件提供。"""
@@ -295,7 +269,7 @@ def _build_parser() -> argparse.ArgumentParser:
             + task_lines
             + "\n\n常用命令:\n"
               "  python -m train.run --task perception --env <name>\n"
-              "  python -m train.run --task driving --env <name> --perception-ckpt <path>\n"
+              "  python -m train.run --task driving --env <name>\n"
               "  python -m train.run --task bevseg --prepare-bevseg-cache"
         ),
     )
@@ -317,7 +291,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--perception-ckpt", default=None, metavar="PATH",
-        help="仅用于 driving：从感知检查点初始化 fusion/trunk",
+        help="Deprecated: the new DrivingModel does not load legacy perception checkpoints",
     )
     parser.add_argument(
         "--prepare-bevseg-cache", action="store_true",
@@ -330,8 +304,8 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args) -> None:
     """校验参数之间的关系，避免无效选项被静默忽略。"""
     if args.prepare_bevseg_cache and args.task not in _BEV_TASKS:
         parser.error("--prepare-bevseg-cache 仅可与 bevseg、privileged_bev_vae 或 bevseg_vae64 一起使用")
-    if args.perception_ckpt and args.task != "driving":
-        parser.error("--perception-ckpt 仅可与 --task driving 一起使用")
+    if args.perception_ckpt:
+        parser.error("新 DrivingModel 不再加载旧 perception checkpoint")
 
 
 def main(argv=None) -> None:
@@ -368,17 +342,18 @@ def main(argv=None) -> None:
         dataset = dataset_cls(cfg)
     check_runtime(model, dataset)
     # 驾驶训练：先以感知预训练权重初始化感知子模块（在续训覆盖之前）
-    if args.task == "driving" and args.perception_ckpt:
-        _load_perception_weights(model, args.perception_ckpt)
-    batch_sampler = SceneBatchSampler(
-        dataset.frame_index, cfg.train.batch_size, cfg.train.shuffle, cfg.train.drop_last)
     loader_kwargs = {
-        "batch_sampler": batch_sampler,
         "num_workers": cfg.train.num_workers,
         "pin_memory": cfg.train.pin_memory and device.type == "cuda",
         "persistent_workers": cfg.train.persistent_workers and cfg.train.num_workers > 0,
         "collate_fn": _compact_collate,
     }
+    if args.task == "driving":
+        loader_kwargs.update(batch_size=cfg.train.batch_size,
+                             shuffle=cfg.train.shuffle, drop_last=cfg.train.drop_last)
+    else:
+        loader_kwargs["batch_sampler"] = SceneBatchSampler(
+            dataset.frame_index, cfg.train.batch_size, cfg.train.shuffle, cfg.train.drop_last)
     if cfg.train.num_workers > 0:
         loader_kwargs.update(
             prefetch_factor=cfg.train.prefetch_factor,
