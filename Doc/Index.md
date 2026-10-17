@@ -2,7 +2,8 @@
 
 **English** · [简体中文](Index.zh-CN.md)
 
-This is the single navigation entry for project documentation and source files. **Update it in the same commit whenever files are added or removed.** Each entry uses `relative path — one-line responsibility`; companion `X_checks.py` files belong to `X.py` and are not listed separately.
+This is the single navigation entry for project documentation and source files. **Update it in the same commit whenever files are added or removed.** Each entry uses 
+elative path — one-line responsibility; companion X_checks.py files belong to X.py and are not listed separately.
 
 ## Guidelines and documentation
 
@@ -13,22 +14,10 @@ This is the single navigation entry for project documentation and source files. 
 - [Doc/Index.md](Index.md) — English primary file and documentation index
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — Simplified Chinese file and documentation index
 - [Doc/BEVSeg.md](BEVSeg.md) — BEVSeg coordinate, semantic-channel, grouped-codebook, and PixelShuffle reconstruction contract
+- [Doc/BEVSegVAE64.md](BEVSegVAE64.md) — Full-BEV continuous-latent VAE with 64x spatial compression contract
+- [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) — Continuous-latent privileged BEV VAE and noise measurement contract
 - [site/index.html](../site/index.html) — English primary project website
 - [site/index.zh-CN.html](../site/index.zh-CN.html) — Simplified Chinese project website
-
-## Privileged BEV VAE
-
-- [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) - Continuous-latent privileged BEV VAE and noise measurement
-- [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) - Continuous Gaussian latent VAE with four-stage encoder and decoder
-- [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) - Privileged BEV VAE reconstruction, KL loss, and epoch loop
-- [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) - Latent covariance, effective-rank, and perturbation measurement
-- [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) - Privileged BEV VAE target/reconstruction/detail/latent-PCA renderer
-
-## BEVSeg 64x VAE
-
-- [Doc/BEVSegVAE64.md](BEVSegVAE64.md) - Additional full-BEV continuous-latent VAE with 64x spatial compression
-- [model/bevseg_vae64/bevseg_vae64.py](../model/bevseg_vae64/bevseg_vae64.py) - 64-channel 4x4 latent VAE over the complete BEVSeg raster
-- [train/bevseg_vae64/bevseg_vae64.py](../train/bevseg_vae64/bevseg_vae64.py) - Training adapter using the shared BEV VAE reconstruction and KL losses
 
 ## config/ — configuration and validation
 
@@ -44,7 +33,7 @@ This is the single navigation entry for project documentation and source files. 
 - [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — Scene-aware batch sampler that groups consecutive frames and shuffles batches to reduce random video seeks
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, stop lines, and boundary supervision
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, centerline fitting, stop lines, and boundary supervision
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Two-frame, three-camera + LiDAR dataset with voxel statistics, temporal transforms, and multitask supervision
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — Public API for multi-frame semantic-LiDAR fusion and dynamic-object reconstruction
@@ -54,16 +43,23 @@ This is the single navigation entry for project documentation and source files. 
 - [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — Static-first mesh reconstruction, dynamic donor reuse, checkpoints, and batch processing
 - [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — Fused point-cloud reconstruction CLI
 - [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Public Poisson-surface and optional watertight-repair API
-- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — PyTorch support cropping and Open3D Poisson triangle-mesh generation
+- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — PyTorch preprocessing and Open3D Poisson triangle-mesh generation with optional watertight repair
 - [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — Isolated Poisson subprocess that suppresses Windows crash dialogs and returns one surface result
 - [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — Public dynamic Poisson, donor reuse, and box-fallback API
 - [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — Coverage-based dynamic reconstruction with same-object, similar-object, and box fallbacks
 - [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — Public sparse TUDF API for the static world and local dynamic objects
 - [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — Sparse regular-tensor construction of static and dynamic truncated unsigned distance fields
+- [data/bevseg_synthesis/__init__.py](../data/bevseg_synthesis/__init__.py) — Public API for driving-relevant BEVSeg raster synthesis
 - [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — Driving-relevant HDMap, box, and fused stop-line-state rasterization under the X-right/Y-front BEV contract
 - [data/bevseg_cache/__init__.py](../data/bevseg_cache/__init__.py) — Public API for the bounded BEVSeg raster cache and offline warmup
 - [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — Bounded, concurrent, lossless compressed NumPy cache with automatic missing-entry detection and warmup progress
+- [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — Public API for single-frame BEVSeg dataset
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
+- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame Signed-Log driving slice cache
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second Signed-Log driving training slice cache and direct tensor reader
+- [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — Public API for trajectory and velocity vocabulary generation
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — Streaming construction and clustering of CARLA ego geometric trajectory and velocity vocabulary
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — Trajectory and velocity vocabulary generation CLI
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection
 
@@ -95,6 +91,7 @@ Python 3.12 collector:
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — Reproducible per-scene seed and weather selection
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — Per-camera BGR sequence encoding to H.265 MP4
 - [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — Offline raw costs for candidates, current/next states, and history using future 10 Hz ground-truth boxes
+- [collector/costs/tensor_costs.py](../data/carla_data_collector/collector/costs/tensor_costs.py) — Batched candidate trajectory cost evaluation via PyTorch tensor geometry with strict bounding-sphere broad-phase
 - [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — Non-RGB scene data and independent kinematics timeline writer for LMDB
 - [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — Expert/model collection loop, closed-loop advancement, segmented storage, and complete cost backfill
 - [collector/run.py](../data/carla_data_collector/collector/run.py) — Python 3.12 collection CLI
@@ -122,10 +119,24 @@ Python 3.12 collector:
 - [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — Public BEV-specific PixelShuffle upsampler API
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — Spatial convolution and activated residual PixelShuffle stages
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — Two-frame three-camera + LiDAR model combining image geometry, voxel statistics, and aligned historical BEV
+- [model/driving_model/__init__.py](../model/driving_model/__init__.py) — Driving model public API and re-export entry
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — DrivingModel alias redirection entry point to UnifiedDrivingModel
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Four-frame monocular spatio-temporal token backbone with dual flow-matching decoders
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
+- [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — Public API for the grouped discrete BEVSeg compressor
 - [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — 384-dimensional residual BEVSeg encoder, grouped discrete codebook sampling, and ICNR-initialized PixelShuffle decoder
+- [model/bevseg_vae64/__init__.py](../model/bevseg_vae64/__init__.py) — Public API for full-BEV 64x continuous-latent VAE
+- [model/bevseg_vae64/bevseg_vae64.py](../model/bevseg_vae64/bevseg_vae64.py) — 64-channel 4x4 latent VAE over the complete 256x256 BEVSeg raster
+- [model/privileged_bev_vae/__init__.py](../model/privileged_bev_vae/__init__.py) — Public API for the privileged continuous-latent BEV VAE
+- [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) — Continuous Gaussian latent VAE with four-stage encoder and decoder
+
+## tools/ — developer utilities
+
+- [tools/__init__.py](../tools/__init__.py) — Project development utilities package marker
+- [tools/privileged_bev_vae_noise/__init__.py](../tools/privileged_bev_vae_noise/__init__.py) — Public API for privileged BEV VAE latent noise and redundancy measurement
+- [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) — Latent covariance, effective-rank, and perturbation measurement
+- [tools/privileged_bev_vae_noise/run.py](../tools/privileged_bev_vae_noise/run.py) — Privileged BEV VAE latent noise measurement CLI
 
 ## train/ — training and evaluation
 
@@ -134,7 +145,14 @@ Python 3.12 collector:
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified training CLI for perception, driving, BEVSeg, and continuous-latent VAE tasks, with cache warmup and checkpoint resume
+- [train/bevseg/__init__.py](../train/bevseg/__init__.py) — Public API for BEVSeg loss and training loop
 - [train/bevseg/bevseg.py](../train/bevseg/bevseg.py) — Weighted semantic reconstruction, direction, entropy regularization, and BEVSeg epoch loop
+- [train/bevseg_vae64/__init__.py](../train/bevseg_vae64/__init__.py) — Public API for BEVSeg 64x VAE training
+- [train/bevseg_vae64/bevseg_vae64.py](../train/bevseg_vae64/bevseg_vae64.py) — Training adapter using the shared BEV VAE reconstruction and KL losses
+- [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — Public API for privileged BEV VAE training and evaluation
+- [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — Privileged BEV VAE reconstruction, KL loss, and epoch loop
+- [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — Public API for UnifiedDrivingModel flow-matching training
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Signed-Log trajectory and multi-frame BEV flow-matching training loss and epoch loop
 
 ## clone_loop/ — behavior-cloning closed loop
 
@@ -200,30 +218,35 @@ Python 3.7 simulation worker:
 
 - [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — Open3D package for unified PT reading, layered coloring, and trajectory browsing
 - [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — Point-cloud viewer CLI
+- [vis/reconstructed_pointcloud_vis/reader/__init__.py](../vis/reconstructed_pointcloud_vis/reader/__init__.py) — Public fused point-cloud reader API
 - [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — Static map, dynamic object model, and per-frame pose reader
+- [vis/reconstructed_pointcloud_vis/render/__init__.py](../vis/reconstructed_pointcloud_vis/render/__init__.py) — Public fused point-cloud renderer API
 - [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Layer filtering, downsampling, coloring, and actor trajectories
+- [vis/reconstructed_pointcloud_vis/viewer/__init__.py](../vis/reconstructed_pointcloud_vis/viewer/__init__.py) — Public interactive fused point-cloud viewer API
 - [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Global/current BEV, layer, trajectory, color, and screenshot controls
 
-### Raw data
-
-- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 流式构造并聚类 CARLA ego 几何轨迹与速度词表
-- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹词表生成 CLI
-- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 几何/速度词表与覆盖度 PNG 渲染
-- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 词表可视化 CLI
+### Raw data and trajectory vocabulary
 
 - [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — Raw dataset visualization package marker
 - [vis/data_vis/run.py](../vis/data_vis/run.py) — Configuration, scene location, and interactive-window CLI
+- [vis/data_vis/reader/__init__.py](../vis/data_vis/reader/__init__.py) — Public scene reader API
 - [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — Per-scene LMDB/MP4 reader and modality discovery
+- [vis/data_vis/geometry/__init__.py](../vis/data_vis/geometry/__init__.py) — Public CARLA geometry and projection API
 - [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — NumPy CARLA transforms and 3D-to-2D projection
+- [vis/data_vis/palette/__init__.py](../vis/data_vis/palette/__init__.py) — Public semantic and flow palette API
 - [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — Vectorized CARLA semantic-label palette
+- [vis/data_vis/draw/__init__.py](../vis/data_vis/draw/__init__.py) — Public visualization canvas drawing API
 - [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — Boxes, depth, semantics, flow, LiDAR/state trajectory BEV, composite panels, and HUD rendering
+- [vis/data_vis/viewer/__init__.py](../vis/data_vis/viewer/__init__.py) — Public interactive OpenCV viewer window API
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
-- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg target/reconstruction comparison and quantized-code PCA renderer
-- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — CLI-selectable dataset-only or compressor-inference visualization over a real CARLA single frame
+- [vis/trajectory_vocab_vis/__init__.py](../vis/trajectory_vocab_vis/__init__.py) — Public API for static trajectory and velocity vocabulary visualization
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — Geometric trajectory and velocity vocabulary plot and clustering evaluation renderer
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — Trajectory and velocity vocabulary PNG visualization CLI
 
 ### Perception predictions
 
 - [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — Perception-checkpoint loading and prediction/ground-truth visualization package
+- [vis/pred_vis/render/__init__.py](../vis/pred_vis/render/__init__.py) — Public perception prediction renderer API
 - [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — Colorized semantic/depth prediction and optional ground-truth canvas rendering
 - [vis/pred_vis/run.py](../vis/pred_vis/run.py) — Per-frame inference, rendering, and save CLI
 
@@ -233,6 +256,11 @@ Python 3.7 simulation worker:
 - [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — Public mixed-size driving visualization renderer API
 - [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — Color and composite rendering for fields, lanes, traffic controls, trajectories, and camera modalities
 - [vis/driving_vis/run.py](../vis/driving_vis/run.py) — Three-camera + LiDAR driving visualization CLI
-- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧单目前向时空 Token 主干、AdaLN-Zero BEV/轨迹流匹配解码器
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 3秒 Signed-Log 驾驶训练切片缓存与直接读取数据集
-- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Signed-Log 轨迹与多帧 BEV 流匹配训练损失
+
+### BEVSeg and VAE visualization
+
+- [vis/bevseg_vis/__init__.py](../vis/bevseg_vis/__init__.py) — Public API for BEVSeg dataset and compressor reconstruction visualization
+- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — BEVSeg target/reconstruction comparison and quantized-code PCA renderer
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — CLI-selectable dataset-only or compressor-inference visualization over a real CARLA single frame
+- [vis/privileged_bev_vae_vis/__init__.py](../vis/privileged_bev_vae_vis/__init__.py) — Public API for privileged BEV VAE visualization
+- [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) — Privileged BEV VAE target/reconstruction/detail/latent-PCA renderer

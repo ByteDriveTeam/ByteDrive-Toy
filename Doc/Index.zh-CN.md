@@ -3,8 +3,8 @@
 [English](Index.md) · **简体中文**
 
 全项目文档与源文件的单一导航入口。**每次增删文件，同一提交内更新本表。**
-每行格式：`相对路径 — 一句话职责`（职责应与该文件文件头首行一致）。
-校验伴随文件 `X_checks.py` 附属于 `X.py`，**不单独列入索引**。
+每行格式：相对路径 — 一句话职责（职责应与该文件文件头首行一致）。
+校验伴随文件 X_checks.py 附属于 X.py，**不单独列入索引**。
 
 ## 规范与文档
 
@@ -14,6 +14,9 @@
 - [Doc/开发规范.md](开发规范.md) — 项目强制开发规范（文档/注释/配置/校验/简洁）
 - [Doc/Index.md](Index.md) — 英文文档索引（主要版本）
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — 中文文档索引
+- [Doc/BEVSeg.md](BEVSeg.md) — BEVSeg 驾驶语义栅格合成、分组码本压缩与 PixelShuffle 重建规范
+- [Doc/BEVSegVAE64.md](BEVSegVAE64.md) — 整幅 BEV 64 倍空间压缩连续 latent VAE 规范
+- [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) — 特权连续 latent BEV VAE 与噪声测定规范
 - [site/index.html](../site/index.html) — 英文项目网站（默认首页）
 - [site/index.zh-CN.html](../site/index.zh-CN.html) — 中文项目网站
 
@@ -28,25 +31,36 @@
 - [data/__init__.py](../data/__init__.py) — 数据读取与预处理包标识：只读消费 config 与已落盘数据集
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
 - [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、有界 SceneReader 缓存、RGB 归一化（感知与驾驶数据集复用）
-- [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — 场景感知批采样器：连续帧同批、批间随机，减少视频随机 seek 与跨场景解码器切换
+- [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — 场景感知批采样器：同场景顺序样本成批、批间随机，减少视频随机 seek 与跨场景解码器切换
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
-- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
-- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督。
-- [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格中心相对 XYZ 米制均值与总体标准差。
-- [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API。
-- [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — 多帧语义 LiDAR 静态融合、动态对象级重建、场景级断点恢复与批处理。
-- [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — 多帧点云融合 CLI：加载配置并处理单场景或递归数据集。
-- [data/mesh_reconstruction/__init__.py](../data/mesh_reconstruction/__init__.py) — 融合点云 Mesh 重建公开 API，支持可选水密修复。
-- [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — 融合 PT 的静态优先 Mesh 重建、动态 donor 复用、断点恢复与批处理。
-- [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — 融合点云 Mesh 批处理 CLI。
-- [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Poisson 表面重建与可选水密修复公开 API。
-- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — 以 PyTorch 观测支撑裁剪和 Open3D Poisson 生成三角 Mesh，并可选执行水密修复。
-- [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — 隔离 Poisson 子进程入口：关闭 Windows 崩溃弹窗并返回单次表面重建结果。
-- [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — 动态对象 Poisson、donor 复用与 Box 回退公开 API。
-- [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — 按点覆盖率重建动态对象，并依次执行相同 donor、相似 donor 与 Box 回退。
-- [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — 静态世界与动态局部稀疏 TUDF 重建公开 API。
-- [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — 以 PyTorch 稀疏规则张量构建静态世界与动态局部截断无符号距离场。
+- [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、中心线贴合、停止线及越界监督
+- [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督
+- [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格局部 XYZ 均值与总体标准差
+- [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API
+- [data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py](../data/multiframe_pointcloud_fusion/multiframe_pointcloud_fusion.py) — 多帧语义 LiDAR 静态融合、动态对象级重建、场景级断点恢复与批处理
+- [data/multiframe_pointcloud_fusion/run.py](../data/multiframe_pointcloud_fusion/run.py) — 多帧点云融合 CLI：加载配置并处理单场景或递归数据集
+- [data/mesh_reconstruction/__init__.py](../data/mesh_reconstruction/__init__.py) — 融合点云 Mesh 重建公开 API，支持可选水密修复
+- [data/mesh_reconstruction/mesh_reconstruction.py](../data/mesh_reconstruction/mesh_reconstruction.py) — 融合 PT 的静态优先 Mesh 重建、动态 donor 复用、断点恢复与批处理
+- [data/mesh_reconstruction/run.py](../data/mesh_reconstruction/run.py) — 融合点云稀疏 TUDF/可选 Mesh 批处理 CLI
+- [data/mesh_reconstruction/surface/__init__.py](../data/mesh_reconstruction/surface/__init__.py) — Poisson 表面重建与可选水密修复公开 API
+- [data/mesh_reconstruction/surface/surface.py](../data/mesh_reconstruction/surface/surface.py) — 以 PyTorch 预处理和 Open3D Poisson 生成三角 Mesh，并可选执行水密修复
+- [data/mesh_reconstruction/surface/worker.py](../data/mesh_reconstruction/surface/worker.py) — 隔离 Poisson 子进程入口：关闭 Windows 崩溃弹窗并返回单次表面重建结果
+- [data/mesh_reconstruction/dynamic/__init__.py](../data/mesh_reconstruction/dynamic/__init__.py) — 动态对象 Poisson、donor 复用与 Box 回退公开 API
+- [data/mesh_reconstruction/dynamic/dynamic.py](../data/mesh_reconstruction/dynamic/dynamic.py) — 按点覆盖率重建动态对象，并依次执行相同 donor、相似 donor 与 Box 回退
+- [data/mesh_reconstruction/udf/__init__.py](../data/mesh_reconstruction/udf/__init__.py) — 静态世界与动态局部稀疏 TUDF 重建公开 API
+- [data/mesh_reconstruction/udf/udf.py](../data/mesh_reconstruction/udf/udf.py) — 以 PyTorch 稀疏规则张量构建静态世界与动态局部截断无符号距离场
+- [data/bevseg_synthesis/__init__.py](../data/bevseg_synthesis/__init__.py) — BEVSeg 驾驶语义栅格合成模块公开 API
+- [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — 把 HDMap、bbox 与交通控制标注合成为驾驶相关 BEVSeg
+- [data/bevseg_cache/__init__.py](../data/bevseg_cache/__init__.py) — BEVSeg 压缩磁盘缓存公共 API
+- [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — 提供有容量上限、可并发回填的 BEVSeg 压缩 NumPy 磁盘缓存
+- [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — BEVSeg 单帧驾驶语义数据集公共 API
+- [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — 读取 CARLA 场景并返回单帧 ego 对齐 BEVSeg
+- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — 新 DrivingModel 训练切片缓存公共 API
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 新驾驶训练切片缓存：把训练输入打包为可直接读取的 Tensor 字典
+- [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — 轨迹与速度词表模块公开 API
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 从 CARLA ego 运动学时间轴构造并聚类几何/速度词表
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹与速度词表生成命令行入口
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -54,31 +68,32 @@
 - [data/carla_data_collector/README.zh-CN.md](../data/carla_data_collector/README.zh-CN.md) — 采集模块中文设计文档
 - [scene_layout.py](../data/carla_data_collector/scene_layout.py) — 从 Carla 地图提取静态/动态场景布局（官方示例改造）
 
-共享层 `common/`（两端纯 Python，3.7/3.12 双兼容）
+共享层 common/（两端纯 Python，3.7/3.12 双兼容）
 
 - [common/protocol/protocol.py](../data/carla_data_collector/common/protocol/protocol.py) — 控制管道 JSON 行命令/响应协议与帧索引/语义Lidar dtype 定义
 - [common/shm/shm.py](../data/carla_data_collector/common/shm/shm.py) — 匿名共享内存 arena：跨进程零拷贝传大块数据，兼作场景内存缓冲
 
-Py37 采集端 `worker/`（仅 py37_venv 运行）
+Py37 采集端 worker/（仅 py37_venv 运行）
 
 - [worker/main.py](../data/carla_data_collector/worker/main.py) — Py37 worker 子进程入口：经 stdin/stdout JSON 协议受 collector 驱动采集
 - [worker/session/session.py](../data/carla_data_collector/worker/session/session.py) — Carla 世界/地图生命周期：连接、加载 Opt 地图、无渲染模式、严格同步、天气与种子
 - [worker/actors/actors.py](../data/carla_data_collector/worker/actors/actors.py) — 主车、交通流与行人的生成与销毁
 - [worker/sensors/sensors.py](../data/carla_data_collector/worker/sensors/sensors.py) — 传感器阵列：逐视角按开关创建 RGB/Depth/语义/光流相机、语义分割 Lidar、碰撞传感器
 - [worker/annotations/annotations.py](../data/carla_data_collector/worker/annotations/annotations.py) — 带语义的包围框抽取：动态 actor（逐帧）与静态环境物体（每场景）
-- [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — CARLA 原生交通灯车道拓扑与 Agent 当前规划关联，生成可落盘交通控制真值。
-- [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — 单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引。
+- [worker/traffic_control/traffic_control.py](../data/carla_data_collector/worker/traffic_control/traffic_control.py) — CARLA 原生交通灯车道拓扑与 Agent 当前规划关联，生成可落盘交通控制真值
+- [worker/collect/collect.py](../data/carla_data_collector/worker/collect/collect.py) — 单场景严格同步采集循环：逐帧收齐传感器、交通灯状态、共享内存数据与帧索引
 - [worker/model_runtime/model_runtime.py](../data/carla_data_collector/worker/model_runtime/model_runtime.py) — 在 CARLA 中执行纯轨迹模型控制并同步采集 10Hz 真值与 2Hz 传感器
 - [worker/geometry/geometry.py](../data/carla_data_collector/worker/geometry/geometry.py) — carla 几何对象与纯数值的转换，及相机内参推导
 
-Py312 编排处理端 `collector/`（根 .venv 运行）
+Py312 编排处理端 collector/（根 .venv 运行）
 
 - [collector/worker_proc/worker_proc.py](../data/carla_data_collector/collector/worker_proc/worker_proc.py) — 派生并驱动 Py37 worker 子进程的控制管道客户端
 - [collector/routes/routes.py](../data/carla_data_collector/collector/routes/routes.py) — 由可达点构建路线队列：距离过滤、随机排序，并剔除起终点邻近的相似路线
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — 逐场景随机：种子与天气预设（决策与记录都在 collector 侧，便于复现）
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — 把单相机的 BGR 帧序列编码为 H.265 mp4
 - [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — 使用未来10Hz GT Box轨迹离线标注候选、当前位置、下一刻与历史原始代价
-- [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据与独立运动学时间序列写入 LMDB。
+- [collector/costs/tensor_costs.py](../data/carla_data_collector/collector/costs/tensor_costs.py) — Torch 批量候选轨迹代价：GPU/CPU 张量几何与严格包围圆 broad-phase
+- [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据与独立运动学时间序列写入 LMDB
 - [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — 专家/模型双模式采集主循环：闭环推进、分段落盘与完整 GT 代价回填
 - [collector/run.py](../data/carla_data_collector/collector/run.py) — Py312 采集入口 CLI：加载配置并启动采集主循环
 
@@ -88,34 +103,57 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/swiglu/swiglu.py](../model/swiglu/swiglu.py) — 通用 SwiGLU 激活模块（沿维度二等分为 value/gate）
 - [model/rope_3d/rope_3d.py](../model/rope_3d/rope_3d.py) — 通用 3D RoPE 旋转位置编码（只消费调用方传入的三维坐标，全程 FP32）
 - [model/residual_block/residual_block.py](../model/residual_block/residual_block.py) — 视觉编码器残差卷积模块（1D/2D/3D RMSNorm、瓶颈残差块与 2D/3D ConvNeXt 块）
-- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，可选 patch-only 2D RoPE）。
-- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-S+ 视觉骨干：全程冻结 + eval，逐帧输出选定层的完整 Token 序列。
-- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层序列融合：对选定层逐层 RMSNorm 后沿末维拼接，再线性降到预测主干工作维。
-- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 预测特征主干：完整继承 DINOv3 Token 序列，经三层带 patch-only 2D RoPE 的 Pre-Norm Transformer。
+- [model/attention/attention.py](../model/attention/attention.py) — Pre-Norm 交叉/自注意力块（多头，PyTorch 原生 SDPA，可选 patch-only 2D RoPE）
+- [model/dinov3_backbone/dinov3_backbone.py](../model/dinov3_backbone/dinov3_backbone.py) — DINOv3 ViT-S+ 视觉骨干：全程冻结 + eval，逐帧输出选定层的完整 Token 序列
+- [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层序列融合：对选定层逐层 RMSNorm 后沿末维拼接，再线性降到预测主干工作维
+- [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 预测特征主干：完整继承 DINOv3 Token 序列，经三层带 patch-only 2D RoPE 的 Pre-Norm Transformer
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
-- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型。
+- [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型
 - [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
 - [model/bev_query_embedding/bev_query_embedding.py](../model/bev_query_embedding/bev_query_embedding.py) — BEV 查询几何嵌入：仅把 BEV 栅格中心 xyz（含垂直 z 采样）编码为初始查询网格
-- [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — LiDAR 体素融合：局部米制统计乘 4 编码，并以视觉条件门控注入初始 BEV 查询。
+- [model/lidar_fusion/lidar_fusion.py](../model/lidar_fusion/lidar_fusion.py) — LiDAR 体素融合：局部米制统计乘 4 编码，并以视觉条件门控注入初始 BEV 查询
 - [model/driving_neck/driving_neck.py](../model/driving_neck/driving_neck.py) — 驾驶前端 neck：感知 trunk+DINO 原始特征 RMSNorm 融合 + frustum 几何编码 + 2D 残差
-- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼。
-- [model/bev_decoder/__init__.py](../model/bev_decoder/__init__.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。公开 API 重导出入口。
-- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。
-- [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。公开 API 重导出入口。
-- [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
-- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
-- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
-- [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 与显式增量状态。
-- [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 支持训练并行扫描与逐 token 推理的单层 Mamba-3。
+- [model/bev_encoder/bev_encoder.py](../model/bev_encoder/bev_encoder.py) — BEV 编码器：融合三目图像 Token 与历史 BEV，再由带寄存器的二维 RoPE Transformer 提炼
+- [model/bev_decoder/__init__.py](../model/bev_decoder/__init__.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测。公开 API 重导出入口
+- [model/bev_decoder/bev_decoder.py](../model/bev_decoder/bev_decoder.py) — 统一 BEV 解码头：共享一次上采样，同时输出三场、道路线与交通控制预测
+- [model/bev_upsampler/__init__.py](../model/bev_upsampler/__init__.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。公开 API 重导出入口
+- [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征
+- [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹
+- [model/driving_model/__init__.py](../model/driving_model/__init__.py) — 双帧三目+LiDAR 驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV 的公开 API 入口
+- [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — DrivingModel 统一别名重定向入口
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧单目时空 Token DrivingModel 与双流匹配解码器
+- [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 重导出入口
+- [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 单层纯 PyTorch Mamba-3：并行训练扫描与显式增量状态
+- [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — BEVSeg 分层离散压缩器公共 API
+- [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — BEVSeg 编码、分层离散采样与 PixelShuffle 解码网络
+- [model/bevseg_vae64/__init__.py](../model/bevseg_vae64/__init__.py) — 整幅 BEV 64 倍空间压缩 VAE 的公开 API
+- [model/bevseg_vae64/bevseg_vae64.py](../model/bevseg_vae64/bevseg_vae64.py) — 整幅 BEV 的连续 latent VAE：将 256×256 栅格压缩到 4×4
+- [model/privileged_bev_vae/__init__.py](../model/privileged_bev_vae/__init__.py) — 特权 BEV 连续 latent VAE 的公开 API
+- [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV 的连续 latent 变分自编码器
+
+## tools/ — 辅助工具
+
+- [tools/__init__.py](../tools/__init__.py) — 项目级开发工具包
+- [tools/privileged_bev_vae_noise/__init__.py](../tools/privileged_bev_vae_noise/__init__.py) — 特权 BEV VAE latent 噪声与维度冗余测定 API
+- [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) — 测定连续 latent 的噪声、冗余维度和扰动敏感度
+- [tools/privileged_bev_vae_noise/run.py](../tools/privileged_bev_vae_noise/run.py) — 特权 BEV VAE latent 噪声测定命令行入口
 
 ## train/ — 训练 / 评估循环
 
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
-- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束。
-- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
-- [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
-- [train/run.py](../train/run.py) — 统一训练入口 CLI：按 --task 选择感知、驾驶、BEVSeg 或连续 latent VAE 任务，支持缓存预热、断点续训和逐 epoch 保存权重。
+- [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束
+- [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入
+- [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：前向 → 多任务损失 → 反向 → 梯度裁剪 → 步进，并聚合日志
+- [train/run.py](../train/run.py) — 统一训练入口 CLI：按任务加载配置，构建模型与数据，逐 epoch 训练并保存检查点
+- [train/bevseg/__init__.py](../train/bevseg/__init__.py) — BEVSeg 训练损失与 epoch 循环公共 API
+- [train/bevseg/bevseg.py](../train/bevseg/bevseg.py) — BEVSeg 重建损失和独立训练循环
+- [train/bevseg_vae64/__init__.py](../train/bevseg_vae64/__init__.py) — 整幅 BEV 64 倍压缩 VAE 的训练公开 API
+- [train/bevseg_vae64/bevseg_vae64.py](../train/bevseg_vae64/bevseg_vae64.py) — 整幅 BEV 64 倍压缩 VAE 的训练循环适配器
+- [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — 特权 BEV VAE 的训练与评估公开 API
+- [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV VAE 的监督重建、KL 正则和 epoch 训练循环
+- [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — 新 DrivingModel 训练公共 API
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 新 DrivingModel 的 Signed-Log 流匹配损失与训练循环
 
 ## clone_loop/ — 行为克隆闭环
 
@@ -130,7 +168,7 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/routes/__init__.py](../clone_loop/routes/__init__.py) — 闭环路线队列构造的公开 API 重导出入口
 - [clone_loop/routes/routes.py](../clone_loop/routes/routes.py) — 由 CARLA 推荐生成点构造可复现、无重复的闭环评测路线队列
 - [clone_loop/inference/__init__.py](../clone_loop/inference/__init__.py) — 闭环三目+LiDAR 模型推理与轨迹选择的公开 API 重导出入口
-- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹。
+- [clone_loop/inference/inference.py](../clone_loop/inference/inference.py) — 加载三目+LiDAR 驾驶权重、维护双帧状态，并按安全场与路线一致性选择闭环轨迹
 - [clone_loop/control/__init__.py](../clone_loop/control/__init__.py) — 轨迹跟踪控制器的公开 API 重导出入口
 - [clone_loop/control/control.py](../clone_loop/control/control.py) — 把模型选中的 ego 系轨迹转换为 CARLA 归一化转向、油门与制动
 - [clone_loop/client/__init__.py](../clone_loop/client/__init__.py) — Py37 worker 子进程客户端的公开 API 重导出入口
@@ -138,18 +176,18 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [clone_loop/logger/__init__.py](../clone_loop/logger/__init__.py) — 闭环逐步日志与汇总写入器的公开 API 重导出入口
 - [clone_loop/logger/logger.py](../clone_loop/logger/logger.py) — 把每个 episode 的闭环状态、控制与选择结果写为 JSONL，并生成运行汇总
 - [clone_loop/recorder/__init__.py](../clone_loop/recorder/__init__.py) — 闭环驾驶与逐帧推理录像器的公开 API 重导出入口
-- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像。
+- [clone_loop/recorder/recorder.py](../clone_loop/recorder/recorder.py) — 逐 episode 编码三目前向驾驶实况，并合成模型全部在线推理输出的诊断录像
 - [clone_loop/orchestrator/__init__.py](../clone_loop/orchestrator/__init__.py) — 闭环 episode 编排器的公开 API 重导出入口
 - [clone_loop/orchestrator/orchestrator.py](../clone_loop/orchestrator/orchestrator.py) — 串联 Py37 CARLA、共享 RGB/LiDAR、驾驶模型、轨迹控制与逐 episode 评测日志
 
-Py37 仿真端 `worker/`
+Py37 仿真端 worker/
 
 - [clone_loop/worker/__init__.py](../clone_loop/worker/__init__.py) — Py37 CARLA 闭环 worker 包标识
 - [clone_loop/worker/run.py](../clone_loop/worker/run.py) — Py37 CARLA 闭环 worker CLI：接收 JSON 命令、推进仿真并把 RGB/LiDAR 写入共享区
 - [clone_loop/worker/navigation/__init__.py](../clone_loop/worker/navigation/__init__.py) — CARLA 路线进度与局部目标模块的公开 API 重导出入口
 - [clone_loop/worker/navigation/navigation.py](../clone_loop/worker/navigation/navigation.py) — 在 CARLA 全局路线中跟踪主车进度，并生成模型所需的 ego 系近端目标
 - [clone_loop/worker/sensors/__init__.py](../clone_loop/worker/sensors/__init__.py) — 闭环三目 RGB、语义 LiDAR、碰撞与压线传感器的公开 API 重导出入口
-- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向三目 RGB、语义 LiDAR 与安全事件传感器，并严格同步取样。
+- [clone_loop/worker/sensors/sensors.py](../clone_loop/worker/sensors/sensors.py) — 创建闭环前向三目 RGB、语义 LiDAR 与安全事件传感器，并严格同步取样
 - [clone_loop/worker/runtime/__init__.py](../clone_loop/worker/runtime/__init__.py) — CARLA 闭环世界生命周期的公开 API 重导出入口
 - [clone_loop/worker/runtime/runtime.py](../clone_loop/worker/runtime/runtime.py) — 管理 CARLA 世界、交通流、主车、路线和逐步闭环推进
 
@@ -157,51 +195,73 @@ Py37 仿真端 `worker/`
 
 ### vis/reconstructed_mesh_vis/ — 水密 Mesh Open3D 逐帧可视化
 
-- [vis/reconstructed_mesh_vis/__init__.py](../vis/reconstructed_mesh_vis/__init__.py) — 水密 Mesh Open3D 可视化包：读取统一 PT 并按逐帧位姿组合静动态几何。
-- [vis/reconstructed_mesh_vis/run.py](../vis/reconstructed_mesh_vis/run.py) — 水密 Mesh 可视化 CLI：选择统一 PT 并启动 Open3D 逐帧查看器。
-- [vis/reconstructed_mesh_vis/reader/__init__.py](../vis/reconstructed_mesh_vis/reader/__init__.py) — 重建 Mesh PT 读取与定位公开 API。
-- [vis/reconstructed_mesh_vis/reader/reader.py](../vis/reconstructed_mesh_vis/reader/reader.py) — 统一 Mesh PT 读取器：加载静态表面、动态局部模型与逐帧位姿。
-- [vis/reconstructed_mesh_vis/render/__init__.py](../vis/reconstructed_mesh_vis/render/__init__.py) — 重建 Mesh 的静态、动态与轨迹渲染公开 API。
-- [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D Mesh 渲染：静态/动态 BEV 裁剪、逐帧刚体放置与 actor 轨迹。
-- [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Open3D Mesh 全局/自车 BEV 交互查看器公开 API。
-- [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Open3D Mesh 查看器：逐帧播放、全局/自车 BEV、着色与截图。
+- [vis/reconstructed_mesh_vis/__init__.py](../vis/reconstructed_mesh_vis/__init__.py) — 水密 Mesh Open3D 可视化包：读取统一 PT 并按逐帧位姿组合静动态几何
+- [vis/reconstructed_mesh_vis/run.py](../vis/reconstructed_mesh_vis/run.py) — 水密 Mesh 可视化 CLI：选择统一 PT 并启动 Open3D 逐帧查看器
+- [vis/reconstructed_mesh_vis/reader/__init__.py](../vis/reconstructed_mesh_vis/reader/__init__.py) — 重建 Mesh PT 读取与定位公开 API
+- [vis/reconstructed_mesh_vis/reader/reader.py](../vis/reconstructed_mesh_vis/reader/reader.py) — 统一 Mesh PT 读取器：加载静态表面、动态局部模型与逐帧位姿
+- [vis/reconstructed_mesh_vis/render/__init__.py](../vis/reconstructed_mesh_vis/render/__init__.py) — 重建 Mesh 的静态、动态与轨迹渲染公开 API
+- [vis/reconstructed_mesh_vis/render/render.py](../vis/reconstructed_mesh_vis/render/render.py) — Open3D Mesh 渲染：静态表面着色、动态逐帧刚体放置与 actor 轨迹
+- [vis/reconstructed_mesh_vis/viewer/__init__.py](../vis/reconstructed_mesh_vis/viewer/__init__.py) — Open3D Mesh 全局/自车 BEV 交互查看器公开 API
+- [vis/reconstructed_mesh_vis/viewer/viewer.py](../vis/reconstructed_mesh_vis/viewer/viewer.py) — Open3D Mesh 查看器：逐帧播放、全局/自车 BEV、着色与截图
 
 ### vis/reconstructed_udf_vis/ — 稀疏 TUDF Open3D 逐帧可视化
 
-- [vis/reconstructed_udf_vis/__init__.py](../vis/reconstructed_udf_vis/__init__.py) — 稀疏 TUDF 读取、逐帧组合与 Open3D 可视化包。
-- [vis/reconstructed_udf_vis/run.py](../vis/reconstructed_udf_vis/run.py) — 稀疏 TUDF Open3D 逐帧可视化 CLI。
-- [vis/reconstructed_udf_vis/reader/__init__.py](../vis/reconstructed_udf_vis/reader/__init__.py) — 稀疏 TUDF 读取与定位公开 API。
-- [vis/reconstructed_udf_vis/reader/reader.py](../vis/reconstructed_udf_vis/reader/reader.py) — 统一稀疏 TUDF PT 读取器。
-- [vis/reconstructed_udf_vis/render/__init__.py](../vis/reconstructed_udf_vis/render/__init__.py) — 稀疏 TUDF 体素、轨迹渲染公开 API。
-- [vis/reconstructed_udf_vis/render/render.py](../vis/reconstructed_udf_vis/render/render.py) — 把静态世界和当前帧动态局部 TUDF 渲染为 Open3D 稀疏点体素。
-- [vis/reconstructed_udf_vis/viewer/__init__.py](../vis/reconstructed_udf_vis/viewer/__init__.py) — Open3D 稀疏 TUDF 交互查看器公开 API。
-- [vis/reconstructed_udf_vis/viewer/viewer.py](../vis/reconstructed_udf_vis/viewer/viewer.py) — Open3D 稀疏 TUDF 查看器：逐帧、全局/自车 BEV、着色和截图。
+- [vis/reconstructed_udf_vis/__init__.py](../vis/reconstructed_udf_vis/__init__.py) — 稀疏 TUDF 读取、逐帧组合与 Open3D 可视化包
+- [vis/reconstructed_udf_vis/run.py](../vis/reconstructed_udf_vis/run.py) — 稀疏 TUDF Open3D 逐帧可视化 CLI
+- [vis/reconstructed_udf_vis/reader/__init__.py](../vis/reconstructed_udf_vis/reader/__init__.py) — 稀疏 TUDF 读取与定位公开 API
+- [vis/reconstructed_udf_vis/reader/reader.py](../vis/reconstructed_udf_vis/reader/reader.py) — 统一稀疏 TUDF PT 读取器
+- [vis/reconstructed_udf_vis/render/__init__.py](../vis/reconstructed_udf_vis/render/__init__.py) — 稀疏 TUDF 体素、轨迹渲染公开 API
+- [vis/reconstructed_udf_vis/render/render.py](../vis/reconstructed_udf_vis/render/render.py) — 把静态世界和当前帧动态局部 TUDF 渲染为 Open3D 稀疏点体素
+- [vis/reconstructed_udf_vis/viewer/__init__.py](../vis/reconstructed_udf_vis/viewer/__init__.py) — Open3D 稀疏 TUDF 交互查看器公开 API
+- [vis/reconstructed_udf_vis/viewer/viewer.py](../vis/reconstructed_udf_vis/viewer/viewer.py) — Open3D 稀疏 TUDF 查看器：逐帧、全局/自车 BEV、着色和截图
 
 ### vis/reconstructed_pointcloud_vis/ — 融合重建点云 Open3D 交互可视化
 
-- [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — 融合重建点云 Open3D 可视化包：读取统一 PT、分层着色并交互浏览轨迹。
-- [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — 融合重建点云可视化 CLI：选择 PT 场景并启动 Open3D 交互窗口。
-- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载分离的静态地图、动态对象模型及逐帧位姿。
-- [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Open3D 重建点云渲染：图层筛选、分层下采样、着色与 actor 轨迹生成。
-- [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Open3D 交互查看器：切换全局/当前帧 BEV、静动态层、轨迹与着色并保存截图。
+- [vis/reconstructed_pointcloud_vis/__init__.py](../vis/reconstructed_pointcloud_vis/__init__.py) — 融合重建点云 Open3D 可视化包：读取统一 PT、分层着色并交互浏览轨迹
+- [vis/reconstructed_pointcloud_vis/run.py](../vis/reconstructed_pointcloud_vis/run.py) — 融合重建点云可视化 CLI：选择 PT 场景并启动 Open3D 交互窗口
+- [vis/reconstructed_pointcloud_vis/reader/__init__.py](../vis/reconstructed_pointcloud_vis/reader/__init__.py) — 融合重建点云读取模块公开 API
+- [vis/reconstructed_pointcloud_vis/reader/reader.py](../vis/reconstructed_pointcloud_vis/reader/reader.py) — 融合重建点云读取器：加载分离的静态地图、动态对象模型及逐帧位姿
+- [vis/reconstructed_pointcloud_vis/render/__init__.py](../vis/reconstructed_pointcloud_vis/render/__init__.py) — Open3D 重建点云渲染模块公开 API
+- [vis/reconstructed_pointcloud_vis/render/render.py](../vis/reconstructed_pointcloud_vis/render/render.py) — Open3D 重建点云渲染：图层筛选、分层下采样、着色与 actor 轨迹生成
+- [vis/reconstructed_pointcloud_vis/viewer/__init__.py](../vis/reconstructed_pointcloud_vis/viewer/__init__.py) — Open3D 重建点云交互查看器公开 API
+- [vis/reconstructed_pointcloud_vis/viewer/viewer.py](../vis/reconstructed_pointcloud_vis/viewer/viewer.py) — Open3D 交互查看器：切换全局/当前帧 BEV、静动态层、轨迹与着色并保存截图
 
-- [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — 可视化包标识：只读消费采集数据集并渲染
+### vis/data_vis/ 与 vis/trajectory_vocab_vis/ — 原始数据与轨迹词表
+
+- [vis/data_vis/__init__.py](../vis/data_vis/__init__.py) — ByteDrive 可视化包：只读消费 carla_data_collector 落盘的数据集并渲染
 - [vis/data_vis/run.py](../vis/data_vis/run.py) — 可视化入口 CLI：加载配置、定位场景目录、启动交互窗口
-- [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — 场景读取器：合并单场景的 LMDB 与 mp4 为逐帧数据，探测各模态可用性
-- [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — 纯 numpy 复刻 CARLA 坐标变换与 3D->2D 投影
-- [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — CARLA 语义标签到颜色的调色板与向量化映射
-- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、LiDAR/状态轨迹鸟瞰图、多面板合成与 HUD
+- [vis/data_vis/reader/__init__.py](../vis/data_vis/reader/__init__.py) — 场景读取器：合并单场景的 LMDB 与 mp4 为逐帧数据，探测各模态可用性。公开 API 重导出入口
+- [vis/data_vis/reader/reader.py](../vis/data_vis/reader/reader.py) — 场景读取器：合并单场景的 LMDB（深度/语义lidar/标注/元数据）与 mp4（RGB）为逐帧数据
+- [vis/data_vis/geometry/__init__.py](../vis/data_vis/geometry/__init__.py) — 纯 numpy 复刻 CARLA 坐标变换与 3D->2D 投影。公开 API 重导出入口
+- [vis/data_vis/geometry/geometry.py](../vis/data_vis/geometry/geometry.py) — 纯 numpy 复刻 CARLA 坐标变换与 3D->2D 投影（vis 侧不依赖 carla）
+- [vis/data_vis/palette/__init__.py](../vis/data_vis/palette/__init__.py) — 可视化着色（语义调色板 + 光流配色）。公开 API 重导出入口
+- [vis/data_vis/palette/palette.py](../vis/data_vis/palette/palette.py) — 可视化着色：CARLA 语义标签调色板 + 光流/速度场 HSV 配色，data_vis 与 pred_vis 共用
+- [vis/data_vis/draw/__init__.py](../vis/data_vis/draw/__init__.py) — 渲染：3D 框投影、深度/语义/光流着色、lidar+框 鸟瞰图、多面板合成与 HUD。公开 API 重导出入口
+- [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影到 RGB、深度/语义/光流着色、lidar+框 鸟瞰图、多面板合成与 HUD
+- [vis/data_vis/viewer/__init__.py](../vis/data_vis/viewer/__init__.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图。公开 API 重导出入口
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
+- [vis/trajectory_vocab_vis/__init__.py](../vis/trajectory_vocab_vis/__init__.py) — 轨迹与速度词表静态可视化模块
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 绘制几何轨迹词表、速度词表和聚类评估图
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 轨迹词表 PNG 可视化命令行入口
 
-### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）
+### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染双头预测与 GT 对照）
 
 - [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染双头预测与 GT 对照
+- [vis/pred_vis/render/__init__.py](../vis/pred_vis/render/__init__.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布。公开 API 重导出入口
 - [vis/pred_vis/render/render.py](../vis/pred_vis/render/render.py) — 渲染：把感知模型双头预测（及可选 GT）着色并合成多帧多模态对照画布
-- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染预测与 GT 对照并保存
+- [vis/pred_vis/run.py](../vis/pred_vis/run.py) — 预测可视化入口 CLI：加载配置与权重 → 对场景逐帧推理 → 渲染双头预测与 GT 对照并保存
 
 ### vis/driving_vis/ — 驾驶模型可视化（透视模态 + GT/预测 三场/道路线/交通控制/轨迹）
 
-- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块：对照渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹。
-- [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — 驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口。
-- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布。
-- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 三目+LiDAR 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测 BEV 多任务结果。
+- [vis/driving_vis/__init__.py](../vis/driving_vis/__init__.py) — 驾驶模型可视化子模块：对照渲染透视模态与 GT/预测三场、道路线、交通控制及轨迹
+- [vis/driving_vis/render/__init__.py](../vis/driving_vis/render/__init__.py) — 驾驶模型可视化渲染：三场/道路线/交通控制/多模态轨迹着色与混合尺寸面板合成。公开 API 重导出入口
+- [vis/driving_vis/render/render.py](../vis/driving_vis/render/render.py) — 渲染：把驾驶模型三场、道路线、交通控制与多模态轨迹着色，并和透视模态合成对照画布
+- [vis/driving_vis/run.py](../vis/driving_vis/run.py) — 三目+LiDAR 驾驶可视化入口 CLI：逐帧渲染透视模态与 GT/预测 BEV 多任务结果
+
+### vis/bevseg_vis/ 与 vis/privileged_bev_vae_vis/ — BEVSeg 压缩与 VAE 可视化
+
+- [vis/bevseg_vis/__init__.py](../vis/bevseg_vis/__init__.py) — BEVSeg 数据、压缩器重建与量化特征 PCA 可视化公共 API
+- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — 渲染 BEVSeg 真值、压缩器重建结果与量化特征 PCA
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — 按命令行模式保存 BEVSeg 数据集或压缩器重建与量化特征 PCA 可视化
+- [vis/privileged_bev_vae_vis/__init__.py](../vis/privileged_bev_vae_vis/__init__.py) — 特权 BEV VAE 可视化公开入口
+- [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) — 渲染特权 BEV VAE 的 target、重建、latent PCA 和语义细节画布

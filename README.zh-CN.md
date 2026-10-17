@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <strong>面向 CARLA 合成数据的三目+LiDAR、双帧时序行为克隆驾驶研究原型</strong><br/>
-  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · 几何感知 BEV · 多模态轨迹与行为联合预测 · CARLA 闭环评测
+  <strong>面向 CARLA 合成数据的视觉端到端多任务驾驶、特权 BEV 表征与行为克隆研究原型</strong><br/>
+  冻结 DINOv3 视觉骨干 · 语义/深度感知预训练 · BEVSeg 分组离散码本与连续 VAE 压缩 · 统一四帧时空流匹配驾驶 · CARLA 闭环评测
 </p>
 
 <p align="center">
@@ -74,35 +74,36 @@
 
 ## 项目概览
 
-ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
+ByteDrive-Toy 把以视觉为中心的自动驾驶研究流程组织为多阶段递进的学习与表征体系：
 
-1. **感知预训练**：以冻结的 DINOv3 ViT-S+/16 为视觉骨干，融合浅/中/深层完整 Token 序列，联合学习
-   29 类语义分割与米制深度估计。
-2. **驾驶学习**：复用感知表征，以三路相机 frustum 与纯 BEV xyz 几何把当前图像聚合到前向 BEV，
-再查询刚性对齐的上一帧 BEV；同时预测风险场、可行驶场、轨迹分布场、道路线图、8 模态未来轨迹、
-   模态置信度和 8 类行为标签。规划分支以目标点与 ego 平面速度为条件，用 8 个可学习 Mode Token 查询
-   BEV 主干第 3、6 层特征。
+1. **感知预训练**：以本地冻结的 DINOv3 ViT-S+/16 为视觉骨干，提取浅/中/深层完整 Token 序列，共享可训练主干联合学习 29 类语义分割与米制深度估计。
+2. **特权 BEV 表征与压缩预训练**：
+   - **BEVSeg 栅格压缩器**：将 64 m × 64 m (256 × 256) HDMap、动态包围框和交通控制状态光栅化为驾驶相关语义栅格。384 维残差编码器、64 表分组离散码本与 ICNR PixelShuffle 解码器实现 16 倍空间压缩与有界缓存（参见 [Doc/BEVSeg.md](Doc/BEVSeg.md)）。
+   - **连续隐空间 VAE**：4 阶段连续高斯隐空间特权 BEV VAE（参见 [Doc/PrivilegedBEVVAE.md](Doc/PrivilegedBEVVAE.md)）与全 BEV 64 倍空间压缩连续隐空间 VAE（将 256 × 256 压缩至 4 × 4 紧凑隐空间，参见 [Doc/BEVSegVAE64.md](Doc/BEVSegVAE64.md)），配备隐空间协方差、有效秩与高斯扰动测定工具。
+3. **驾驶学习**：
+   - **统一驾驶模型 (`UnifiedDrivingModel`)**：四帧单目前向时空 Token 主干，配备双 AdaLN-Zero 流匹配（Flow-Matching）解码器，联合预测连续 BEV 场与零连续 Signed-Log 度量空间的多模态轨迹，基于 3 秒驾驶切片缓存训练。
+   - **双帧多模态基线 (`DrivingModel`)**：经典双帧三相机 (`front/front_left/front_right`) 驾驶模型，复用感知 Token，通过视锥与纯 BEV xyz 几何将图像特征投射至前向 BEV 并与刚性对齐的上一帧 BEV 融合，预测连续 BEV 场、车道矢量、8 模态未来轨迹与行为标签。
+4. **轨迹词表与 3D 场景重建**：流式空间轨迹与连续速度词表无监督聚类；离线语义 LiDAR 多帧融合、静态/动态分离、截断无符号距离场 (TUDF) 与可选 Poisson 表面重建。
+5. **闭环仿真与评测**：接入 CARLA 0.9.15 同步仿真，形成“观测 → 多帧推理 → 候选轨迹安全重排 → 纯追踪/PID 控制 → 下一观测”的执行闭环，按路线记录终态、进度与诊断录像。
 
-训练完成后，闭环运行器把 `DrivingModel` 接入 CARLA 同步仿真，形成“观测 → 双帧推理 → 轨迹选择 →
-纯追踪/PID 控制 → 下一观测”的反馈闭环，并按路线记录终态、进度、控制量、模型诊断和录像。
-
-项目的核心特点如下。
+项目核心特点如下：
 
 | 能力 | 当前实现 |
 | --- | --- |
-| 学习范式 | CARLA `BehaviorAgent` 专家数据上的监督行为克隆；无在线采样更新、无奖励函数、无闭环强化学习 |
-| 视觉输入 | 当前帧 + 同场景上一帧 `front/front_left/front_right` RGB，每路默认 `768×384`；首帧用 identity + 无效位 |
-| 视觉骨干 | 本地 DINOv3 ViT-S+/16，参数永久冻结，提取第 3/6/12 层完整 Token 序列 |
-| 感知任务 | 29 类语义分割；Symlog 深度回归；深度量程内/外二分类 |
-| 几何建模 | 相机内外参反投影；每个 patch 中心与四角沿深度近密远疏采样 |
-| BEV | 前向 `64 m × 64 m`，工作网格 `32×32`，场输出 `256×256` |
-| 驾驶输出 | 三场；道路线与方向；相关停止线与灯色；8 模态 × 20 个 10Hz 航点；8 类行为 |
-| 训练 | AdamW；BF16 主干 + FP32 末端/损失；感知模块差分小学习率 |
-| 数据 | CARLA 0.9.15；RGB/H.265 + 非 RGB/LMDB；传感器 2Hz、运动学 10Hz 异频采集 |
-| 场景重建 | 语义 LiDAR 多帧融合；静态世界/动态对象分离；稀疏 TUDF 默认输出，可选 Poisson Mesh |
-| 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照 |
-| 闭环驾驶 | CARLA 同步仿真；双帧在线推理；轨迹安全重排；纯追踪横向控制 + 速度 PID；episode 评测与录像 |
-| 检查点 | 自动续训；检查点排除可重新加载的冻结 DINOv3 骨干 |
+| 学习范式 | 离线监督学习（感知预训练、离散与连续 BEV 压缩、流匹配 / 经典行为克隆）；CARLA 同步仿真评测 |
+| 视觉输入 | 感知：单帧前视 RGB；统一驾驶：4 帧单目前向 RGB；经典驾驶：2 帧三相机 (`front/front_left/front_right`) RGB |
+| 视觉骨干 | 本地 DINOv3 ViT-S+/16，参数永久冻结，提取第 3/6/12 层完整 Token 序列；可选单层纯 PyTorch Mamba-3 序列块 |
+| 感知任务 | 29 类语义分割；Symlog 米制深度回归；深度量程二分类 |
+| 特权 BEV 表征 | 64 m × 64 m (256 × 256) BEVSeg 语义栅格（11 类语义 + 2 通道归一化车道方向）；16 倍离散码本压缩与 16 倍 / 64 倍连续高斯 VAE 压缩 |
+| 驾驶架构 | `UnifiedDrivingModel`（4 帧单目前向时空 Token + 双 AdaLN-Zero 流匹配解码器，Signed-Log 空间）；`DrivingModel`（2 帧三相机视锥 BEV Transformer + 8 模态轨迹解码器） |
+| 驾驶输出 | 多模态航点轨迹（20 步 10Hz）、零连续 Signed-Log 速度、BEV 风险/可行驶/分布场、道路线拓扑、交通灯状态 |
+| 轨迹词表 | 空间轨迹曲线与连续速度的无监督 K-means 聚类，支持 HTML / PNG 静态渲染 |
+| 训练 | AdamW 差分学习率优化器，CUDA 原位 PyTorch Inductor 编译，任务专用检查点管理（`perception`, `driving`, `bevseg`, `privileged_bev_vae`, `bevseg_vae64`）与自动恢复 |
+| 数据与缓存 | CARLA 0.9.15 异构采集（H.265 RGB + LMDB）；无损压缩 NumPy BEVSeg 缓存；3 秒驾驶切片缓存 |
+| 3D 重建 | 语义 LiDAR 多帧融合；静态世界与动态 Actor 分离；稀疏 TUDF 默认输出，可选 Poisson 表面网格 |
+| 可视化 | 原始数据交互浏览、感知预测对照、驾驶 BEV 场与轨迹对照、BEVSeg 栅格与码本重建查看器、VAE 重建与隐空间 PCA 查看器、轨迹词表渲染器 |
+| 闭环驾驶 | CARLA 0.9.15 同步仿真；在线多帧推理；候选轨迹安全重排；纯追踪横向控制 + 速度 PID；episode 评测与录像 |
+| 检查点 | 自动续训；检查点按任务隔离，自动排除可重新加载的冻结 DINOv3 骨干 |
 
 ### 当前完成度
 
@@ -110,17 +111,20 @@ ByteDrive-Toy 把自动驾驶研究流程拆成两个连续阶段：
 flowchart LR
     A["CARLA 数据采集<br/>已实现"] --> B["数据浏览与质检<br/>已实现"]
     B --> C["感知预训练<br/>已实现"]
+    B --> BEV["特权 BEV 合成与压缩<br/>已实现 (BEVSeg / 连续 VAE)"]
     B --> R1["语义 LiDAR 多帧融合<br/>已实现"]
     R1 --> R2["稀疏 TUDF / 可选 Mesh<br/>已实现"]
-    C --> D["BEV 驾驶训练<br/>已实现"]
+    B --> VOC["轨迹/速度词表聚类<br/>已实现"]
+    C --> D["端到端驾驶模型训练<br/>已实现 (UnifiedDriving / 经典模型)"]
+    BEV -.->|"特权几何/场引导"| D
     D --> E["离线预测可视化<br/>已实现"]
-    D --> F["行为克隆闭环执行 clone_loop<br/>已实现"]
-    F --> G["CARLA 接管/episode 评测<br/>已实现，不参与训练"]
+    D --> F["闭环仿真 clone_loop<br/>已实现"]
+    F --> G["CARLA 接管/评测指标<br/>已实现，不参与训练"]
     G -.->|"无奖励优化/无策略更新"| H["闭环强化学习<br/>未实现"]
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
     classDef absent fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
-    class A,B,C,D,E,F,G,R1,R2 done;
+    class A,B,C,BEV,R1,R2,VOC,D,E,F,G done;
     class H absent;
 ```
 
@@ -1169,9 +1173,35 @@ Poisson 参数及查看器样式均由对应配置段控制。Mesh 的水密修�
 
 ## 训练策略与训练方法
 
-本节两阶段训练均为固定数据集上的监督学习。阶段 2 通过专家未来轨迹、行为标签、HDMap 与 CARLA 真值构造的场监督
-优化多任务损失；`clone_loop/` 只消费训练后的检查点做闭环推理和评测，episode 的碰撞、进度和终态不会被转换成
-reward，也不会触发反向传播、经验回放、策略梯度或在线微调。
+ByteDrive-Toy 提供统一训练入口 (`python -m train.run --task <task>`)，支持感知多任务预训练、统一驾驶流匹配学习、BEVSeg 离散压缩以及连续高斯隐空间 VAE 表征学习。全部训练任务均为固定离线数据集上的监督学习。`clone_loop/` 仅消费训练后的检查点进行仿真推理和评测，不包含在线强化学习或反向传播。
+
+```powershell
+# 1. 单帧感知多任务预训练（语义分割 + 米制深度）
+python -m train.run --task perception
+
+# 2. 统一四帧单目前向 BEV 场与轨迹流匹配驾驶模型
+python -m train.run --task driving
+
+# 3. BEVSeg 64 表分组离散码本压缩器（支持预热并固化栅格缓存）
+python -m train.run --task bevseg --prepare-bevseg-cache
+python -m train.run --task bevseg
+
+# 4. 特权连续高斯隐空间 BEV VAE
+python -m train.run --task privileged_bev_vae
+
+# 5. 全 BEV 64 倍空间压缩连续隐空间 VAE
+python -m train.run --task bevseg_vae64
+```
+
+### 支持的训练任务
+
+| 任务名 (`--task`) | 模型与架构 | 损失函数 / 优化目标 | 输入数据与缓存 |
+| --- | --- | --- | --- |
+| `perception` | `PerceptionModel`: 冻结 DINOv3 + 3 层 Trunk + PixelShuffle 输出头 | 29 类交叉熵、Symlog 米制深度、空间深度梯度、深度量程二分类 | 单帧前视 RGB |
+| `driving` | `UnifiedDrivingModel`: 4 帧单目前向时空 Token 主干 + 双 AdaLN-Zero 流匹配解码器 | Signed-Log 轨迹速度匹配 + 多帧连续 BEV 场流匹配 | 4 帧单目前向 RGB；3 秒 Signed-Log 连续切片缓存 (`data/driving_cache`) |
+| `bevseg` | `BEVSegCompressor`: 384 维残差编码器 + 64 表分组离散码本 + ICNR PixelShuffle 解码器 | 语义重建加权交叉熵、道路线余弦损失、码本熵正则化 | 单帧 64m×64m BEVSeg 栅格；无损 NumPy 缓存 (`data/bevseg_cache`) |
+| `privileged_bev_vae` | `PrivilegedBEVVAE`: 4 阶段连续高斯隐空间编码-解码器 | 语义与车道重建损失 + KL 散度正则化，周期性隐空间噪声/秩测定 | 单帧 64m×64m BEVSeg 栅格 |
+| `bevseg_vae64` | `BEVSegVAE64`: 64 通道 4×4 连续隐空间 VAE (64倍空间压缩) | 共享 BEVSeg 重建损失 + KL 散度正则化 | 单帧 64m×64m BEVSeg 栅格 |
 
 ### 推荐的两阶段训练顺序
 
@@ -1286,8 +1316,13 @@ K_{13}\mathcal{L}_{stop\_crossing}
 ```text
 train/ckpt/
 ├── perception/epoch_001.pt
-└── driving/epoch_001.pt
+├── driving/epoch_001.pt
+├── bevseg/epoch_001.pt
+├── privileged_bev_vae/epoch_001.pt
+└── bevseg_vae64/epoch_001.pt
 ```
+
+使用 `--task bevseg` 时，可额外附加 `--prepare-bevseg-cache` 参数，在不构造模型权重的情况下预先光栅化并固化缺失的无损压缩栅格缓存。
 
 每个训练检查点包含：
 
@@ -1749,6 +1784,36 @@ python -m vis.driving_vis.run `
 请使用 `pred_vis`/`driving_vis` 配置段或环境覆盖；原始数据 BEV 的相关停止线颜色、线宽和停止点半径位于
 `data_vis.traffic_lights`。
 
+### BEVSeg 栅格与压缩器可视化
+
+```powershell
+# 交互式检查 BEVSeg 栅格真值与离散压缩重建质量
+python -m vis.bevseg_vis.run --scene scene_000000 --interactive
+python -m vis.bevseg_vis.run --scene scene_000000 --frame 10 --save-render vis/bevseg_vis/out/render.png
+```
+
+支持同时渲染 11 类语义俯视图、归一化车道方向矢量场以及 64 表分组离散压缩器重建前后的残差对比。
+
+### 特权 BEV VAE 与隐空间噪声测定
+
+```powershell
+# 检查特权连续隐空间 VAE 重建质量与潜在空间 PCA
+python -m vis.privileged_bev_vae_vis.run --scene scene_000000 --interactive
+
+# 测定隐变量经验协方差、有效秩与各向同性高斯扰动鲁棒性
+python -m tools.privileged_bev_vae_noise.run --checkpoint train/ckpt/privileged_bev_vae/epoch_010.pt
+```
+
+### 轨迹与速度词表可视化
+
+```powershell
+# 从数据集流式抽取航点轨迹并聚类离散速度与空间词表
+python -m data.trajectory_vocabulary.run --dataset-dir data/carla_data_collector/dataset
+
+# 渲染轨迹与速度词表静态图及交互 HTML
+python -m vis.trajectory_vocab_vis.run --vocab-dir data/trajectory_vocabulary/output
+```
+
 ### 重建结果可视化
 
 三套 Open3D 查看器分别读取多帧融合点云、可选 Mesh 和默认 TUDF 产物：
@@ -1868,71 +1933,65 @@ print(output["behavior_logits"].shape)  # [1, 8]
 ```text
 ByteDrive-Toy/
 ├── config/
-│   ├── default.yaml                  # 全部默认参数的唯一来源
-│   ├── schema.py                     # dataclass schema 与配置校验
-│   └── __init__.py                   # load_config + 环境覆盖深度合并
+│   ├── default.yaml                # 集中化配置与默认超参数
+│   └── schema.py                   # 强类型配置校验与 dataclass
 ├── data/
-│   ├── carla_data_collector/         # CARLA Py3.7/Py3.12 双进程采集系统
-│   ├── single_frame_base/            # 场景索引、惰性 reader、RGB 归一化
-│   ├── perception_dataset/           # 感知单帧数据集
-│   ├── driving_dataset/              # 驾驶输入与多任务 GT
-│   ├── lidar_voxelization/            # LiDAR 体素中心相对 XYZ 均值/总体标准差
-│   ├── driving_targets/              # 轨迹、行为、风险/分布场纯 NumPy 编码
-│   ├── hd_map/                       # HDMap 栅格化与道路外距离场
-│   ├── target_encoding/              # Symlog 物理量监督
-│   ├── scene_batch_sampler/          # 同场景连续帧成批、batch 粒度打乱的采样器
-│   ├── multiframe_pointcloud_fusion/ # 语义 LiDAR 静态/动态多帧融合与场景级断点恢复
-│   ├── mesh_reconstruction/          # 稀疏 TUDF 默认重建与可选 Poisson Mesh
-│   └── map/                          # TownXX_HD_map.npz（下载/本地文件）
+│   ├── carla_data_collector/       # CARLA 0.9.15 异构采集（Py3.7 worker + Py3.12 采集器）
+│   ├── single_frame_base/          # 场景索引、惰性 reader、RGB 归一化
+│   ├── perception_dataset/         # 感知单帧前视 RGB 数据集
+│   ├── driving_dataset/            # 经典双帧三相机驾驶数据集与多任务 GT
+│   ├── driving_cache/              # 4 帧单目前向 3 秒时空切片高速缓存
+│   ├── bevseg_synthesis/           # 64m×64m BEVSeg 语义栅格真值光栅化
+│   ├── bevseg_cache/               # 无损压缩 NumPy BEVSeg 栅格缓存
+│   ├── bevseg_dataset/             # 单帧自车对齐 BEVSeg 数据集
+│   ├── trajectory_vocabulary/      # 流式空间航点与连续速度词表无监督聚类
+│   ├── multiframe_pointcloud_fusion/ # 语义 LiDAR 动静态点云多帧融合与断点续跑
+│   └── mesh_reconstruction/        # 稀疏 TUDF 默认重建与可选 Poisson 表面网格
 ├── model/
-│   ├── dinov3_backbone/              # 冻结本地 DINOv3 多层完整 Token 序列
-│   ├── feature_fusion/               # 逐层 RMSNorm + 末维拼接 + Linear 融合
-│   ├── feature_trunk/                # 感知 3 层 Pre-Norm Transformer
-│   ├── perception_head/              # 语义/深度 PixelShuffle 头
-│   ├── perception_model/             # 共享视觉编码器 + Pred 双头总模型
-│   ├── frustum_encoding/             # patch 视锥 3D 候选编码
-│   ├── driving_neck/                 # 感知+DINO+几何融合
-│   ├── bev_query_embedding/          # 纯 xyz 几何 BEV 查询
-│   ├── lidar_fusion/                  # 局部米制统计 ×4 编码与视觉条件门控
-│   ├── attention/                    # Pre-Norm SDPA + SwiGLU + patch-only 2D RoPE
-│   ├── bev_encoder/                  # BEV 交叉注意力 + 无位置寄存器 + 6 层 2D RoPE Transformer
-│   ├── bev_upsampler/                # 驾驶 BEV 专用空间卷积 + PixelShuffle 激活残差上采样
-│   ├── bev_decoder/                  # 共享一次上采样的三场/道路线/交通控制统一解码头
-│   ├── trajectory_decoder/           # 多模态轨迹/置信度/行为联合 Token
-│   ├── driving_model/                # 驾驶总模型
-│   └── residual_block/ swiglu/ pixel_shuffle_upsampler/ rope_3d/ ...  # 可复用基础构件及 checks
+│   ├── dinov3_backbone/            # 冻结本地 DINOv3 ViT-S+ 特征提取
+│   ├── perception_model/           # 共享视觉主干 + 语义与深度 PixelShuffle 头
+│   ├── bev_encoder/                # 相机/历史交叉注意力与 6 层 2D-RoPE BEV Transformer
+│   ├── bev_decoder/                # 风险/可行驶/分布场、道路线拓扑与交通控制解码
+│   ├── trajectory_decoder/         # 多模态轨迹航点、置信度与行为 logits 解码
+│   ├── driving_model/              # 驾驶模型总入口与 UnifiedDrivingModel 统一别名
+│   ├── bevseg_compressor/          # 64 表分组离散码本压缩器（残差编码器 + ICNR 解码器）
+│   ├── bevseg_vae64/               # 全 BEV 64 倍空间压缩连续隐空间 VAE (4×4 隐变量)
+│   ├── privileged_bev_vae/         # 4 阶段连续高斯隐空间特权 BEV VAE
+│   └── mamba3/                     # 单层纯 PyTorch Mamba-3 状态空间序列块
+├── tools/
+│   └── privileged_bev_vae_noise/   # 连续隐空间经验协方差、有效秩与扰动鲁棒性测定
 ├── train/
-│   ├── run.py                        # perception/driving 统一 CLI
-│   ├── loop/                         # 训练与评估循环
-│   ├── losses/                       # 感知/驾驶多任务损失
-│   ├── optimizer/                    # AdamW 与差分学习率分组
-│   └── ckpt/                         # 下载权重及本地训练输出（按 perception/driving 分目录）
+│   ├── run.py                      # 统一训练 CLI (perception, driving, bevseg, VAE 等)
+│   ├── loop/                       # 感知与经典双帧驾驶前向/反向训练循环
+│   ├── unified_driving/            # Signed-Log 流匹配损失与 4 帧统一驾驶训练循环
+│   ├── bevseg/                     # 64 表分组离散码本压缩器训练循环
+│   ├── bevseg_vae64/               # 64 倍空间压缩 VAE 训练适配器
+│   ├── privileged_bev_vae/         # 特权连续高斯隐空间 BEV VAE 训练循环
+│   ├── losses/                     # 多任务感知与驾驶损失函数集合
+│   └── optimizer/                  # AdamW 优化器与差分学习率参数分组
 ├── vis/
-│   ├── data_vis/                     # 原始数据交互浏览器
-│   ├── pred_vis/                     # 感知预测/GT 对照
-│   ├── driving_vis/                  # 三场/道路线/交通控制/轨迹预测与 GT 对照
-│   ├── reconstructed_pointcloud_vis/ # 融合点云 Open3D 查看器
-│   ├── reconstructed_mesh_vis/       # Mesh 逐帧 Open3D 查看器
-│   └── reconstructed_udf_vis/        # 稀疏 TUDF 逐帧 Open3D 查看器
-├── assets/
-│   └── visualizations/               # README 展示用的可视化结果图
-├── clone_loop/                       # CARLA 0.9.15 行为克隆闭环
-│   ├── run.py                        # 主环境闭环 CLI
-│   ├── orchestrator/                 # 路线队列与 episode 编排
-│   ├── inference/                    # DrivingModel 加载、推理与候选轨迹重排
-│   ├── control/                      # 纯追踪横向控制与纵向 PID
-│   ├── worker/                       # Python 3.7 CARLA 同步仿真 worker
-│   ├── recorder/                     # JSONL、summary 与双路 MP4
-│   ├── README.md                     # 闭环英文主文档
-│   └── README.zh-CN.md               # 闭环中文文档
+│   ├── data_vis/                   # 原始 CARLA 采集场景交互式查看器
+│   ├── pred_vis/                   # 感知预测 vs 真值对比渲染
+│   ├── driving_vis/                # 经典驾驶场、车道线、交通控制与轨迹多模态查看器
+│   ├── bevseg_vis/                 # BEVSeg 栅格真值与离散压缩重建质量查看器
+│   ├── privileged_bev_vae_vis/     # 特权 VAE 重建质量与潜在空间 PCA 查看器
+│   ├── trajectory_vocab_vis/       # 空间轨迹与连续速度词表静态渲染与 HTML 查看器
+│   ├── reconstructed_pointcloud_vis/ # 融合多帧点云 Open3D 渲染器
+│   ├── reconstructed_mesh_vis/     # 重建网格 Open3D 查看器
+│   └── reconstructed_udf_vis/      # 稀疏 TUDF 距离场 Open3D 查看器
+├── clone_loop/                     # CARLA 0.9.15 同步闭环控制与评测
 ├── Doc/
-│   ├── Index.md                      # 英文文件与文档索引
-│   ├── Index.zh-CN.md                # 中文文件与文档索引
-│   ├── DevelopmentGuidelines.md      # 英文开发约定
-│   └── 开发规范.md                   # 中文开发约定
-├── LICENSE                           # Apache License 2.0
-├── README.md                         # 英文主文档
-└── README.zh-CN.md                   # 中文文档
+│   ├── Index.md                    # 英文代码库文件与文档索引
+│   ├── Index.zh-CN.md              # 中文代码库文件与文档索引
+│   ├── DevelopmentGuidelines.md    # 英文开发规范与约定
+│   ├── 开发规范.md                 # 中文开发规范与约定
+│   ├── BEVSeg.md                   # BEVSeg 栅格定义与离散压缩器接口契约
+│   ├── BEVSegVAE64.md              # 全 BEV 64 倍空间压缩连续隐空间 VAE 规范
+│   └── PrivilegedBEVVAE.md         # 连续高斯隐空间特权 BEV VAE 设计规范
+├── site/                           # 项目官方主页站点
+├── LICENSE                         # Apache-2.0 开源许可证
+├── README.md                       # 英文主文档
+└── README.zh-CN.md                 # 完整中文文档
 ```
 
 大多数模块采用同构布局：
@@ -2043,10 +2102,14 @@ python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 
 ## 开发约定与许可证
 
-- 文件导航：[Doc/Index.zh-CN.md](Doc/Index.zh-CN.md)
-- 开发规范：[Doc/开发规范.md](Doc/开发规范.md)
+- 文件与文档索引：[Doc/Index.zh-CN.md](Doc/Index.zh-CN.md)（英文索引：[Doc/Index.md](Doc/Index.md)）
+- 开发规范：[Doc/开发规范.md](Doc/开发规范.md)（英文规范：[Doc/DevelopmentGuidelines.md](Doc/DevelopmentGuidelines.md)）
+- BEVSeg 栅格与压缩器规范文档：[Doc/BEVSeg.md](Doc/BEVSeg.md)
+- 特权连续隐空间 BEV VAE 规范文档：[Doc/PrivilegedBEVVAE.md](Doc/PrivilegedBEVVAE.md)
+- BEVSeg 64倍空间压缩连续隐空间 VAE 规范文档：[Doc/BEVSegVAE64.md](Doc/BEVSegVAE64.md)
 - 采集模块详解：[data/carla_data_collector/README.zh-CN.md](data/carla_data_collector/README.zh-CN.md)
 - 闭环模块详解：[clone_loop/README.zh-CN.md](clone_loop/README.zh-CN.md)
+- 英文主文档：[README.md](README.md)
 
 项目要求可调参数集中到 `config/`，Python 实现文件使用中文注释/docstring，新增或删除文件时同步维护
 `Doc/Index.md`，输入检查放在模块邻近的 `checks/` 目录。

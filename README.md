@@ -5,9 +5,10 @@
 </p>
 
 <p align="center">
-  <strong>A research prototype for three-camera + LiDAR, two-frame temporal behavior-cloning driving on synthetic CARLA data</strong><br/>
-  Frozen DINOv3 visual backbone · semantic/depth pretraining · geometry-aware BEV · joint multimodal trajectory and behavior prediction · CARLA closed-loop evaluation
+  <strong>A research prototype for multi-task vision-centric autonomous driving, privileged BEV representations, and behavior-cloning on synthetic CARLA data</strong><br/>
+  Frozen DINOv3 backbone · semantic/depth pretraining · BEVSeg grouped discrete codebook & continuous VAE compression · unified 4-frame flow-matching driving · CARLA closed-loop evaluation
 </p>
+
 
 <p align="center">
   <a href="README.zh-CN.md">简体中文</a> · <strong>English</strong>
@@ -47,42 +48,47 @@
 
 ## Overview
 
-ByteDrive-Toy divides the driving research pipeline into two consecutive learning stages:
+ByteDrive-Toy organizes the vision-centric driving research pipeline into multiple progressive learning and representation stages:
 
-1. **Perception pretraining.** A frozen DINOv3 ViT-S+/16 backbone supplies full token sequences from shallow, middle, and deep layers. A shared trainable trunk jointly learns 29-class semantic segmentation and metric depth estimation.
-2. **Driving learning.** The perception representation is reused to aggregate three camera frustums, LiDAR voxel statistics, and a rigidly aligned previous-frame BEV into a forward-facing BEV. The model jointly predicts spatial fields, lane geometry, traffic control, eight future-trajectory modes, mode confidence, and eight behavior labels.
-
-At runtime, the closed-loop runner connects `DrivingModel` to synchronous CARLA simulation:
-
-```text
-observation -> two-frame inference -> trajectory selection
-            -> pure-pursuit/PID control -> next observation
-```
-
-It records terminal state, progress, controls, diagnostics, and videos for every route.
+1. **Perception pretraining.** A frozen local DINOv3 ViT-S+/16 backbone supplies full token sequences across shallow, middle, and deep layers. A shared trainable trunk jointly learns 29-class semantic segmentation and metric depth estimation.
+2. **Privileged BEV representation and compression.**
+   - **BEVSeg compressor.** Renders 64 m × 64 m (256 × 256) HDMap, dynamic bounding boxes, and traffic-control states into driving-relevant semantic rasters. A 384-dimensional residual encoder, 64-table grouped discrete codebook, and ICNR PixelShuffle decoder achieve 16x spatial compression with bounded caching ([Doc/BEVSeg.md](Doc/BEVSeg.md)).
+   - **Continuous latent VAEs.** A 4-stage continuous Gaussian latent privileged BEV VAE ([Doc/PrivilegedBEVVAE.md](Doc/PrivilegedBEVVAE.md)) and a full-BEV 64x continuous-latent VAE compressing 256 × 256 rasters into a compact 4 × 4 latent ([Doc/BEVSegVAE64.md](Doc/BEVSegVAE64.md)), with latent noise, covariance, and effective-rank measurement tools.
+3. **Driving learning.**
+   - **Unified driving model (`UnifiedDrivingModel`).** Four-frame monocular forward spatio-temporal token backbone with dual AdaLN-Zero flow-matching decoders for continuous BEV fields and multimodal trajectories in zero-continuous Signed-Log metric space, trained using 3-second driving slice caches.
+   - **Two-frame multimodal baseline (`DrivingModel`).** Reuses the perception visual trunk to aggregate three camera frustums, LiDAR voxel statistics, and a rigidly aligned previous-frame BEV into forward spatial fields, lane geometry, traffic control, eight trajectory modes, and behavior labels.
+4. **Trajectory vocabulary and 3D reconstruction.**
+   - Streaming CARLA ego kinematics extraction, 0.5 s resampled feature computation, and K-Means clustering into geometric and velocity vocabularies with static visualization.
+   - Multi-frame semantic LiDAR fusion, static/dynamic object separation, and sparse TUDF / optional watertight Poisson mesh generation.
+5. **Closed-loop simulation evaluation.**
+   - Synchronous CARLA 0.9.15 closed-loop runner (`clone_loop/`) connecting `DrivingModel` to online simulation with dual-frame inference, safety reranking, pure-pursuit / speed PID control, episode metrics, and composite diagnostic video recording.
 
 | Capability | Current implementation |
 | --- | --- |
-| Learning paradigm | Supervised behavior cloning on CARLA `BehaviorAgent` data; no online update, reward function, or closed-loop RL |
-| Visual input | Current and previous `front/front_left/front_right` RGB frames, normally `768x384`; identity transform plus invalid flag for the first frame |
+| Learning paradigm | Supervised behavior cloning and flow matching on CARLA `BehaviorAgent` data; no online RL policy updates |
+| Visual & temporal input | 4-frame forward monocular RGB sequences (`UnifiedDrivingModel`); or 2-frame 3-camera `front/front_left/front_right` RGB (baseline) |
 | Visual backbone | Local frozen DINOv3 ViT-S+/16; full token sequences from layers 3, 6, and 12 |
 | Perception tasks | 29-class semantic segmentation, symlog depth regression, and in-range/out-of-range depth classification |
-| Geometry | Camera intrinsics/extrinsics back-projection; center and corner samples for each patch with depth-aware spacing |
-| BEV | Forward `64 m x 64 m`; `32x32` working grid; `256x256` field outputs |
-| Driving outputs | Risk, drivable, and trajectory-distribution fields; lane geometry; relevant stop line and light state; 8 modes x 20 waypoints at 10 Hz; 8 behavior labels |
-| Training | AdamW; BF16 trunk with FP32 output/loss paths; differential learning rate for perception modules |
-| Data | CARLA 0.9.15; RGB in H.265 and non-RGB modalities in LMDB; sensors at 2 Hz and kinematics at 10 Hz |
-| Reconstruction | Multi-frame semantic LiDAR fusion; static/dynamic separation; sparse TUDF by default and optional Poisson mesh |
-| Closed loop | Synchronous CARLA, online two-frame inference, safety reranking, pure-pursuit lateral control, speed PID, episode metrics, and recording |
+| Driving modeling | 4-frame spatio-temporal token trunk + AdaLN-Zero dual flow-matching (Signed-Log space); or 2-frame BEV Transformer + 8 learned planning tokens |
+| Privileged BEV | 64 m × 64 m (256 × 256) driving semantic raster; 64-table grouped discrete codebook compressor; 4-stage continuous Gaussian latent VAE; 64x spatial compression VAE |
+| Geometry & space | Camera intrinsics/extrinsics back-projection; patch-depth frustums; zero-continuous Signed-Log physical metric space |
+| Trajectory vocabulary | Streaming extraction and K-Means clustering of CARLA ego geometric trajectory and velocity profiles |
+| Training CLI | Unified `python -m train.run --task <task>` for `perception`, `driving`, `bevseg` (with cache warmup), `privileged_bev_vae`, `bevseg_vae64` |
+| Reconstruction | Multi-frame semantic LiDAR fusion; static/dynamic separation; sparse TUDF by default and optional Poisson watertight mesh |
+| Closed loop | Synchronous CARLA 0.9.15, online inference, safety reranking, pure-pursuit lateral control, speed PID, episode metrics, and dual video recording |
 
 ```mermaid
 flowchart LR
     A["CARLA collection"] --> B["Data inspection"]
     B --> C["Perception pretraining"]
+    B --> V1["BEVSeg raster synthesis"]
+    V1 --> V2["Grouped codebook & VAE compression"]
+    B --> TV["Trajectory & velocity vocabulary"]
     B --> R1["Semantic LiDAR fusion"]
     R1 --> R2["Sparse TUDF / optional mesh"]
-    C --> D["BEV driving training"]
-    D --> E["Offline visualization"]
+    C --> D["Unified flow-matching & BEV driving"]
+    V2 -.->|"privileged latents"| D
+    D --> E["Offline visualization & noise diagnostics"]
     D --> F["Behavior-cloning closed loop"]
     F --> G["CARLA control and evaluation"]
     G -.->|"not implemented"| H["Closed-loop reinforcement learning"]
@@ -273,48 +279,50 @@ python -m vis.reconstructed_mesh_vis.run --input 0
 
 ## Training
 
-Both stages are supervised on a fixed dataset. `clone_loop/` consumes trained checkpoints for inference and evaluation only; collisions, progress, and terminal states are not converted into rewards and never trigger backpropagation.
+ByteDrive-Toy provides a unified training CLI (`python -m train.run --task <task>`) supporting perception pretraining, end-to-end driving, BEVSeg compression, and continuous-latent VAE representation learning. All tasks are supervised on fixed offline datasets. `clone_loop/` consumes trained checkpoints for simulation inference and evaluation only.
 
-```mermaid
-flowchart LR
-    A["Collect and inspect data"] --> B["Perception pretraining"]
-    B --> C["Perception checkpoint"]
-    C --> D["Initialize driving visual encoder"]
-    D --> E["Multitask driving training"]
-    E --> F["Offline and closed-loop evaluation"]
+```powershell
+# 1. Single-frame perception multi-task (semantics + metric depth)
+python -m train.run --task perception
+
+# 2. Unified 4-frame monocular BEV & trajectory flow-matching driving
+python -m train.run --task driving
+
+# 3. BEVSeg 64-table grouped discrete codebook compressor (with optional cache warmup)
+python -m train.run --task bevseg --prepare-bevseg-cache
+python -m train.run --task bevseg
+
+# 4. Privileged continuous Gaussian latent BEV VAE
+python -m train.run --task privileged_bev_vae
+
+# 5. Full-BEV 64x spatial compression continuous latent VAE
+python -m train.run --task bevseg_vae64
 ```
 
-### Stage 1: perception
+### Supported training tasks
 
-The trainable components are multi-layer token fusion, the three-layer pre-norm transformer, and semantic/depth heads. DINOv3 remains frozen.
+| Task (`--task`) | Model & Architecture | Loss / Objective | Input Data & Cache |
+| --- | --- | --- | --- |
+| `perception` | `PerceptionModel`: frozen DINOv3 + 3-layer trunk + PixelShuffle heads | 29-class CE, symlog metric depth, spatial depth gradient, depth-range BCE | Single-frame RGB (front camera) |
+| `driving` | `UnifiedDrivingModel`: 4-frame spatio-temporal trunk + dual AdaLN-Zero flow matching | Signed-Log trajectory velocity matching & multi-frame continuous BEV flow matching | 4-frame forward monocular RGB; 3-second Signed-Log slice cache (`data/driving_cache`) |
+| `bevseg` | `BEVSegCompressor`: 384-dim residual encoder, 64-codebook tables, ICNR decoder | Weighted semantic reconstruction, lane direction cosine loss, codebook entropy regularization | Single-frame 64m×64m BEVSeg rasters; lossless NumPy cache (`data/bevseg_cache`) |
+| `privileged_bev_vae` | `PrivilegedBEVVAE`: 4-stage continuous Gaussian latent encoder-decoder | Semantic reconstruction loss + KL divergence with periodic noise/rank measurement | Single-frame 64m×64m BEVSeg rasters |
+| `bevseg_vae64` | `BEVSegVAE64`: 64-channel 4×4 continuous latent VAE (64x spatial compression) | Shared BEVSeg reconstruction loss + KL divergence regularization | Single-frame 64m×64m BEVSeg rasters |
 
-| Loss | Definition |
-| --- | --- |
-| `semantic` | 29-class cross-entropy; class 0/unlabeled is ignored |
-| `depth` | Smooth L1 in symlog space, in-range pixels only, with near-to-far weighting |
-| `depth_grad` | Smooth L1 on horizontal and vertical neighboring differences |
-| `depth_range` | Full-image binary cross-entropy for depth `<128 m` |
+### Default optimizer and runtime settings
 
-### Stage 2: driving
+| Setting | Default | Description |
+| --- | ---: | --- |
+| Optimizer | AdamW | Only updates trainable parameters actually used in the active forward path |
+| `epochs` | 10 | Target total epoch number, not the count of additional epochs |
+| `batch_size` | 32 | Configurable in `config/default.yaml` or via CLI/env overrides |
+| `num_workers` | 4 | DataLoader background worker processes |
+| `compile` | true on CUDA | In-place PyTorch inductor compilation; eager on CPU |
+| `lr` | `1e-4` | Base learning rate |
+| `weight_decay` | `1e-5` | AdamW weight decay |
+| `resume` | true | Automatically searches and resumes the highest epoch checkpoint in `train/ckpt/<task>/` |
 
-Only `fusion.*` and `trunk.*` are imported from the perception checkpoint. By default the new driving modules use learning rate `1e-4`, the perception representation uses `1e-5`, and DINOv3 is excluded from the optimizer.
-
-The multitask objective includes trajectory regression, mode confidence, behavior labels, the three spatial fields, lane class/direction, centerline alignment, vehicle-footprint boundary cost, stop-line segmentation, light-state classification, and red-light crossing cost. Hungarian matching selects the closest mode to ground truth; all modes receive a small trajectory update, while footprint and red-light constraints apply to every candidate.
-
-### Default optimizer settings
-
-| Setting | Default |
-| --- | ---: |
-| Optimizer | AdamW |
-| `epochs` | 10 total epochs |
-| `batch_size` | 32 |
-| `num_workers` | 4 |
-| `compile` | true on CUDA |
-| `lr` | `1e-4` |
-| `weight_decay` | `1e-5` |
-| `resume` | true |
-
-`train.epochs` is the target total epoch, not the number of extra epochs. A checkpoint at epoch 40 requires `epochs > 40` to continue. Use `--perception-ckpt` once to initialize a new driving run; use `--resume` to restore the same task, optimizer, and epoch. Automatic resume happens after perception initialization and will overwrite it if an existing driving checkpoint is found.
+Checkpoints are saved per-task under `train/ckpt/<task>/epoch_XXX.pt`, excluding frozen backbone weights while preserving optimizer states for seamless resume. Use `--prepare-bevseg-cache` with `--task bevseg` to pre-generate missing compressed rasters without constructing model weights.
 
 ## Pretrained weights
 
@@ -530,6 +538,30 @@ python -m vis.driving_vis.run --checkpoint train/ckpt/driving/driving20260803.pt
 
 The perception renderer compares semantic and depth predictions with ground truth. The driving renderer applies sigmoid/argmax as appropriate, draws directed lane tangents, colors stop lines by light state, overlays multimodal trajectories by confidence, and labels native versus legacy traffic-control associations.
 
+### BEVSeg and VAE visualization
+
+```powershell
+# Dataset-only or compressor reconstruction & codebook PCA
+python -m vis.bevseg_vis.run --scene scene_000000 --mode dataset
+python -m vis.bevseg_vis.run --scene scene_000000 --mode compressor --checkpoint train/ckpt/bevseg/epoch_050.pt
+
+# Privileged continuous VAE reconstruction, latent PCA, and detail canvas
+python -m vis.privileged_bev_vae_vis.run --checkpoint train/ckpt/privileged_bev_vae/epoch_050.pt
+
+# Measure latent covariance, effective rank, and perturbation noise
+python -m tools.privileged_bev_vae_noise.run --checkpoint train/ckpt/privileged_bev_vae/epoch_050.pt
+```
+
+### Trajectory and velocity vocabulary
+
+```powershell
+# Streaming extraction and K-Means clustering of CARLA ego kinematics
+python -m data.trajectory_vocabulary.run
+
+# Render static PNG plots of geometric trajectories and velocity profiles
+python -m vis.trajectory_vocab_vis.run
+```
+
 ## Repository layout
 
 ```text
@@ -540,24 +572,59 @@ ByteDrive-Toy/
 │   ├── perception_dataset/         # Single-frame perception dataset
 │   ├── driving_dataset/            # Two-frame driving inputs and multitask ground truth
 │   ├── driving_targets/            # Trajectory, behavior, and spatial-field targets
+│   ├── driving_cache/              # Signed-Log 3-second driving slice cache
 │   ├── hd_map/                     # HD-map rasterization and off-road distances
+│   ├── bevseg_synthesis/           # BEVSeg ground-truth rasterization
+│   ├── bevseg_cache/               # Lossless compressed NumPy raster cache
+│   ├── bevseg_dataset/             # Single-frame ego-aligned BEVSeg dataset
+│   ├── trajectory_vocabulary/      # Streaming trajectory and velocity vocabulary clustering
 │   ├── multiframe_pointcloud_fusion/
 │   └── mesh_reconstruction/        # Sparse TUDF and optional Poisson mesh
 ├── model/
-│   ├── dinov3_backbone/            # Frozen local DINOv3
+│   ├── dinov3_backbone/            # Frozen local DINOv3 ViT-S+
 │   ├── perception_model/           # Shared representation plus semantic/depth heads
 │   ├── bev_encoder/                # Camera/history cross-attention and BEV transformer
 │   ├── bev_decoder/                # Fields, lanes, and traffic controls
 │   ├── trajectory_decoder/         # Multimodal trajectory, confidence, behavior
-│   └── driving_model/              # Complete driving model
-├── train/                           # Unified CLI, losses, optimizer, checkpoints
-├── vis/                             # Raw data, predictions, and reconstruction viewers
-├── clone_loop/                      # Synchronous CARLA inference/control/evaluation
-├── Doc/                             # File index and development rules
-├── assets/visualizations/
-├── LICENSE
-├── README.md                        # English (primary)
-└── README.zh-CN.md                  # Simplified Chinese
+│   ├── driving_model/              # Complete driving model & UnifiedDrivingModel alias
+│   ├── bevseg_compressor/          # Grouped discrete codebook compressor (64 subword tables)
+│   ├── bevseg_vae64/               # Full-BEV 64x spatial compression continuous VAE
+│   ├── privileged_bev_vae/         # Continuous Gaussian latent privileged BEV VAE
+│   └── mamba3/                     # Single-layer pure PyTorch Mamba-3
+├── tools/
+│   └── privileged_bev_vae_noise/   # Latent covariance, rank, and perturbation measurement
+├── train/
+│   ├── run.py                      # Unified CLI for perception, driving, bevseg, and VAE tasks
+│   ├── loop/                       # Perception and classic driving forward/backward loop
+│   ├── unified_driving/            # Signed-Log flow-matching loss and training loop
+│   ├── bevseg/                     # Grouped codebook compressor training loop
+│   ├── bevseg_vae64/               # 64x spatial compression VAE training adapter
+│   ├── privileged_bev_vae/         # Privileged BEV continuous VAE training loop
+│   ├── losses/                     # Multitask loss definitions
+│   └── optimizer/                  # AdamW and differential LR parameter grouping
+├── vis/
+│   ├── data_vis/                   # Interactive raw CARLA scene browser
+│   ├── pred_vis/                   # Perception prediction vs ground truth
+│   ├── driving_vis/                # Driving fields, lanes, traffic, and trajectory viewer
+│   ├── bevseg_vis/                 # BEVSeg raster and compressor reconstruction renderer
+│   ├── privileged_bev_vae_vis/     # Privileged VAE reconstruction & latent-PCA viewer
+│   ├── trajectory_vocab_vis/       # Trajectory and velocity vocabulary static renderer
+│   ├── reconstructed_pointcloud_vis/
+│   ├── reconstructed_mesh_vis/
+│   └── reconstructed_udf_vis/
+├── clone_loop/                     # Synchronous CARLA 0.9.15 closed loop
+├── Doc/
+│   ├── Index.md                    # English file and documentation index
+│   ├── Index.zh-CN.md              # Simplified Chinese file and documentation index
+│   ├── DevelopmentGuidelines.md    # Development conventions and guidelines
+│   ├── 开发规范.md                 # Chinese development conventions
+│   ├── BEVSeg.md                   # BEVSeg raster & compressor contract
+│   ├── BEVSegVAE64.md              # 64x spatial compression VAE contract
+│   └── PrivilegedBEVVAE.md         # Continuous-latent privileged BEV VAE contract
+├── site/                           # Project website
+├── LICENSE                         # Apache-2.0
+├── README.md                       # English primary documentation
+└── README.zh-CN.md                 # Complete Simplified Chinese documentation
 ```
 
 Most modules use a stable package layout:
@@ -624,6 +691,9 @@ First verify checkpoint coverage, input modalities, camera order, temporal spaci
 
 - [File and documentation index](Doc/Index.md)
 - [Development guidelines](Doc/DevelopmentGuidelines.md)
+- [BEVSeg raster & compressor contract](Doc/BEVSeg.md)
+- [Privileged continuous-latent BEV VAE contract](Doc/PrivilegedBEVVAE.md)
+- [BEVSeg 64x continuous-latent VAE contract](Doc/BEVSegVAE64.md)
 - [CARLA collector design](data/carla_data_collector/README.md)
 - [Closed-loop runner design](clone_loop/README.md)
 - [Full Simplified Chinese documentation](README.zh-CN.md)
