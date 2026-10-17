@@ -2043,13 +2043,12 @@ python -m vis.pred_vis.run --checkpoint train/ckpt/perception/epoch_010.pt
 
 ## 开发约定与许可证
 
-- 文件导航：[Doc/Index.zh-CN.md](Doc/Index.zh-CN.md)
+- 文件导航：[Doc/Index.zh-CN.md](Doc/Index.zh-CN.md) / [英文版](Doc/Index.md)
 - 开发规范：[Doc/开发规范.md](Doc/开发规范.md)
 - 采集模块详解：[data/carla_data_collector/README.zh-CN.md](data/carla_data_collector/README.zh-CN.md)
 - 闭环模块详解：[clone_loop/README.zh-CN.md](clone_loop/README.zh-CN.md)
 
-项目要求可调参数集中到 `config/`，Python 实现文件使用中文注释/docstring，新增或删除文件时同步维护
-`Doc/Index.md`，输入检查放在模块邻近的 `checks/` 目录。
+项目要求可调参数集中到 `config/`，Python 实现文件使用中文注释/docstring，新增或删除文件时同步维护 `Doc/Index.zh-CN.md` 和 `Doc/Index.md`，输入检查放在模块邻近的 `checks/` 目录。
 
 本项目采用 [Apache License 2.0](LICENSE)。
 

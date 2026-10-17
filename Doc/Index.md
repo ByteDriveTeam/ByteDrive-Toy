@@ -22,6 +22,7 @@ This is the single navigation entry for project documentation and source files. 
 - [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) - Continuous Gaussian latent VAE with four-stage encoder and decoder
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) - Privileged BEV VAE reconstruction, KL loss, and epoch loop
 - [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) - Latent covariance, effective-rank, and perturbation measurement
+- [tools/privileged_bev_vae_noise/run.py](../tools/privileged_bev_vae_noise/run.py) — Privileged BEV VAE latent noise measurement CLI entry point
 - [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) - Privileged BEV VAE target/reconstruction/detail/latent-PCA renderer
 
 ## BEVSeg 64x VAE
@@ -95,6 +96,7 @@ Python 3.12 collector:
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — Reproducible per-scene seed and weather selection
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — Per-camera BGR sequence encoding to H.265 MP4
 - [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — Offline raw costs for candidates, current/next states, and history using future 10 Hz ground-truth boxes
+- [collector/costs/tensor_costs.py](../data/carla_data_collector/collector/costs/tensor_costs.py) — Batched candidate trajectory cost evaluation via PyTorch tensor geometry and broad-phase circles
 - [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — Non-RGB scene data and independent kinematics timeline writer for LMDB
 - [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — Expert/model collection loop, closed-loop advancement, segmented storage, and complete cost backfill
 - [collector/run.py](../data/carla_data_collector/collector/run.py) — Python 3.12 collection CLI

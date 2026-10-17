@@ -622,7 +622,7 @@ First verify checkpoint coverage, input modalities, camera order, temporal spaci
 
 ## Development and license
 
-- [File and documentation index](Doc/Index.md)
+- [File and documentation index](Doc/Index.md) / [Chinese version](Doc/Index.zh-CN.md)
 - [Development guidelines](Doc/DevelopmentGuidelines.md)
 - [CARLA collector design](data/carla_data_collector/README.md)
 - [Closed-loop runner design](clone_loop/README.md)

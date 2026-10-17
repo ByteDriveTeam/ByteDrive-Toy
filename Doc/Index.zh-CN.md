@@ -28,7 +28,13 @@
 - [data/__init__.py](../data/__init__.py) — 数据读取与预处理包标识：只读消费 config 与已落盘数据集
 - [data/target_encoding/target_encoding.py](../data/target_encoding/target_encoding.py) — 监督目标编码：Symlog 物理量、深度范围掩码的纯函数
 - [data/single_frame_base/single_frame_base.py](../data/single_frame_base/single_frame_base.py) — 单帧场景数据集共享基类：场景/帧索引、有界 SceneReader 缓存、RGB 归一化（感知与驾驶数据集复用）
+- [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — 提供有容量上限、可并发回填的 BEVSeg 压缩 NumPy 磁盘缓存。
+- [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — 读取 CARLA 场景并返回单帧 ego 对齐 BEVSeg。
+- [data/bevseg_synthesis/bevseg_synthesis.py](../data/bevseg_synthesis/bevseg_synthesis.py) — 把 HDMap、bbox 与交通控制标注合成为驾驶相关 BEVSeg。
 - [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — 场景感知批采样器：连续帧同批、批间随机，减少视频随机 seek 与跨场景解码器切换
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 新驾驶训练切片缓存：把训练输入打包为可直接读取的 Tensor 字典。
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 从 CARLA ego 运动学时间轴构造并聚类几何/速度词表。
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹与速度词表生成命令行入口。
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为。
 - [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、停止线及越界监督。
@@ -78,6 +84,7 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [collector/scenarios/scenarios.py](../data/carla_data_collector/collector/scenarios/scenarios.py) — 逐场景随机：种子与天气预设（决策与记录都在 collector 侧，便于复现）
 - [collector/encode/encode.py](../data/carla_data_collector/collector/encode/encode.py) — 把单相机的 BGR 帧序列编码为 H.265 mp4
 - [collector/costs/costs.py](../data/carla_data_collector/collector/costs/costs.py) — 使用未来10Hz GT Box轨迹离线标注候选、当前位置、下一刻与历史原始代价
+- [collector/costs/tensor_costs.py](../data/carla_data_collector/collector/costs/tensor_costs.py) — Torch 批量候选轨迹代价：GPU/CPU 张量几何与严格包围圆 broad-phase。
 - [collector/writer/writer.py](../data/carla_data_collector/collector/writer/writer.py) — 把场景的非 RGB 数据与独立运动学时间序列写入 LMDB。
 - [collector/orchestrator/orchestrator.py](../data/carla_data_collector/collector/orchestrator/orchestrator.py) — 专家/模型双模式采集主循环：闭环推进、分段落盘与完整 GT 代价回填
 - [collector/run.py](../data/carla_data_collector/collector/run.py) — Py312 采集入口 CLI：加载配置并启动采集主循环
@@ -93,6 +100,9 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/feature_fusion/feature_fusion.py](../model/feature_fusion/feature_fusion.py) — DINO 多层序列融合：对选定层逐层 RMSNorm 后沿末维拼接，再线性降到预测主干工作维。
 - [model/feature_trunk/feature_trunk.py](../model/feature_trunk/feature_trunk.py) — 预测特征主干：完整继承 DINOv3 Token 序列，经三层带 patch-only 2D RoPE 的 Pre-Norm Transformer。
 - [model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py](../model/pixel_shuffle_upsampler/pixel_shuffle_upsampler.py) — 级联像素洗牌上采样：把低分辨率特征逐级 2× 放大回原分辨率
+- [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — BEVSeg 编码、分层离散采样与 PixelShuffle 解码网络。
+- [model/bevseg_vae64/bevseg_vae64.py](../model/bevseg_vae64/bevseg_vae64.py) — 整幅 BEV 的连续 latent VAE：将 256×256 栅格压缩到 4×4。
+- [model/privileged_bev_vae/privileged_bev_vae.py](../model/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV 的连续 latent 变分自编码器。
 - [model/perception_head/perception_head.py](../model/perception_head/perception_head.py) — 感知解码头：2D 残差块 + 通道压缩 + 级联像素洗牌上采样至原分辨率
 - [model/perception_model/perception_model.py](../model/perception_model/perception_model.py) — 共享视觉特征编码器，以及在其上追加语义/深度双头的多任务单帧感知模型。
 - [model/frustum_encoding/frustum_encoding.py](../model/frustum_encoding/frustum_encoding.py) — 深度 frustum 位置编码：每 patch 中心+四角×深度采样的候选 3D 坐标 → 逐 patch 几何特征
@@ -106,8 +116,15 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [model/bev_upsampler/bev_upsampler.py](../model/bev_upsampler/bev_upsampler.py) — BEV 专用像素洗牌上采样器：以空间卷积和激活残差逐级恢复高分辨率特征。
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹。
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — 双帧三目+LiDAR 开环驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV，解码驾驶多任务输出。
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧单目时空 Token DrivingModel 与双流匹配解码器。
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 与显式增量状态。
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 支持训练并行扫描与逐 token 推理的单层 Mamba-3。
+
+
+## tools/ — 离线工具
+
+- [tools/privileged_bev_vae_noise/noise.py](../tools/privileged_bev_vae_noise/noise.py) — 测定连续 latent 的噪声、冗余维度和扰动敏感度。
+- [tools/privileged_bev_vae_noise/run.py](../tools/privileged_bev_vae_noise/run.py) — 特权 BEV VAE latent 噪声测定命令行入口。
 
 ## train/ — 训练 / 评估循环
 
@@ -116,6 +133,10 @@ Py312 编排处理端 `collector/`（根 .venv 运行）
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入。
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：感知与驾驶两条前向/损失路径，反向 → 梯度裁剪 → 步进并聚合日志
 - [train/run.py](../train/run.py) — 统一训练入口 CLI：按 --task 选择感知、驾驶、BEVSeg 或连续 latent VAE 任务，支持缓存预热、断点续训和逐 epoch 保存权重。
+- [train/bevseg/bevseg.py](../train/bevseg/bevseg.py) — BEVSeg 重建损失和独立训练循环。
+- [train/bevseg_vae64/bevseg_vae64.py](../train/bevseg_vae64/bevseg_vae64.py) — 整幅 BEV 64 倍压缩 VAE 的训练循环适配器。
+- [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV VAE 的监督重建、KL 正则和 epoch 训练循环。
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 新 DrivingModel 的 Signed-Log 流匹配损失与训练循环。
 
 ## clone_loop/ — 行为克隆闭环
 
@@ -193,6 +214,11 @@ Py37 仿真端 `worker/`
 - [vis/data_vis/draw/draw.py](../vis/data_vis/draw/draw.py) — 渲染：3D 框投影、深度/语义/光流着色、LiDAR/状态轨迹鸟瞰图、多面板合成与 HUD
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
 
+- [vis/bevseg_vis/bevseg_vis.py](../vis/bevseg_vis/bevseg_vis.py) — 渲染 BEVSeg 真值、压缩器重建结果与量化特征 PCA。
+- [vis/bevseg_vis/run.py](../vis/bevseg_vis/run.py) — 按命令行模式保存 BEVSeg 数据集或压缩器重建与量化特征 PCA 可视化。
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 绘制几何轨迹词表、速度词表和聚类评估图。
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 轨迹词表 PNG 可视化命令行入口。
+- [vis/privileged_bev_vae_vis/run.py](../vis/privileged_bev_vae_vis/run.py) — 渲染特权 BEV VAE 的 target、重建、latent PCA 和语义细节画布。
 ### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染三头预测与 GT 对照）
 
 - [vis/pred_vis/__init__.py](../vis/pred_vis/__init__.py) — 感知模型预测可视化子模块包标识：加载权重、渲染双头预测与 GT 对照
