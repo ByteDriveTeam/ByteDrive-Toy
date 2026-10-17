@@ -30,8 +30,13 @@ from model.driving_model.unified_driving_model import signed_log
 _TARGET_LINEAR_SCALE_M = 64.0
 
 
-__all__ = ["DrivingSliceCache", "DrivingSliceDataset", "pack_driving_sample",
+__all__ = ["DrivingSliceCache", "DrivingSliceDataset", "trajectory_to_unicycle_actions",
+           "standardize_actions", "unstandardize_actions", "pack_driving_sample",
            "slice_driving_samples", "prepare_driving_cache"]
+
+
+_ACTION_DT_S = 0.1
+_ACTION_EPS = 1e-3
 
 
 class DrivingSliceCache:
@@ -47,7 +52,7 @@ class DrivingSliceCache:
     @staticmethod
     def _namespace(version, cfg):
         payload = {"version": version, "slice_duration_s": float(cfg.data.driving_cache.slice_duration_s),
-                   "trajectory_and_ego_state": "sign(x)*log(abs(x)+1)",
+                   "trajectory_target": "standardized_unicycle_accel_curvature_v1",
                    "target_point": "linear_64m", "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         return "{}-{}".format(version, digest)
@@ -66,9 +71,9 @@ class DrivingSliceCache:
             return None
         return value if isinstance(value, dict) else None
 
-    def store(self, key, sample):
+    def store(self, key, sample, action_mean=None, action_std=None):
         path = self._file(key)
-        packed = pack_driving_sample(sample)
+        packed = pack_driving_sample(sample, action_mean, action_std)
         fd, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".pt", dir=str(self.path))
         os.close(fd)
         try:
@@ -85,7 +90,11 @@ class DrivingSliceDataset(Dataset):
 
     def __init__(self, cfg):
         self.cache = DrivingSliceCache(cfg)
+        stats_path = self.cache.path / "action_stats.pt"
+        self.action_stats = torch.load(stats_path, map_location="cpu", weights_only=True) \
+            if stats_path.is_file() else None
         self.files = sorted(self.cache.path.glob("*.pt"))
+        self.files = [path for path in self.files if path.name != "action_stats.pt"]
         if not self.files:
             raise FileNotFoundError("驾驶训练缓存为空: {}".format(self.cache.path))
 
@@ -99,7 +108,45 @@ class DrivingSliceDataset(Dataset):
         return sample
 
 
-def pack_driving_sample(sample):
+def trajectory_to_unicycle_actions(trajectory, ego_state=None, dt_s: float = _ACTION_DT_S):
+    """从局部航点计算 [加速度, 曲率] 控制序列。"""
+    trajectory = torch.as_tensor(trajectory).float()
+    if trajectory.ndim < 2 or trajectory.shape[-1] != 2:
+        raise ValueError("trajectory 必须为 [...,30,2]")
+    if trajectory.shape[-2] != 30:
+        raise ValueError("trajectory 必须包含 30 个航点")
+    displacement = torch.cat((trajectory[..., :1, :], trajectory[..., 1:, :] - trajectory[..., :-1, :]), dim=-2)
+    velocity = displacement / dt_s
+    speed = velocity.norm(dim=-1)
+    if ego_state is None:
+        initial_speed = speed[..., :1].detach().zero_()
+    else:
+        state = torch.as_tensor(ego_state).float()
+        initial_speed = state[..., :2].norm(dim=-1, keepdim=True)
+    acceleration = (speed - torch.cat((initial_speed, speed[..., :-1]), dim=-1)) / dt_s
+    heading = torch.atan2(velocity[..., 1], velocity[..., 0])
+    heading_delta = torch.atan2(
+        torch.sin(heading - torch.cat((heading[..., :1].detach().zero_(), heading[..., :-1]), dim=-1)),
+        torch.cos(heading - torch.cat((heading[..., :1].detach().zero_(), heading[..., :-1]), dim=-1)))
+    curvature = heading_delta / (speed.clamp_min(_ACTION_EPS) * dt_s)
+    return torch.stack((acceleration, curvature), dim=-1)
+
+
+def standardize_actions(actions, mean, std):
+    """在动作通道上执行训练集均值方差标准化。"""
+    mean = torch.as_tensor(mean, dtype=actions.dtype, device=actions.device)
+    std = torch.as_tensor(std, dtype=actions.dtype, device=actions.device).clamp_min(1e-6)
+    return (actions - mean) / std
+
+
+def unstandardize_actions(actions, mean, std):
+    """恢复物理加速度和曲率，仅供推理后处理使用。"""
+    mean = torch.as_tensor(mean, dtype=actions.dtype, device=actions.device)
+    std = torch.as_tensor(std, dtype=actions.dtype, device=actions.device)
+    return actions * std + mean
+
+
+def pack_driving_sample(sample, action_mean=None, action_std=None):
     """打包训练必需字段并在缓存阶段完成 Signed-Log 几何变换。"""
     required = ("rgb", "intrinsics", "target_point", "ego_state", "motion_matrices",
                 "trajectory", "bev_grid", "timestamp", "scene", "index")
@@ -110,7 +157,16 @@ def pack_driving_sample(sample):
               for name, value in sample.items() if name in required}
     # 目标点进入 AdaLN 前采用线性尺度；轨迹流匹配则全程使用 Signed-Log。
     packed["target_point"] = packed["target_point"].float() / _TARGET_LINEAR_SCALE_M
-    packed["trajectory"] = signed_log(packed["trajectory"].float())
+    raw_actions = sample.get("trajectory_actions")
+    if raw_actions is None:
+        raw_actions = trajectory_to_unicycle_actions(
+            packed["trajectory"], packed["ego_state"], _ACTION_DT_S)
+    raw_actions = torch.as_tensor(raw_actions).float()
+    if action_mean is None:
+        action_mean = (0.0, 0.0)
+    if action_std is None:
+        action_std = (1.0, 1.0)
+    packed["trajectory"] = standardize_actions(raw_actions, action_mean, action_std)
     packed["bev_grid"] = packed["bev_grid"].float()
     # 速度和加速度只在缓存阶段做 Signed-Log，训练及模型内不做逆变换。
     packed["ego_state"] = signed_log(packed["ego_state"].float())
@@ -137,13 +193,28 @@ def slice_driving_samples(samples, slice_duration_s: float = 3.0):
     return selected
 
 
+def _fit_action_stats(samples):
+    actions = [trajectory_to_unicycle_actions(sample["trajectory"], sample.get("ego_state"))
+               for sample in samples]
+    values = torch.cat([action.reshape(-1, 2) for action in actions], dim=0)
+    mean = values.mean(dim=0)
+    std = values.std(dim=0, unbiased=False).clamp_min(1e-3)
+    return mean, std
+
+
 def prepare_driving_cache(samples, cfg):
     """? 3 ???????????????"""
     cache = DrivingSliceCache(cfg)
-    written = 0
     sliced = slice_driving_samples(samples, cfg.data.driving_cache.slice_duration_s)
+    if not sliced:
+        return {"namespace": cache.namespace, "path": str(cache.path), "samples": 0}
+    action_mean, action_std = _fit_action_stats(sliced)
+    stats_path = cache.path / "action_stats.pt"
+    torch.save({"mean": action_mean, "std": action_std}, stats_path)
+    written = 0
     for sample in sliced:
         key = "{}:{}".format(sample["scene"], sample["index"])
-        cache.store(key, sample)
+        cache.store(key, sample, action_mean, action_std)
         written += 1
-    return {"namespace": cache.namespace, "path": str(cache.path), "samples": written}
+    return {"namespace": cache.namespace, "path": str(cache.path), "samples": written,
+            "action_mean": action_mean.tolist(), "action_std": action_std.tolist()}

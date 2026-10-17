@@ -25,7 +25,8 @@ from model.driving_model.checks.unified_driving_checks import check_unified_driv
 from model.privileged_bev_vae import PrivilegedBEVVAE
 
 
-__all__ = ["UnifiedDrivingModel", "signed_log", "inverse_signed_log"]
+__all__ = ["UnifiedDrivingModel", "signed_log", "inverse_signed_log",
+           "integrate_unicycle_actions"]
 
 
 def signed_log(x: torch.Tensor) -> torch.Tensor:
@@ -36,6 +37,31 @@ def signed_log(x: torch.Tensor) -> torch.Tensor:
 def inverse_signed_log(x: torch.Tensor) -> torch.Tensor:
     """恢复物理坐标；训练路径禁止调用，只供推理后处理。"""
     return torch.sign(x) * torch.expm1(x.abs())
+
+
+@torch.no_grad()
+def integrate_unicycle_actions(actions: torch.Tensor, ego_state: torch.Tensor,
+                               action_mean=(0.0, 0.0), action_std=(1.0, 1.0),
+                               dt_s: float = 0.1) -> torch.Tensor:
+    """推理阶段反标准化并积分 [a, kappa]，返回 [x, y, theta] 航点。"""
+    if actions.ndim != 3 or actions.shape[-1] != 2:
+        raise ValueError("actions 必须为 [B,30,2]")
+    if ego_state.ndim != 2 or ego_state.shape[0] != actions.shape[0] or ego_state.shape[-1] < 2:
+        raise ValueError("ego_state 必须为 [B,4]，且前两维为速度")
+    mean = actions.new_tensor(action_mean).view(1, 1, 2)
+    std = actions.new_tensor(action_std).view(1, 1, 2)
+    physical = actions * std + mean
+    velocity = inverse_signed_log(ego_state[..., :2].float()).norm(dim=-1)
+    position = actions.new_zeros(actions.shape[0], 2)
+    heading = actions.new_zeros(actions.shape[0])
+    waypoints = []
+    for control in physical.unbind(dim=1):
+        acceleration, curvature = control.unbind(dim=-1)
+        position = position + velocity.unsqueeze(-1) * torch.stack((heading.cos(), heading.sin()), dim=-1) * dt_s
+        heading = heading + velocity * curvature * dt_s
+        velocity = (velocity + acceleration * dt_s).clamp_min(0.0)
+        waypoints.append(torch.cat((position, heading.unsqueeze(-1)), dim=-1))
+    return torch.stack(waypoints, dim=1)
 
 
 class _SwiGLU(nn.Module):
@@ -203,7 +229,9 @@ class _VisualProcessor(nn.Module):
         self.num_register_tokens = spec.num_register_tokens
         self.special_tokens = 2 + self.num_register_tokens
         self.backbone = DinoV3Backbone(bb)
-        self.fusion = nn.Linear(bb.hidden_dim * 4, spec.dim)
+        self.dino_feature_norms = nn.ModuleList(
+            [nn.LayerNorm(bb.hidden_dim) for _ in bb.feature_layers])
+        self.fusion = nn.Linear(bb.hidden_dim * len(bb.feature_layers), spec.dim)
         self.downsample = nn.Conv2d(spec.dim, spec.dim, 2, stride=2)
         self.target_token, self.motion_token = nn.Linear(2, spec.dim), nn.Linear(4, spec.dim)
         self.register_tokens = nn.Parameter(torch.randn(self.num_register_tokens, spec.dim) * 0.02)
@@ -227,7 +255,13 @@ class _VisualProcessor(nn.Module):
         with torch.no_grad():
             selected = self.backbone(rgb.reshape(batch * frames, channels, height, width))
         patch_count = (height // self.patch_size) * (width // self.patch_size)
-        patches = selected[:, :, -patch_count:, :].permute(0, 2, 1, 3).reshape(batch * frames, patch_count, -1)
+        layer_patches = selected[:, :, -patch_count:, :]
+        # 四个 DINO 层分别标准化，再沿特征维拼接，避免不同深度的尺度差异进入融合层。
+        layer_patches = torch.stack(
+            [norm(layer_patches[:, index].float())
+             for index, norm in enumerate(self.dino_feature_norms)], dim=1)
+        patches = layer_patches.permute(0, 2, 1, 3).reshape(
+            batch * frames, patch_count, -1)
         fused = self.fusion(patches).transpose(1, 2).reshape(
             batch * frames, self.dim, height // self.patch_size, width // self.patch_size)
         fused = self.downsample(fused)
@@ -339,7 +373,7 @@ class _TrajectoryDecoder(nn.Module):
             self.dim, spec.cross_heads, spec.self_heads_3d, spec.ffn_hidden,
             (16, 16, 16), spec.rope_theta) for _ in range(6)])
         self.output_norms = nn.ModuleList([nn.LayerNorm(self.dim) for _ in range(6)])
-        self.velocity_heads = nn.ModuleList([nn.Linear(self.dim, 2) for _ in range(6)])
+        self.action_heads = nn.ModuleList([nn.Linear(self.dim, 2) for _ in range(6)])
         self.geometry = geometry
         self.geometry_norm = nn.LayerNorm(self.dim)
 
@@ -357,7 +391,7 @@ class _TrajectoryDecoder(nn.Module):
         geometry = self.geometry_norm(self.geometry(trajectory_points.mean(dim=2)))
         condition = self.time(_sinusoidal_time(time_step, self.dim)) + self.target(_fourier_target(target_point)) + self.ego(ego_state)
         fields = []
-        for block, norm, head in zip(self.blocks, self.output_norms, self.velocity_heads):
+        for block, norm, head in zip(self.blocks, self.output_norms, self.action_heads):
             query = block(query, visual_tokens, condition, positions, geometry, visual_geometry)
             fields.append(head(norm(query)))
         return fields
@@ -378,6 +412,37 @@ class UnifiedDrivingModel(nn.Module):
         self.bev_vae.requires_grad_(False)
         self.bev_vae.eval()
         self.precision = cfg.train.precision
+
+    @staticmethod
+    def integrate_actions(actions, ego_state, action_mean=(0.0, 0.0), action_std=(1.0, 1.0),
+                          dt_s=0.1):
+        """推理后处理：把标准化控制量积分为连续航点。"""
+        return integrate_unicycle_actions(actions, ego_state, action_mean, action_std, dt_s)
+
+    @torch.no_grad()
+    def sample_trajectory_actions(self, rgb, intrinsics, target_point, ego_state,
+                                  motion_matrices, steps: int = 10):
+        """从标准高斯噪声用 Euler 流匹配采样标准化 [加速度, 曲率]。"""
+        if steps <= 0:
+            raise ValueError("steps 必须为正整数")
+        check_unified_driving_inputs(rgb, intrinsics, target_point, ego_state, motion_matrices)
+        enabled = self.precision == "bf16" and rgb.device.type != "cpu"
+        with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
+            tokens, geometry, _ = self.visual(
+                rgb, target_point, ego_state, intrinsics, motion_matrices)
+        state = torch.randn(
+            rgb.shape[0], self.trajectory_decoder.points, 2,
+            device=rgb.device, dtype=torch.float32)
+        with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=False):
+            tokens, geometry = tokens.float(), geometry.float()
+            for index in range(steps):
+                time_step = torch.full(
+                    (rgb.shape[0],), index / float(steps), device=rgb.device, dtype=torch.float32)
+                flow = self.trajectory_decoder(
+                    state, tokens, geometry, time_step,
+                    target_point.float(), ego_state.float())[-1]
+                state = state + flow.float() / float(steps)
+        return state
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         """返回除冻结 DINOv3 外的可训练参数。"""

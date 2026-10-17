@@ -29,11 +29,12 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
     device = batch["rgb"].device
     batch_size = int(batch["rgb"].shape[0])
     time_step = torch.rand(batch_size, device=device)
-    trajectory_target = batch["trajectory"].float()
-    trajectory_noise = torch.randn_like(trajectory_target)
-    trajectory_state = (1.0 - time_step[:, None, None]) * trajectory_noise \
-        + time_step[:, None, None] * trajectory_target
-    trajectory_velocity = trajectory_target - trajectory_noise
+    # trajectory 已是缓存阶段按训练集统计标准化的 [加速度, 曲率] 序列。
+    action_target = batch["trajectory"].float()
+    action_noise = torch.randn_like(action_target)
+    action_state = (1.0 - time_step[:, None, None]) * action_noise \
+        + time_step[:, None, None] * action_target
+    action_flow = action_target - action_noise
     if "bev_latent" not in batch and "bev_grid" in batch:
         batch = dict(batch)
         batch["bev_latent"] = model.encode_bev_targets(batch["bev_grid"])
@@ -48,11 +49,11 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
         bev_velocity = bev_target - bev_noise
     outputs = model(
         batch["rgb"], batch["intrinsics"], batch["target_point"], batch["ego_state"],
-        batch["motion_matrices"], time_step=time_step, traj_state=trajectory_state,
+        batch["motion_matrices"], time_step=time_step, traj_state=action_state,
         bev_state=bev_state)
     components = {}
     trajectory_losses = [
-        ((prediction.float() - trajectory_velocity).square()).mean()
+        ((prediction.float() - action_flow).square()).mean()
         for prediction in outputs["traj_flows"]
     ]
     components["trajectory"] = sum(weight * loss for weight, loss in zip(
@@ -60,7 +61,7 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
     if "bev_latent" in batch:
         components["bev"] = (outputs["bev_flow"].float() - bev_velocity).square().mean()
     else:
-        components["bev"] = trajectory_target.new_zeros(())
+        components["bev"] = action_target.new_zeros(())
     total = components["trajectory"] + components["bev"]
     components["total"] = total
     return total, components

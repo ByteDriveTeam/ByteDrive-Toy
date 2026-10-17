@@ -55,8 +55,8 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — Bounded, concurrent, lossless compressed NumPy cache with automatic missing-entry detection and warmup progress
 - [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — Public API for single-frame BEVSeg dataset
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
-- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame Signed-Log driving slice cache
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second Signed-Log driving training slice cache and direct tensor reader
+- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame standardized unicycle action driving slice cache
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second standardized accel/curvature driving training slice cache and direct tensor reader
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — Public API for trajectory and velocity vocabulary generation
 - [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — Streaming construction and clustering of CARLA ego geometric trajectory and velocity vocabulary
 - [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — Trajectory and velocity vocabulary generation CLI
@@ -152,7 +152,7 @@ Python 3.12 collector:
 - [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — Public API for privileged BEV VAE training and evaluation
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — Privileged BEV VAE reconstruction, KL loss, and epoch loop
 - [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — Public API for UnifiedDrivingModel flow-matching training
-- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Signed-Log trajectory and multi-frame BEV flow-matching training loss and epoch loop
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Standardized unicycle action and multi-frame BEV flow-matching training loss and epoch loop
 
 ## clone_loop/ — behavior-cloning closed loop
 
