@@ -4,12 +4,14 @@
 依赖: numpy, common.protocol, common.shm, worker.annotations, worker.traffic_control,
       worker.collect.checks.collect_checks
 读取配置: 由调用方接收 simulation(warmup_ticks/fixed_delta) 与
-      collection(max_frames/capture_every_n/kinematics_every_n)，自身不读 config
+      collection(max_frames/capture_every_n/kinematics_every_n)、
+      data.driving_cache.navigation_lookahead_m/navigation_turn_threshold_deg，自身不读 config
 对外接口:
     - prepare_drive(world, agent, sim_cfg, destination)
         -> (reachable, static_bboxes, traffic_lights, traffic_light_metadata)
     - collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
-                    allocator, collection_cfg, timeout_s, counters) -> (status, frames, kinematics)
+                    allocator, collection_cfg, collision_cfg, timeout_s, counters,
+                    navigation_cfg) -> (status, frames, kinematics)
     - store_sensor_frame(allocator, sample) -> dict
     - ego_state(ego) -> dict
 说明: 大块张量（RGB/Depth/语义图/光流/语义Lidar）按 capture_every_n_ticks 写入 arena；小元数据（包围框/
@@ -25,6 +27,7 @@
 import numpy as np
 
 from common import protocol as P
+from common.navigation_command import navigation_command_from_plan
 from common.shm import ArenaFull
 from worker import annotations, traffic_control
 from worker.collect.checks.collect_checks import check_destination
@@ -137,7 +140,8 @@ def prepare_drive(world, agent, sim_cfg, destination):
 
 
 def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_metadata,
-                  allocator, collection_cfg, collision_cfg, timeout_s, counters):
+                  allocator, collection_cfg, collision_cfg, timeout_s, counters,
+                  navigation_cfg):
     """采集一段（填满一次 arena 为止）。counters 跨段累计，使总帧上限/采样节拍按整次行驶统计。
 
     参数:
@@ -211,6 +215,10 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
             "traffic_light_states": traffic_states,
             "relevant_traffic_control": traffic_control.relevant_traffic_control(
                 ego, agent, traffic_light_metadata, traffic_states),
+            "navigation_command": navigation_command_from_plan(
+                ego.get_location(), agent.get_local_planner().get_plan(),
+                navigation_cfg.navigation_lookahead_m,
+                navigation_cfg.navigation_turn_threshold_deg),
         })
         counters["total"] += 1
 

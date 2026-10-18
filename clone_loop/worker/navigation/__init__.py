@@ -4,7 +4,7 @@
 依赖: clone_loop.worker.navigation.navigation
 读取配置: —
 对外接口:
-    - RouteNavigator(world_map, start, end, cfg_route)
+    - RouteNavigator(world_map, start, end, cfg_route, cfg_navigation)
 """
 
 from clone_loop.worker.navigation.navigation import RouteNavigator

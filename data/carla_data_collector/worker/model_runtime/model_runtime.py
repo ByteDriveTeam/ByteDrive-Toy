@@ -8,6 +8,7 @@
         simulation.traffic_profiles / ego.vehicle_filter / cameras.* / lidar.* / collection.capture_every_n_ticks /
         collection.max_frames_per_scene / model_collection.*
     clone_loop.route.* / safety.max_route_deviation_m
+    data.driving_cache.navigation_lookahead_m / navigation_turn_threshold_deg
     data.driving.cameras
 对外接口:
     - ModelCollectionRuntime(client, cfg, allocator, frame, lidar)
@@ -83,7 +84,7 @@ class ModelCollectionRuntime:
             try:
                 self._navigator = RouteNavigator(
                     world.get_map(), route["start"], route["end"],
-                    self._cfg.clone_loop.route)
+                    self._cfg.clone_loop.route, self._cfg.data.driving_cache)
             except RuntimeError:
                 self._destroy_episode()
                 return {"status": P.STATUS_UNREACHABLE}
@@ -233,6 +234,7 @@ class ModelCollectionRuntime:
             "bboxes": world_state["bboxes"],
             "traffic_light_states": world_state["traffic_light_states"],
             "relevant_traffic_control": world_state["relevant_traffic_control"],
+            "navigation_command": int(world_state["navigation"]["navigation_command"]),
         }
 
     def _world_state(self, frame_id, navigation):
@@ -249,6 +251,7 @@ class ModelCollectionRuntime:
                 self._navigator.geometry, navigation["route_progress_m"],
                 self._traffic_metadata, states),
             "navigation": navigation,
+            "navigation_command": int(navigation["navigation_command"]),
             "speed_mps": _speed(self._ego),
             "speed_limit_mps": float(self._ego.get_speed_limit()) / 3.6,
             "collision_events": int(self._rig.collision_events),
@@ -267,6 +270,7 @@ class ModelCollectionRuntime:
             "lidar_count": self._lidar_count,
             "lidar_valid": self._lidar_valid,
             "target_point": navigation["target_point"],
+            "navigation_command": int(navigation["navigation_command"]),
             "ego_velocity": _world_vector_to_ego(
                 velocity.x, velocity.y, transform.rotation.yaw),
             "speed_mps": world_state["speed_mps"],

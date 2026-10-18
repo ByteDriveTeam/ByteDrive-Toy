@@ -5,10 +5,10 @@
 读取配置: model.dinov3_backbone.*, model.unified_driving.*, train.precision
 对外接口:
     - UnifiedDrivingModel(cfg) -> nn.Module
-    - forward(rgb, intrinsics, target_point, ego_state, motion_matrices,
+    - forward(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
               time_step=None, bev_state=None, traj_state=None) -> dict
-说明: 轨迹流匹配在 Signed-Log 数值空间训练；逆变换仅供推理结束后的脱离
-      梯度后处理。主干默认 BF16，分支末端和输出头在 FP32 中运行。
+说明: 五类导航指令作为视觉 Token 和轨迹 AdaLN 条件；轨迹流匹配在标准化
+      加速度/曲率空间训练。主干默认 BF16，解码器和输出头在 FP32 中运行。
 """
 
 from __future__ import annotations
@@ -210,15 +210,6 @@ def _sinusoidal_time(time_step: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat((angles.sin(), angles.cos()), dim=-1)
 
 
-def _fourier_target(target_point: torch.Tensor, bands: int = 32) -> torch.Tensor:
-    """对线性归一化目标点做高频正余弦编码。"""
-    frequencies = torch.logspace(
-        0.0, 15.0, bands, base=2.0, device=target_point.device, dtype=target_point.dtype)
-    angles = target_point.unsqueeze(-1) * frequencies * target_point.new_tensor(3.141592653589793)
-    encoded = torch.cat((angles.sin(), angles.cos()), dim=-1)
-    return encoded.flatten(start_dim=-2)
-
-
 class _VisualProcessor(nn.Module):
     """四帧 DINO 融合、3D RoPE 主干和 Patch 网格恢复。"""
 
@@ -233,7 +224,8 @@ class _VisualProcessor(nn.Module):
             [nn.LayerNorm(bb.hidden_dim) for _ in bb.feature_layers])
         self.fusion = nn.Linear(bb.hidden_dim * len(bb.feature_layers), spec.dim)
         self.downsample = nn.Conv2d(spec.dim, spec.dim, 2, stride=2)
-        self.target_token, self.motion_token = nn.Linear(2, spec.dim), nn.Linear(4, spec.dim)
+        self.navigation_token = nn.Embedding(len(spec.navigation_commands), spec.dim)
+        self.motion_token = nn.Linear(4, spec.dim)
         self.register_tokens = nn.Parameter(torch.randn(self.num_register_tokens, spec.dim) * 0.02)
         self.blocks = nn.ModuleList([_TransformerBlock(
             spec.dim, spec.self_heads_3d, spec.ffn_hidden, spec.rope_theta) for _ in range(8)])
@@ -250,7 +242,7 @@ class _VisualProcessor(nn.Module):
         self.geometry_output_norm = nn.LayerNorm(spec.dim)
         self.image_geometry = _ConditionMLP(3, spec.dim, spec.geometry_hidden)
 
-    def forward(self, rgb, target_point, ego_state, intrinsics, motion_matrices):
+    def forward(self, rgb, navigation_command, ego_state, intrinsics, motion_matrices):
         batch, frames, channels, height, width = rgb.shape
         with torch.no_grad():
             selected = self.backbone(rgb.reshape(batch * frames, channels, height, width))
@@ -267,7 +259,9 @@ class _VisualProcessor(nn.Module):
         fused = self.downsample(fused)
         small_h, small_w = fused.shape[-2:]
         patches = fused.flatten(2).transpose(1, 2).reshape(batch, frames * small_h * small_w, self.dim)
-        condition = torch.stack((self.target_token(target_point), self.motion_token(ego_state)), dim=1)
+        motion_token = self.motion_token(ego_state)
+        condition = torch.stack((self.navigation_token(navigation_command).to(motion_token.dtype),
+                                 motion_token), dim=1)
         registers = self.register_tokens.unsqueeze(0).expand(batch, -1, -1)
         tokens = torch.cat((condition, registers, patches), dim=1)
         positions = self._positions(batch, frames, small_h, small_w, tokens.device, self.special_tokens)
@@ -367,7 +361,8 @@ class _TrajectoryDecoder(nn.Module):
         super().__init__()
         self.dim, self.points = spec.dim, spec.num_waypoints
         self.state = nn.Linear(2, self.dim)
-        self.target, self.ego = _ConditionMLP(128, self.dim, spec.condition_hidden), _ConditionMLP(4, self.dim, spec.condition_hidden)
+        self.navigation = nn.Embedding(len(spec.navigation_commands), self.dim)
+        self.ego = _ConditionMLP(4, self.dim, spec.condition_hidden)
         self.time = _ConditionMLP(self.dim, self.dim, spec.condition_hidden)
         self.blocks = nn.ModuleList([_AdaLNZeroBlock(
             self.dim, spec.cross_heads, spec.self_heads_3d, spec.ffn_hidden,
@@ -377,19 +372,20 @@ class _TrajectoryDecoder(nn.Module):
         self.geometry = geometry
         self.geometry_norm = nn.LayerNorm(self.dim)
 
-    def forward(self, state, visual_tokens, visual_geometry, time_step, target_point, ego_state):
+    def forward(self, state, visual_tokens, visual_geometry, time_step, navigation_command, ego_state):
         batch = state.shape[0]
         query = self.state(state)
         point_time = torch.linspace(0.1, 3.0, self.points, device=state.device).view(1, -1, 1).expand(batch, -1, -1)
         positions = torch.cat((state, point_time), dim=-1)
         z = torch.arange(-3.0, 16.01, 0.1, device=state.device).view(1, 1, -1, 1)
         z = (z + 3.0) / 19.0 * 2.0 - 1.0
-        # state 已处于 Signed-Log 训练空间，只做线性尺度归一化，不逆变换。
+        # 动作状态处于标准化空间，位置分支不对控制量做逆变换。
         trajectory_xy = state / 4.0
         trajectory_points = trajectory_xy.unsqueeze(2).expand(batch, self.points, z.shape[2], 2)
         trajectory_points = torch.cat((trajectory_points, z.expand(batch, self.points, -1, 1)), dim=-1)
         geometry = self.geometry_norm(self.geometry(trajectory_points.mean(dim=2)))
-        condition = self.time(_sinusoidal_time(time_step, self.dim)) + self.target(_fourier_target(target_point)) + self.ego(ego_state)
+        condition = (self.time(_sinusoidal_time(time_step, self.dim))
+                     + self.navigation(navigation_command) + self.ego(ego_state))
         fields = []
         for block, norm, head in zip(self.blocks, self.output_norms, self.action_heads):
             query = block(query, visual_tokens, condition, positions, geometry, visual_geometry)
@@ -420,16 +416,17 @@ class UnifiedDrivingModel(nn.Module):
         return integrate_unicycle_actions(actions, ego_state, action_mean, action_std, dt_s)
 
     @torch.no_grad()
-    def sample_trajectory_actions(self, rgb, intrinsics, target_point, ego_state,
+    def sample_trajectory_actions(self, rgb, intrinsics, navigation_command, ego_state,
                                   motion_matrices, steps: int = 10):
         """从标准高斯噪声用 Euler 流匹配采样标准化 [加速度, 曲率]。"""
         if steps <= 0:
             raise ValueError("steps 必须为正整数")
-        check_unified_driving_inputs(rgb, intrinsics, target_point, ego_state, motion_matrices)
+        check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
+                                     len(self.cfg.model.unified_driving.navigation_commands))
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
             tokens, geometry, _ = self.visual(
-                rgb, target_point, ego_state, intrinsics, motion_matrices)
+                rgb, navigation_command, ego_state, intrinsics, motion_matrices)
         state = torch.randn(
             rgb.shape[0], self.trajectory_decoder.points, 2,
             device=rgb.device, dtype=torch.float32)
@@ -440,7 +437,7 @@ class UnifiedDrivingModel(nn.Module):
                     (rgb.shape[0],), index / float(steps), device=rgb.device, dtype=torch.float32)
                 flow = self.trajectory_decoder(
                     state, tokens, geometry, time_step,
-                    target_point.float(), ego_state.float())[-1]
+                    navigation_command, ego_state.float())[-1]
                 state = state + flow.float() / float(steps)
         return state
 
@@ -466,16 +463,17 @@ class UnifiedDrivingModel(nn.Module):
         return encoded.reshape(batch, frames, *encoded.shape[1:])
 
     def forward(self, rgb: torch.Tensor, intrinsics: torch.Tensor,
-                target_point: torch.Tensor, ego_state: torch.Tensor,
+                navigation_command: torch.Tensor, ego_state: torch.Tensor,
                 motion_matrices: torch.Tensor, time_step: Optional[torch.Tensor] = None,
                 bev_state: Optional[torch.Tensor] = None,
                 traj_state: Optional[torch.Tensor] = None):
         """处理四帧图像，并在给定流状态时输出两个速度场。"""
-        check_unified_driving_inputs(rgb, intrinsics, target_point, ego_state, motion_matrices)
+        check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
+                                     len(self.cfg.model.unified_driving.navigation_commands))
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
             tokens, geometry, feature_maps = self.visual(
-                rgb, target_point, ego_state, intrinsics, motion_matrices)
+                rgb, navigation_command, ego_state, intrinsics, motion_matrices)
         outputs = {"visual_tokens": tokens, "image_geometry": geometry,
                    "visual_features": feature_maps}
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=False):
@@ -486,5 +484,5 @@ class UnifiedDrivingModel(nn.Module):
             if time_step is not None and traj_state is not None:
                 outputs["traj_flows"] = self.trajectory_decoder(
                     traj_state.float(), tokens_fp32, geometry.float(), time_step.float(),
-                    target_point.float(), ego_state.float())
+                    navigation_command, ego_state.float())
         return outputs

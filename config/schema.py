@@ -709,6 +709,7 @@ class UnifiedDrivingCfg:
     bev_latent_dim: int
     rope_theta: float
     cache_slice_s: float
+    navigation_commands: List[str]
 
 
 @dataclass
@@ -804,6 +805,11 @@ class DrivingCacheCfg:
     dir: str
     version: str
     slice_duration_s: float
+    navigation_lookahead_m: float
+    navigation_turn_threshold_deg: float
+    navigation_lane_match_radius_m: float
+    navigation_heading_tolerance_deg: float
+    navigation_lane_stable_points: int
 
 
 @dataclass
@@ -1756,6 +1762,9 @@ def _validate_unified_driving(spec):
         "轨迹输出必须为未来 3 秒、10Hz 的 30 个点"
     assert spec.bev_latent_dim > 0 and spec.cache_slice_s > 0, \
         "BEV latent 通道数和缓存切片时长必须为正"
+    assert spec.navigation_commands == ["straight", "left_turn", "right_turn",
+                                        "right_lane_change", "left_lane_change"], \
+        "model.unified_driving.navigation_commands 必须按固定五类顺序定义"
 
 
 def _validate_privileged_bev_vae_train(train):
@@ -1900,6 +1909,12 @@ def _validate_data(data, model_lane, camera_rig):
     cache = data.driving_cache
     assert cache.slice_duration_s > 0 and cache.version.strip(), \
         "data.driving_cache.slice_duration_s must be positive and version must be non-empty"
+    assert cache.navigation_lookahead_m > 0 and 0 < cache.navigation_turn_threshold_deg < 180, \
+        "data.driving_cache 导航前视距离和转向角阈值必须为正且有效"
+    assert cache.navigation_lane_match_radius_m > 0 \
+        and 0 < cache.navigation_heading_tolerance_deg < 90 \
+        and cache.navigation_lane_stable_points >= 2, \
+        "data.driving_cache HDMap 车道匹配参数无效"
 
 
 def _validate_train(train, model_lane):

@@ -109,6 +109,8 @@ def _frame_payloads(arena, frames, cam_names, mods, lidar_on):
         }
         if "relevant_traffic_control" in fr:
             metadata["relevant_traffic_control"] = fr["relevant_traffic_control"]
+        if "navigation_command" in fr:
+            metadata["navigation_command"] = int(fr["navigation_command"])
         yield {"meta": metadata, "arrays": arrays}
 
 

@@ -444,6 +444,7 @@ model:
     bev_latent_dim: 24
     rope_theta: 10000.0
     cache_slice_s: 3.0
+    navigation_commands: [straight, left_turn, right_turn, right_lane_change, left_lane_change]
 
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
@@ -657,8 +658,13 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v1-signed-log-four-frame
+    version: v3-hdmap-navigation
     slice_duration_s: 3.0
+    navigation_lookahead_m: 40.0
+    navigation_turn_threshold_deg: 30.0
+    navigation_lane_match_radius_m: 1.5
+    navigation_heading_tolerance_deg: 45.0
+    navigation_lane_stable_points: 3
 
 # ============================================================
 # train —— 训练 / 优化 / 评估循环（train/ 实现文件只读本节）

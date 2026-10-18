@@ -2,14 +2,20 @@
 
 模块: data/driving_cache/driving_cache.py
 依赖: hashlib, json, pathlib, tempfile, torch
-读取配置: data.driving_cache.dir/version/slice_duration_s
+读取配置: data.driving_cache.dir/version/slice_duration_s/navigation_lookahead_m/
+          navigation_turn_threshold_deg/navigation_lane_match_radius_m/
+          navigation_heading_tolerance_deg/navigation_lane_stable_points,
+          data.scene_cache_size / driving.scene_root,
+          model.unified_driving.navigation_commands
 对外接口:
     - DrivingSliceCache(cfg) -> object
     - load(key) -> dict[str, Tensor] | None
     - store(key, sample) -> Path
-    - pack_driving_sample(sample) -> dict[str, Tensor]
-说明: 缓存不保存语义、深度或 VAE latent；几何真值在写入时转到
-      Signed-Log 空间，训练读取时不再做逆变换。
+    - close() -> None
+    - navigation_command_from_route(route_geometry, route_index, cfg) -> int
+    - pack_driving_sample(sample, action_mean, action_std, cfg) -> dict[str, Tensor]
+说明: 路线选项优先决定五类指令；旧 LMDB 经 HDMap 恢复变道，缓存只保存类别 ID；轨迹控制量在训练集
+      Z-Score 空间写入，BEV latent 在线计算。
 """
 
 from __future__ import annotations
@@ -17,22 +23,24 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 import tempfile
 
 import torch
 from torch.utils.data import Dataset
 
+from data.carla_data_collector.common.navigation_command import (
+    navigation_command_from_route as _route_command,
+)
+from data.driving_cache.checks.driving_cache_checks import check_navigation_route
 from data.single_frame_base import resolve_repo_path
 from model.driving_model.unified_driving_model import signed_log
 
 
-_TARGET_LINEAR_SCALE_M = 64.0
-
-
 __all__ = ["DrivingSliceCache", "DrivingSliceDataset", "trajectory_to_unicycle_actions",
            "standardize_actions", "unstandardize_actions", "pack_driving_sample",
-           "slice_driving_samples", "prepare_driving_cache"]
+           "navigation_command_from_route", "slice_driving_samples", "prepare_driving_cache"]
 
 
 _ACTION_DT_S = 0.1
@@ -44,6 +52,7 @@ class DrivingSliceCache:
 
     def __init__(self, cfg):
         self.cfg = cfg
+        self._navigation_readers = OrderedDict()
         self.root = resolve_repo_path(cfg.data.driving_cache.dir)
         self.namespace = self._namespace(cfg.data.driving_cache.version, cfg)
         self.path = self.root / self.namespace
@@ -53,7 +62,13 @@ class DrivingSliceCache:
     def _namespace(version, cfg):
         payload = {"version": version, "slice_duration_s": float(cfg.data.driving_cache.slice_duration_s),
                    "trajectory_target": "standardized_unicycle_accel_curvature_v1",
-                   "target_point": "linear_64m", "frames": 4, "waypoints": 30}
+                   "navigation_commands": cfg.model.unified_driving.navigation_commands,
+                   "navigation_lookahead_m": cfg.data.driving_cache.navigation_lookahead_m,
+                   "navigation_turn_threshold_deg": cfg.data.driving_cache.navigation_turn_threshold_deg,
+                   "navigation_lane_match_radius_m": cfg.data.driving_cache.navigation_lane_match_radius_m,
+                   "navigation_heading_tolerance_deg": cfg.data.driving_cache.navigation_heading_tolerance_deg,
+                   "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
+                   "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         return "{}-{}".format(version, digest)
 
@@ -73,7 +88,20 @@ class DrivingSliceCache:
 
     def store(self, key, sample, action_mean=None, action_std=None):
         path = self._file(key)
-        packed = pack_driving_sample(sample, action_mean, action_std)
+        if sample.get("navigation_command") is None \
+                and (sample.get("frame_meta") or {}).get("navigation_command") is None \
+                and "route_geometry" not in sample:
+            scene_dir = _scene_dir(sample, self.cfg)
+            if (scene_dir / "lmdb").is_dir():
+                reader = self._navigation_readers.pop(scene_dir, None)
+                if reader is None:
+                    from vis.data_vis.reader import SceneReader
+                    reader = SceneReader(scene_dir, open_videos=False)
+                self._navigation_readers[scene_dir] = reader
+                while len(self._navigation_readers) > self.cfg.data.scene_cache_size:
+                    self._navigation_readers.popitem(last=False)[1].close()
+                sample = dict(sample, scene_reader=reader)
+        packed = pack_driving_sample(sample, action_mean, action_std, self.cfg)
         fd, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".pt", dir=str(self.path))
         os.close(fd)
         try:
@@ -83,6 +111,12 @@ class DrivingSliceCache:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return path
+
+    def close(self):
+        """释放缓存预生成阶段复用的场景读取器。"""
+        for reader in self._navigation_readers.values():
+            reader.close()
+        self._navigation_readers.clear()
 
 
 class DrivingSliceDataset(Dataset):
@@ -146,17 +180,81 @@ def unstandardize_actions(actions, mean, std):
     return actions * std + mean
 
 
-def pack_driving_sample(sample, action_mean=None, action_std=None):
-    """打包训练必需字段并在缓存阶段完成 Signed-Log 几何变换。"""
-    required = ("rgb", "intrinsics", "target_point", "ego_state", "motion_matrices",
+def navigation_command_from_route(route_geometry, route_index, cfg):
+    """读取前方路线的明确道路选项，缺失时从车道变化和路线转角推断。"""
+    check_navigation_route(route_geometry, route_index)
+    return _route_command(
+        route_geometry, route_index, cfg.data.driving_cache.navigation_lookahead_m,
+        cfg.data.driving_cache.navigation_turn_threshold_deg)
+
+
+def _navigation_command_from_trajectory(trajectory, cfg):
+    """脱离场景文件的旧样本仅能从局部航点近似恢复直行或转弯。"""
+    waypoints = torch.as_tensor(trajectory, dtype=torch.float32)[:, :2]
+    points = torch.cat((torch.zeros_like(waypoints[:1]), waypoints), dim=0)
+    distances = (points[1:] - points[:-1]).norm(dim=-1)
+    arc = torch.cat((distances.new_zeros(1), distances.cumsum(0)))
+    return _route_command(
+        {"points": points.tolist(), "arc_m": arc.tolist()}, 0,
+        cfg.data.driving_cache.navigation_lookahead_m,
+        cfg.data.driving_cache.navigation_turn_threshold_deg)
+
+
+def _scene_dir(sample, cfg):
+    """解析旧样本的场景目录，支持绝对路径和 scene_* 名称。"""
+    scene_dir = Path(str(sample["scene"]))
+    if not scene_dir.is_dir():
+        scene_dir = resolve_repo_path(cfg.data.driving.scene_root) / scene_dir
+    return scene_dir.resolve()
+
+
+def _navigation_command_from_scene(sample, cfg):
+    """旧 LMDB 场景优先使用 HDMap 和完整未来运动学恢复五类导航指令。"""
+    reader = sample.get("scene_reader")
+    if reader is not None:
+        return reader.navigation_command(int(sample["index"]), cfg)
+    scene_dir = _scene_dir(sample, cfg)
+    if not (scene_dir / "lmdb").is_dir():
+        return None
+    from vis.data_vis.reader import SceneReader
+
+    reader = SceneReader(scene_dir, open_videos=False)
+    try:
+        return reader.navigation_command(int(sample["index"]), cfg)
+    finally:
+        reader.close()
+
+
+def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
+    """打包训练必需字段，并把路线转成指令、航点转成标准化控制量。"""
+    required = ("rgb", "intrinsics", "ego_state", "motion_matrices",
                 "trajectory", "bev_grid", "timestamp", "scene", "index")
     missing = [name for name in required if name not in sample]
     if missing:
         raise KeyError("驾驶缓存缺少字段: {}".format(", ".join(missing)))
     packed = {name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
               for name, value in sample.items() if name in required}
-    # 目标点进入 AdaLN 前采用线性尺度；轨迹流匹配则全程使用 Signed-Log。
-    packed["target_point"] = packed["target_point"].float() / _TARGET_LINEAR_SCALE_M
+    command = sample.get("navigation_command")
+    if command is None:
+        command = (sample.get("frame_meta") or {}).get("navigation_command")
+    if command is None:
+        if cfg is None:
+            raise KeyError("缺少 navigation_command，且未提供旧数据回退所需的 cfg")
+        if "route_geometry" in sample and "route_index" in sample:
+            command = navigation_command_from_route(
+                sample["route_geometry"], sample["route_index"], cfg)
+        else:
+            command = _navigation_command_from_scene(sample, cfg)
+            if command is None:
+                command = _navigation_command_from_trajectory(packed["trajectory"], cfg)
+    if isinstance(command, str):
+        if cfg is None:
+            raise ValueError("字符串导航指令需要 cfg.model.unified_driving.navigation_commands")
+        command = cfg.model.unified_driving.navigation_commands.index(command)
+    command = int(command)
+    if not 0 <= command < 5:
+        raise ValueError("navigation_command 必须是 0..4 的类别 ID")
+    packed["navigation_command"] = torch.tensor(command, dtype=torch.long)
     raw_actions = sample.get("trajectory_actions")
     if raw_actions is None:
         raw_actions = trajectory_to_unicycle_actions(
@@ -212,9 +310,12 @@ def prepare_driving_cache(samples, cfg):
     stats_path = cache.path / "action_stats.pt"
     torch.save({"mean": action_mean, "std": action_std}, stats_path)
     written = 0
-    for sample in sliced:
-        key = "{}:{}".format(sample["scene"], sample["index"])
-        cache.store(key, sample, action_mean, action_std)
-        written += 1
+    try:
+        for sample in sliced:
+            key = "{}:{}".format(sample["scene"], sample["index"])
+            cache.store(key, sample, action_mean, action_std)
+            written += 1
+    finally:
+        cache.close()
     return {"namespace": cache.namespace, "path": str(cache.path), "samples": written,
             "action_mean": action_mean.tolist(), "action_std": action_std.tolist()}

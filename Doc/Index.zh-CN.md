@@ -34,7 +34,7 @@
 - [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — 场景感知批采样器：同场景顺序样本成批、批间随机，减少视频随机 seek 与跨场景解码器切换
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — 感知模型单帧数据集：把落盘场景逐帧展开，产出归一化 RGB 与语义/深度监督目标（采用所有帧）
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — 驾驶监督目标编码（numpy/OpenCV）：BEV/轨迹/三场、可见运动占用及八类多标签行为
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：加载车道折线与交通灯触发区，生成道路、中心线贴合、停止线及越界监督
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD 地图：匹配车道身份，并生成道路、中心线贴合、停止线及越界监督
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — 驾驶模型双帧三目+LiDAR 数据集：产双帧输入、体素统计、帧间变换与驾驶多任务监督
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — LiDAR 点云体素化：在 CPU 上向量化计算每格局部 XYZ 均值与总体标准差
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — 多帧语义 LiDAR 融合与动态对象重建公开 API
@@ -58,12 +58,14 @@
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — 读取 CARLA 场景并返回单帧 ego 对齐 BEVSeg
 - [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — 新 DrivingModel 训练切片缓存公共 API
 - [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 新驾驶训练切片缓存：把训练输入打包为可直接读取的 Tensor 字典
+- [data/driving_cache/checks/driving_cache_checks.py](../data/driving_cache/checks/driving_cache_checks.py) — 驾驶缓存的路线与导航指令输入校验
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — 轨迹与速度词表模块公开 API
 - [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 从 CARLA ego 运动学时间轴构造并聚类几何/速度词表
 - [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹与速度词表生成命令行入口
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
+- [data/carla_data_collector/common/navigation_command.py](../data/carla_data_collector/common/navigation_command.py) — 从 Carla 路线或专家规划生成五类导航指令
 - [data/carla_data_collector/README.md](../data/carla_data_collector/README.md) — 采集模块英文设计文档（主要版本）
 - [data/carla_data_collector/README.zh-CN.md](../data/carla_data_collector/README.zh-CN.md) — 采集模块中文设计文档
 - [scene_layout.py](../data/carla_data_collector/scene_layout.py) — 从 Carla 地图提取静态/动态场景布局（官方示例改造）
@@ -153,7 +155,7 @@ Py312 编排处理端 collector/（根 .venv 运行）
 - [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — 特权 BEV VAE 的训练与评估公开 API
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV VAE 的监督重建、KL 正则和 epoch 训练循环
 - [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — 新 DrivingModel 训练公共 API
-- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 新 DrivingModel 的 Signed-Log 流匹配损失与训练循环
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 标准化加速度/曲率流匹配损失与训练循环
 
 ## clone_loop/ — 行为克隆闭环
 

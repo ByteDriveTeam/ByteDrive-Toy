@@ -33,7 +33,7 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [data/scene_batch_sampler/scene_batch_sampler.py](../data/scene_batch_sampler/scene_batch_sampler.py) — Scene-aware batch sampler that groups consecutive frames and shuffles batches to reduce random video seeks
 - [data/perception_dataset/perception_dataset.py](../data/perception_dataset/perception_dataset.py) — Single-frame perception dataset producing normalized RGB and semantic/depth targets
 - [data/driving_targets/driving_targets.py](../data/driving_targets/driving_targets.py) — NumPy/OpenCV driving targets for BEV fields, trajectories, visible occupancy, and eight behavior labels
-- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map loading and rasterization for roads, centerline fitting, stop lines, and boundary supervision
+- [data/hd_map/hd_map.py](../data/hd_map/hd_map.py) — HD-map lane identity matching and rasterization for roads, centerlines, stop lines, and boundaries
 - [data/driving_dataset/driving_dataset.py](../data/driving_dataset/driving_dataset.py) — Two-frame, three-camera + LiDAR dataset with voxel statistics, temporal transforms, and multitask supervision
 - [data/lidar_voxelization/lidar_voxelization.py](../data/lidar_voxelization/lidar_voxelization.py) — CPU-vectorized LiDAR voxel means and population standard deviations of center-relative metric xyz
 - [data/multiframe_pointcloud_fusion/__init__.py](../data/multiframe_pointcloud_fusion/__init__.py) — Public API for multi-frame semantic-LiDAR fusion and dynamic-object reconstruction
@@ -56,13 +56,15 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — Public API for single-frame BEVSeg dataset
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
 - [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame standardized unicycle action driving slice cache
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second standardized accel/curvature driving training slice cache and direct tensor reader
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second driving cache with route-derived navigation commands and standardized controls
+- [data/driving_cache/checks/driving_cache_checks.py](../data/driving_cache/checks/driving_cache_checks.py) — Navigation route and command input checks for driving cache
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — Public API for trajectory and velocity vocabulary generation
 - [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — Streaming construction and clustering of CARLA ego geometric trajectory and velocity vocabulary
 - [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — Trajectory and velocity vocabulary generation CLI
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection
 
+- [data/carla_data_collector/common/navigation_command.py](../data/carla_data_collector/common/navigation_command.py) — Generate five navigation commands from CARLA routes or expert plans
 - [data/carla_data_collector/README.md](../data/carla_data_collector/README.md) — English primary collector architecture, data flow, output schema, and usage
 - [data/carla_data_collector/README.zh-CN.md](../data/carla_data_collector/README.zh-CN.md) — Simplified Chinese collector design
 - [scene_layout.py](../data/carla_data_collector/scene_layout.py) — Adapted official utility for static/dynamic CARLA map layout extraction

@@ -17,6 +17,16 @@ def check_polylines(polylines, path):
         raise ValueError("HD 地图 {} 未解析出任何车道折线（结构可能与预期不符）。".format(path))
 
 
+def check_lane_match_inputs(world_xy, heading_xy, match_radius_m, heading_tolerance_deg):
+    """校验对象: HdMap.match_lane_sequence 的轨迹、朝向和匹配阈值。"""
+    if world_xy.ndim != 2 or world_xy.shape[1] != 2 or len(world_xy) == 0 \
+            or heading_xy.shape != world_xy.shape or not np.isfinite(world_xy).all() \
+            or not np.isfinite(heading_xy).all():
+        raise ValueError("车道匹配需要有限的 world_xy/heading_xy [N,2]")
+    if match_radius_m <= 0 or not 0 < heading_tolerance_deg < 90:
+        raise ValueError("车道匹配半径和航向阈值无效")
+
+
 def check_drivable_mask(drivable, bev):
     """校验对象: offroad_distance_field 入参 —— 可行驶掩码形状须与 BEV 分辨率一致。"""
     expected = (bev.height, bev.width)

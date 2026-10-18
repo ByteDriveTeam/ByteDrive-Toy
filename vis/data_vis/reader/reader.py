@@ -2,9 +2,13 @@
 
 模块: vis/data_vis/reader/reader.py
 依赖: cv2, lmdb, msgpack, numpy, collector.writer(unpack_array), vis.data_vis.reader.checks.reader_checks
-读取配置: —（场景目录由调用方传入；样式参数不在本层）
+读取配置: data.scene_cache_size；data.driving.map_dir / map_name_template；
+          data.driving_cache.navigation_lookahead_m / navigation_turn_threshold_deg /
+          navigation_lane_match_radius_m / navigation_heading_tolerance_deg /
+          navigation_lane_stable_points
+          （仅 navigation_command 旧场景回退使用，由调用方传入）
 对外接口:
-    - SceneReader(scene_dir)
+    - SceneReader(scene_dir, open_videos=True)
         .meta -> dict                 # 场景级元数据（内外参/静态框/相机名/视频引用等）
         .num_frames -> int
         .num_kinematics -> int
@@ -16,6 +20,7 @@
         .lidar(i) -> np.ndarray | None # 只读取语义 LiDAR，不解码 RGB/其他大数组
         .frame(i, modalities=None) -> dict  # 标注 + 所选大数组模态；None 解码全部，传子集只解码所需
         .frame_meta(i) -> dict        # 仅逐帧元数据（ego/bboxes/交通灯…），不解码 RGB/不取大数组
+        .navigation_command(i, cfg) -> int  # 新场景直接读取；旧场景匹配 HDMap 车道
         .kinematics() -> list[dict]   # 独立高频运动学时间序列；旧数据回退逐帧 ego
         .actor_trajectories() -> dict[int,list[list[float]]]  # 动态车辆/行人/自车世界坐标轨迹
         .close()
@@ -26,9 +31,15 @@
       为此把采集模块根加入 sys.path（vis 是其数据的消费者）。各传感器模态由采集端开关决定是否存在，故构造时
       探测首帧实际落盘的模态（available），frame() 只返回存在的模态；旧场景缺交通灯状态时返回空列表，
       缺 CARLA 原生路线相关控制点时保持逐帧 meta 无该键，供驾驶数据集触发旧算法回退。
+      旧场景导航指令以 HDMap 车道身份和未来运动学恢复，地图按有界 LRU 复用。
+      open_videos=False 只供元数据/导航指令读取，不提供 RGB 解码。
 """
 
+import bisect
+import math
 import sys
+from collections import OrderedDict
+from itertools import islice
 from pathlib import Path
 
 import cv2
@@ -41,8 +52,27 @@ _COLLECTOR_ROOT = Path(__file__).resolve().parents[3] / "data" / "carla_data_col
 if str(_COLLECTOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_COLLECTOR_ROOT))
 from collector.writer import unpack_array  # noqa: E402  # pyright: ignore[reportMissingImports]  （依赖上面的 sys.path 引导）
+from common.navigation_command import (  # noqa: E402
+    lane_change_from_sequence, navigation_command_from_route,
+)
+
+from data.hd_map import HdMap
 
 from vis.data_vis.reader.checks.reader_checks import check_scene_dir, check_frame_index
+
+_NAVIGATION_MAPS = OrderedDict()
+
+
+def _navigation_hd_map(path, cache_size):
+    """按数据集资源上限复用已解析地图，避免旧场景逐切片重读大 NPZ。"""
+    key = str(path)
+    hd_map = _NAVIGATION_MAPS.pop(key, None)
+    if hd_map is None:
+        hd_map = HdMap(path)
+    _NAVIGATION_MAPS[key] = hd_map
+    while len(_NAVIGATION_MAPS) > cache_size:
+        _NAVIGATION_MAPS.popitem(last=False)
+    return hd_map
 
 
 def list_scenes(root):
@@ -79,7 +109,7 @@ class _Mp4Reader:
 
 
 class SceneReader:
-    def __init__(self, scene_dir):
+    def __init__(self, scene_dir, open_videos=True):
         scene_dir = Path(scene_dir)
         check_scene_dir(scene_dir)
         self._env = lmdb.open(str(scene_dir / "lmdb"), readonly=True, subdir=True, lock=False)
@@ -90,13 +120,15 @@ class SceneReader:
             self.num_kinematics = (
                 msgpack.unpackb(count_blob) if count_blob is not None else self.num_frames)
             self._has_kinematics = count_blob is not None
+        self._navigation_track = None
+        self._navigation_map = None
         self.camera_names = self.meta["camera_names"]
         self.failed = bool(self.meta.get("failed", False))
         self.failure_status = self.meta.get("failure_status")
         # RGB 仅在采集开启时落 mp4；video_files 为空即该场景无 RGB，不建解码器
         video_files = self.meta.get("video_files", {})
         self._videos = {cam: _Mp4Reader(scene_dir / video_files[cam])
-                        for cam in self.camera_names if cam in video_files}
+                        for cam in self.camera_names if cam in video_files} if open_videos else {}
         # 各模态由采集端开关决定，探测首帧首相机的实际落盘键，frame() 据此只取存在的模态
         self.available = self._detect_available(bool(self._videos))
 
@@ -124,6 +156,55 @@ class SceneReader:
         check_frame_index(i, self.num_frames)
         with self._env.begin() as txn:
             return msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
+
+    def navigation_command(self, i, cfg):
+        """读取五类指令；旧场景先用 HDMap 识别变道，再由轨迹转角识别转弯。"""
+        frame = self.frame_meta(i)
+        if "navigation_command" in frame:
+            return int(frame["navigation_command"])
+        if self._navigation_track is None:
+            states = self.kinematics()
+            if not states:
+                states = [self.frame_meta(index) for index in range(self.num_frames)]
+            self._navigation_track = (states, [float(state["sim_time"]) for state in states])
+        states, times = self._navigation_track
+        start = min(bisect.bisect_left(times, float(frame["sim_time"])), len(states) - 1)
+        points = []
+        arc = []
+        headings = []
+        for state in islice(states, start, None):
+            pose = state["ego"]["transform"]
+            point = [float(pose[0]), float(pose[1])]
+            if points and math.hypot(point[0] - points[-1][0],
+                                     point[1] - points[-1][1]) <= 1e-3:
+                continue
+            yaw = math.radians(float(pose[5]))
+            headings.append([math.cos(yaw), math.sin(yaw)])
+            arc.append(arc[-1] + math.hypot(point[0] - points[-1][0],
+                                            point[1] - points[-1][1]) if points else 0.0)
+            points.append(point)
+            if arc[-1] > cfg.data.driving_cache.navigation_lookahead_m:
+                break
+        if self._navigation_map is None:
+            map_name = str(self.meta["map"]).replace("_Opt", "")
+            map_dir = Path(cfg.data.driving.map_dir)
+            if not map_dir.is_absolute():
+                map_dir = _COLLECTOR_ROOT.parents[1] / map_dir
+            self._navigation_map = _navigation_hd_map(
+                map_dir / cfg.data.driving.map_name_template.format(map=map_name),
+                cfg.data.scene_cache_size)
+        cache_cfg = cfg.data.driving_cache
+        lane_keys = self._navigation_map.match_lane_sequence(
+            points, headings, cache_cfg.navigation_lane_match_radius_m,
+            cache_cfg.navigation_heading_tolerance_deg)
+        lane_change = lane_change_from_sequence(
+            lane_keys, cache_cfg.navigation_lane_stable_points)
+        if lane_change is not None:
+            return lane_change
+        return navigation_command_from_route(
+            {"points": points, "arc_m": arc}, 0,
+            cfg.data.driving_cache.navigation_lookahead_m,
+            cfg.data.driving_cache.navigation_turn_threshold_deg)
 
     def kinematics(self):
         """读取独立运动学时间序列；旧场景用低频逐帧 ego 元数据兼容回退。"""

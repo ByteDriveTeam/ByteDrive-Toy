@@ -6,11 +6,13 @@
 读取配置:
     clone_loop.route.sampling_resolution_m / target_distance_m / completion_distance_m /
         progress_search_points（由 cfg_route 传入）
+    data.driving_cache.navigation_lookahead_m / navigation_turn_threshold_deg
 对外接口:
-    - RouteNavigator(world_map, start, end, cfg_route)
+    - RouteNavigator(world_map, start, end, cfg_route, cfg_navigation)
         .observe(ego_transform) -> dict
         .geometry -> dict
-说明: 全局规划只在 episode 开始执行一次；每步仅在当前进度前方的有限窗口内向量化找最近点，避免回跳。
+说明: 全局规划只在 episode 开始执行一次；路线几何保留 RoadOption 供驾驶指令生成。
+      每步仅在当前进度前方的有限窗口内向量化找最近点，避免回跳。
 """
 
 import math
@@ -18,6 +20,7 @@ import math
 import carla
 import numpy as np
 from agents.navigation.global_route_planner import GlobalRoutePlanner
+from common.navigation_command import navigation_command_from_route
 
 from clone_loop.worker.navigation.checks.navigation_checks import check_route_trace
 
@@ -28,8 +31,9 @@ __all__ = ["RouteNavigator"]
 class RouteNavigator:
     """全局路线缓存与单调进度跟踪器。"""
 
-    def __init__(self, world_map, start, end, cfg_route):
+    def __init__(self, world_map, start, end, cfg_route, cfg_navigation):
         self._cfg = cfg_route
+        self._navigation_cfg = cfg_navigation
         self._end = carla.Location(x=end[0], y=end[1], z=end[2])
         origin = carla.Location(x=start[0], y=start[1], z=start[2])
         trace = GlobalRoutePlanner(
@@ -48,8 +52,14 @@ class RouteNavigator:
             [int(waypoint.road_id), int(waypoint.section_id), int(waypoint.lane_id)]
             for waypoint in waypoints
         ]
+        self._road_options = [int(item[1]) for item in trace]
         segments = np.linalg.norm(np.diff(self._points[:, :2], axis=0), axis=1)
         self._arc = np.r_[0.0, np.cumsum(segments)]
+        self._geometry = {
+            "points": self._points.tolist(), "arc_m": self._arc.tolist(),
+            "yaw_deg": self._yaw.tolist(), "lane_width_m": self._lane_width.tolist(),
+            "lane_keys": self._lane_keys, "road_options": self._road_options,
+        }
         self._progress = 0
 
     def observe(self, ego_transform):
@@ -70,6 +80,10 @@ class RouteNavigator:
         completion = float(self._arc[self._progress] / max(self._arc[-1], np.finfo(float).eps))
         return {
             "target_point": target_local.tolist(),
+            "navigation_command": navigation_command_from_route(
+                self._geometry, self._progress,
+                self._navigation_cfg.navigation_lookahead_m,
+                self._navigation_cfg.navigation_turn_threshold_deg),
             "route_deviation_m": deviation,
             "route_completion": completion,
             "route_progress_m": float(self._arc[self._progress]),
@@ -81,13 +95,7 @@ class RouteNavigator:
     @property
     def geometry(self):
         """返回离线代价与交通灯关联所需的完整路线几何。"""
-        return {
-            "points": self._points.tolist(),
-            "arc_m": self._arc.tolist(),
-            "yaw_deg": self._yaw.tolist(),
-            "lane_width_m": self._lane_width.tolist(),
-            "lane_keys": self._lane_keys,
-        }
+        return self._geometry
 
 
 def _world_xy_to_ego(point, origin, yaw_deg):

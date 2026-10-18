@@ -2,7 +2,8 @@
 
 模块: worker/main.py
 依赖: carla, numpy, config.schema, common.protocol, common.shm, clone_loop.shared_frame, worker.*
-读取配置: 不读 config 文件；配置由 collector 经 init/start_scene 命令下发（遵守「config 单一来源」）
+读取配置: data.driving_cache.navigation_lookahead_m / navigation_turn_threshold_deg；
+      配置由 collector 经 init/start_scene 命令下发（遵守「config 单一来源」）
 对外接口:
     - main() -> None     # 进程入口；处理专家分段命令、模型闭环逐步命令与 shutdown
 说明: 只在 py37_venv 下运行。stdout 仅承载协议消息，故启动即把 print 重定向到 stderr，
@@ -99,7 +100,8 @@ def _run_chunk(state):
             drive["world"], drive["ego"], drive["agent"], drive["rig"], drive["crowd"],
             drive["traffic_lights"], drive["traffic_light_metadata"],
             state["allocator"], cc.collection, cc.collision,
-            cc.worker.command_timeout_s, drive["counters"])
+            cc.worker.command_timeout_s, drive["counters"],
+            state["cfg"].data.driving_cache)
     except Exception:
         _cleanup_drive(state)  # 采集中途异常也要销毁 actor，避免泄漏
         raise

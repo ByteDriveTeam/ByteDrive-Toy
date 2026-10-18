@@ -1,4 +1,4 @@
-"""HD 地图：加载车道折线与交通灯触发区，生成道路、中心线贴合、停止线及越界监督。
+"""HD 地图：匹配车道身份，并生成道路、中心线贴合、停止线及越界监督。
 
 模块: data/hd_map/hd_map.py
 依赖: numpy, cv2, math, vis.data_vis.geometry(world_to_ego/transform_points),
@@ -15,6 +15,8 @@
         .gt_centerline_distance_bev(ego_pose6, gt_xy, gt_valid, bev, centerline_types,
                                     match_radius_m)
             -> (distance[H,W], valid[T])
+        .match_lane_sequence(world_xy, heading_xy, match_radius_m, heading_tolerance_deg)
+            -> list[tuple[int,int] | None]
         .traffic_control_bev(ego_pose6, route_xy, traffic_lights, states, bev, ...)
             -> dict[str, ndarray]                                           # 相关停止线/灯色/越线几何
     - offroad_distance_field(drivable, bev) -> (H,W) float32                # 可行驶处=0，越界距离（米）
@@ -38,6 +40,7 @@ from data.driving_targets import BevParams, ego_xy_to_pixel
 from data.hd_map.checks.hd_map_checks import (
     check_drivable_mask,
     check_gt_centerline_inputs,
+    check_lane_match_inputs,
     check_map_path,
     check_polylines,
     check_traffic_control_inputs,
@@ -59,6 +62,7 @@ class HdMap:
         self._polylines = [lane[0] for lane in lanes]
         self._directions = [lane[1] for lane in lanes]
         self._line_types = [lane[2] for lane in lanes]
+        self._lane_keys = [lane[3] for lane in lanes]
         check_polylines(self._polylines, self._path)
         # 逐折线外接圆（世界系）：中心与半径，供按 ego 距离粗过滤
         self._centers = np.array([p[:, :2].mean(0) for p in self._polylines], dtype=np.float64)
@@ -87,6 +91,32 @@ class HdMap:
         controls = _parse_traffic_controls(arr)
         self._control_polygons = [item[0] for item in controls]
         self._control_parent_xy = np.array([item[1] for item in controls], dtype=np.float64)
+
+    def match_lane_sequence(self, world_xy, heading_xy, match_radius_m,
+                            heading_tolerance_deg):
+        """把世界系轨迹逐点匹配到同向 Center 车道，未可靠匹配处返回 None。"""
+        world_xy = np.asarray(world_xy, dtype=np.float64)
+        heading_xy = np.asarray(heading_xy, dtype=np.float64)
+        check_lane_match_inputs(world_xy, heading_xy, match_radius_m, heading_tolerance_deg)
+        indices = np.flatnonzero(np.asarray(self._line_types) == "Center")
+        candidates = self._centerline_candidates(
+            indices, world_xy, np.eye(4), match_radius_m)
+        if not len(candidates):
+            return [None] * len(world_xy)
+        distance_rows = []
+        for index in candidates:
+            distances, segment_index = _point_to_polyline_distances(
+                world_xy, self._polylines[index][:, :2], return_segment=True)
+            aligned = np.einsum(
+                "ij,ij->i", heading_xy, self._directions[index][segment_index])
+            distance_rows.append(np.where(
+                aligned >= math.cos(math.radians(heading_tolerance_deg)),
+                distances, np.inf))
+        distances = np.stack(distance_rows)
+        nearest = distances.argmin(axis=0)
+        valid = distances[nearest, np.arange(len(world_xy))] <= match_radius_m
+        return [self._lane_keys[candidates[nearest[i]]] if valid[i] else None
+                for i in range(len(world_xy))]
 
     def drivable_bev(self, ego_pose6, bev: BevParams, lane_half_width_m: float) -> np.ndarray:
         """按 ego 世界位姿栅格化 BEV 可行驶掩码 `(H, W)`（1=可行驶）。"""
@@ -310,7 +340,7 @@ def _distance_to_mask(mask, bev):
     return (distance_px * meters_per_pixel).astype(np.float32)
 
 
-def _point_to_polyline_distances(points, polyline):
+def _point_to_polyline_distances(points, polyline, return_segment=False):
     """向量化计算每个点到一条有限折线的最短距离。"""
     starts = polyline[:-1]
     vectors = np.diff(polyline, axis=0)
@@ -318,7 +348,10 @@ def _point_to_polyline_distances(points, polyline):
     relative = points[:, None] - starts[None]
     ratios = np.clip((relative * vectors[None]).sum(2) / squared[None], 0.0, 1.0)
     closest = starts[None] + ratios[..., None] * vectors[None]
-    return np.sqrt(np.square(points[:, None] - closest).sum(2).min(1))
+    squared_distances = np.square(points[:, None] - closest).sum(2)
+    nearest = squared_distances.argmin(axis=1)
+    distances = np.sqrt(squared_distances[np.arange(len(points)), nearest])
+    return (distances, nearest) if return_segment else distances
 
 
 def _build_segment_grid(bounds_min, bounds_max, cell_size, segment_ids=None):
@@ -559,5 +592,6 @@ def _parse_lanes(arr):
                 if xyz.ndim == 2 and xyz.shape[1] == 3 and len(xyz) >= 2:
                     yaw = np.deg2rad(np.array([point[1][2] for point in pts], dtype=np.float64))
                     vectors = np.stack((np.cos(yaw), np.sin(yaw)), axis=1)
-                    lanes_out.append((xyz, vectors, str(seg.get("Type", ""))))
+                    lanes_out.append((xyz, vectors, str(seg.get("Type", "")),
+                                      (int(row[0]), int(lane_id))))
     return lanes_out

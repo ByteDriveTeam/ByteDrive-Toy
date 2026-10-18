@@ -11,6 +11,7 @@
     carla_collector.cameras.width / height / rig
     carla_collector.lidar.*
     data.driving.cameras
+    data.driving_cache.navigation_lookahead_m / navigation_turn_threshold_deg
 对外接口:
     - CarlaRuntime(cfg, shared_frame, shared_lidar)
         .server_info() -> dict
@@ -49,6 +50,7 @@ class CarlaRuntime:
 
     def __init__(self, cfg, shared_frame, shared_lidar):
         self._cfg = cfg.clone_loop
+        self._navigation_cfg = cfg.data.driving_cache
         self._cameras_cfg = cfg.carla_collector.cameras
         self._lidar_cfg = cfg.carla_collector.lidar
         self._camera_names = tuple(cfg.data.driving.cameras)
@@ -92,7 +94,8 @@ class CarlaRuntime:
             self._world, self._ego, self._cameras_cfg, self._lidar_cfg,
             self._camera_names)
         self._navigator = RouteNavigator(
-            self._world.get_map(), route["start"], route["end"], self._cfg.route)
+            self._world.get_map(), route["start"], route["end"],
+            self._cfg.route, self._navigation_cfg)
         self._steps = 0
         self._distance = 0.0
         self._last_location = self._ego.get_location()
@@ -151,6 +154,7 @@ class CarlaRuntime:
             "lidar_count": self._lidar_count,
             "lidar_valid": self._lidar_valid,
             "target_point": navigation["target_point"],
+            "navigation_command": int(navigation["navigation_command"]),
             "ego_velocity": ego_velocity,
             "speed_mps": _speed(self._ego),
             "route_deviation_m": navigation["route_deviation_m"],

@@ -1,4 +1,4 @@
-"""新 DrivingModel 的 Signed-Log 流匹配损失与训练循环。
+"""新 DrivingModel 的标准化控制量流匹配损失与训练循环。
 
 模块: train/unified_driving/unified_driving.py
 依赖: torch, config.schema.Config, model.driving_model.UnifiedDrivingModel
@@ -6,8 +6,7 @@
 对外接口:
     - compute_flow_matching_losses(model, batch, cfg) -> (Tensor, dict)
     - train_unified_driving_epoch(model, loader, optimizer, cfg, device) -> dict
-说明: 轨迹噪声插值、速度场监督和损失始终处在 Signed-Log 空间；本文件
-      不调用 Signed-Log 逆变换。
+说明: 轨迹噪声插值、速度场监督和损失始终处在加速度/曲率的 Z-Score 空间。
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
             + time_step[:, None, None, None] * bev_target
         bev_velocity = bev_target - bev_noise
     outputs = model(
-        batch["rgb"], batch["intrinsics"], batch["target_point"], batch["ego_state"],
+        batch["rgb"], batch["intrinsics"], batch["navigation_command"], batch["ego_state"],
         batch["motion_matrices"], time_step=time_step, traj_state=action_state,
         bev_state=bev_state)
     components = {}
