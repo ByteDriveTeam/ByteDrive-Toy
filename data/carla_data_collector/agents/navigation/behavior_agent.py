@@ -8,14 +8,17 @@
 waypoints and avoiding other vehicles. The agent also responds to traffic lights,
 traffic signs, and has different possible configurations. """
 
-import random
+import copy
 import numpy as np
 import carla
 from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.local_planner import RoadOption
 from agents.navigation.behavior_types import Cautious, Aggressive, Normal
+from agents.navigation.behavior_prediction import BayesianActorTracker
+from agents.navigation.risk_field import evaluate_route_risk
 
-from agents.tools.misc import get_speed, positive, is_within_distance, compute_distance
+from agents.tools.misc import (get_speed, positive, is_within_distance,
+                               compute_distance, get_trafficlight_trigger_location)
 
 class BehaviorAgent(BasicAgent):
     """
@@ -30,7 +33,20 @@ class BehaviorAgent(BasicAgent):
     are encoded in the agent, from cautious to a more aggressive ones.
     """
 
-    def __init__(self, vehicle, behavior='normal', opt_dict={}, map_inst=None, grp_inst=None):
+    _STATE_IDS = {
+        "CRUISE": 0, "FOLLOW": 1, "YIELD": 2, "STOPPING": 3,
+        "LANE_CHANGE": 4, "RECOVERY": 5,
+    }
+    _REASON_IDS = {
+        "cruise": 0, "follow_vehicle": 1, "predicted_conflict": 2,
+        "pedestrian_risk": 3, "red_light": 4, "yellow_light": 5,
+        "comfortable_braking": 6, "tailgating_pressure": 7,
+        "lane_change_safe": 8, "lane_change_blocked": 9,
+        "recovery": 10, "destination": 11, "emergency_stop": 12,
+    }
+
+    def __init__(self, vehicle, behavior='normal', opt_dict=None, map_inst=None,
+                 grp_inst=None, behavior_config=None):
         """
         Constructor method.
 
@@ -38,7 +54,8 @@ class BehaviorAgent(BasicAgent):
             :param behavior: type of agent to apply
         """
 
-        super().__init__(vehicle, opt_dict=opt_dict, map_inst=map_inst, grp_inst=grp_inst)
+        planner_options = dict(opt_dict or {})
+        super().__init__(vehicle, opt_dict=planner_options, map_inst=map_inst, grp_inst=grp_inst)
         self._look_ahead_steps = 0
 
         # Vehicle information
@@ -53,13 +70,123 @@ class BehaviorAgent(BasicAgent):
 
         # Parameters for agent behavior
         if behavior == 'cautious':
-            self._behavior = Cautious()
+            self._behavior = Cautious.create()
 
         elif behavior == 'normal':
-            self._behavior = Normal()
+            self._behavior = Normal.create()
 
         elif behavior == 'aggressive':
-            self._behavior = Aggressive()
+            self._behavior = Aggressive.create()
+        else:
+            raise ValueError("behavior must be cautious, normal, or aggressive")
+
+        config = dict(behavior_config or {})
+        self._predictive_enabled = bool(config.get("predictive_enabled", True))
+        self._prediction_horizon_s = float(config.get("prediction_horizon_s", 3.0))
+        self._prediction_step_s = float(config.get("prediction_step_s", 0.25))
+        self._prediction_max_actors = int(config.get("prediction_max_actors", 16))
+        self._reaction_time_s = float(config.get("reaction_time_s", 0.7))
+        self._comfort_decel_mps2 = float(config.get("comfort_decel_mps2", 3.0))
+        self._max_accel_mps2 = float(config.get("max_accel_mps2", 2.2))
+        self._max_jerk_mps3 = float(config.get("max_jerk_mps3", 4.0))
+        self._route_plan_horizon_m = float(config.get("route_plan_horizon_m", 40.0))
+        self._risk_slow_threshold = float(config.get("risk_slow_threshold", 0.18))
+        self._risk_yield_threshold = float(config.get("risk_yield_threshold", 0.42))
+        self._risk_stop_threshold = float(config.get("risk_stop_threshold", 0.78))
+        self._lane_change_cooldown_s = float(config.get("lane_change_cooldown_s", 5.0))
+        self._tracker = BayesianActorTracker(
+            horizon_s=self._prediction_horizon_s,
+            step_s=self._prediction_step_s,
+            process_noise=float(config.get("prediction_process_noise", 1.5)),
+            measurement_noise=float(config.get("prediction_measurement_noise", 0.25)),
+            max_stale_s=float(config.get("prediction_max_stale_s", 1.0)),
+        )
+        self._state = "CRUISE"
+        self._state_since = 0.0
+        self._lane_change_cooldown = 0.0
+        self._last_light_distance_m = float("inf")
+        self._last_target_speed_mps = 0.0
+        self._last_target_accel_mps2 = 0.0
+        self._last_risk = {}
+        self._last_predictions = []
+        self._last_snapshot = self._empty_snapshot("cruise")
+
+    @staticmethod
+    def _vec2(value):
+        return [float(value.x), float(value.y)]
+
+    @staticmethod
+    def _transform_payload(transform):
+        return [float(transform.location.x), float(transform.location.y),
+                float(transform.location.z), float(transform.rotation.roll),
+                float(transform.rotation.pitch), float(transform.rotation.yaw)]
+
+    def _empty_snapshot(self, reason):
+        reason = str(reason)
+        return {
+            "schema_version": 1,
+            "decision_frame_id": None,
+            "result_frame_id": None,
+            "decision_sim_time": None,
+            "result_sim_time": None,
+            "state": self._state,
+            "state_id": self._STATE_IDS.get(self._state, -1),
+            "state_since_sim_time": float(self._state_since),
+            "state_duration_s": 0.0,
+            "reason": reason,
+            "reason_code": self._REASON_IDS.get(reason, -1),
+            "reason_codes": [self._REASON_IDS.get(reason, -1)],
+            "navigation": {},
+            "decision_ego_transform": None,
+            "route_plan": {"coordinate_frame": "world", "truncated": False,
+                            "total_queue_points": 0, "points": []},
+            "target_speed_mps": 0.0,
+            "target_acceleration_mps2": 0.0,
+            "speed_limit_mps": 0.0,
+            "risk": dict(self._last_risk),
+            "prediction": {"horizon_s": self._prediction_horizon_s,
+                           "step_s": self._prediction_step_s,
+                           "tracked_actor_count": 0, "valid_track_count": 0,
+                           "actors": []},
+            "lane_change": {"available_left": False, "available_right": False,
+                            "cooldown_s": 0.0},
+        }
+
+    def _route_plan_snapshot(self, ego_transform):
+        plan = list(self._local_planner.get_plan())
+        points = []
+        travelled = 0.0
+        previous = ego_transform.location
+        for waypoint, option in plan:
+            location = waypoint.transform.location
+            travelled += location.distance(previous)
+            points.append({
+                "location_world": [float(location.x), float(location.y), float(location.z)],
+                "rotation_world": [float(waypoint.transform.rotation.roll),
+                                    float(waypoint.transform.rotation.pitch),
+                                    float(waypoint.transform.rotation.yaw)],
+                "road_option": int(option),
+                "road_id": int(waypoint.road_id),
+                "section_id": int(waypoint.section_id),
+                "lane_id": int(waypoint.lane_id),
+                "lane_type": str(waypoint.lane_type),
+                "is_junction": bool(waypoint.is_junction),
+                "arc_m": float(travelled),
+            })
+            previous = location
+        return {
+            "coordinate_frame": "world",
+            "truncated": False,
+            "total_queue_points": len(plan),
+            "points": points,
+        }
+
+    def get_decision_snapshot(self):
+        """Return a detached, msgpack-safe snapshot of the last control decision."""
+        return copy.deepcopy(self._last_snapshot)
+
+    def get_behavior_state(self):
+        return self.get_decision_snapshot()
 
     def _update_information(self):
         """
@@ -67,8 +194,8 @@ class BehaviorAgent(BasicAgent):
         vehicle based on the surrounding world.
         """
         self._speed = get_speed(self._vehicle)
-        self._speed_limit = self._vehicle.get_speed_limit()
-        self._local_planner.set_speed(self._speed_limit)
+        self._speed_limit = max(float(self._vehicle.get_speed_limit()), 0.0)
+        self._local_planner.set_speed(max(self._speed_limit, self._min_speed))
         self._direction = self._local_planner.target_road_option
         if self._direction is None:
             self._direction = RoadOption.LANEFOLLOW
@@ -79,6 +206,143 @@ class BehaviorAgent(BasicAgent):
             steps=self._look_ahead_steps)
         if self._incoming_direction is None:
             self._incoming_direction = RoadOption.LANEFOLLOW
+
+    def _set_state(self, state, now):
+        if state != self._state:
+            self._state = state
+            self._state_since = float(now)
+
+    def _actor_predictions(self, timestamp):
+        if not self._predictive_enabled:
+            self._last_predictions = []
+            return []
+        actors = list(self._world.get_actors().filter("*vehicle*"))
+        actors.extend(list(self._world.get_actors().filter("*walker.pedestrian*")))
+        self._last_predictions = self._tracker.update(
+            actors, timestamp, ego_id=self._vehicle.id)
+        return self._last_predictions
+
+    def _route_points(self):
+        points = [self._vehicle.get_location()]
+        travelled = 0.0
+        for waypoint, _ in list(self._local_planner.get_plan()):
+            next_location = waypoint.transform.location
+            travelled += points[-1].distance(next_location)
+            points.append(next_location)
+            if travelled >= self._route_plan_horizon_m:
+                break
+        return [[float(point.x), float(point.y)] for point in points]
+
+    def _risk_assessment(self, timestamp):
+        predictions = self._actor_predictions(timestamp)
+        risk = evaluate_route_risk(
+            self._route_points(), predictions,
+            self._vehicle.get_location(), self._speed / 3.6,
+            route_width_m=max(1.6, getattr(self._map.get_waypoint(
+                self._vehicle.get_location()), "lane_width", 3.5) * 0.55))
+        self._last_risk = risk
+        return risk
+
+    def _smooth_target_speed(self, target_speed_kmh, dt_s):
+        target_speed_mps = max(float(target_speed_kmh) / 3.6, 0.0)
+        previous = max(float(self._last_target_speed_mps), 0.0)
+        desired_accel = (target_speed_mps - previous) / max(float(dt_s), 1e-3)
+        desired_accel = min(desired_accel, self._max_accel_mps2)
+        desired_accel = max(desired_accel, -self._comfort_decel_mps2 * 1.5)
+        max_delta = self._max_jerk_mps3 * max(float(dt_s), 1e-3)
+        accel = min(max(desired_accel,
+                        self._last_target_accel_mps2 - max_delta),
+                    self._last_target_accel_mps2 + max_delta)
+        speed = max(previous + accel * max(float(dt_s), 1e-3), 0.0)
+        self._last_target_accel_mps2 = accel
+        self._last_target_speed_mps = speed
+        return speed * 3.6
+
+    @staticmethod
+    def _lane_available(waypoint, side):
+        if waypoint is None:
+            return False
+        marking = (waypoint.left_lane_marking if side == "left"
+                   else waypoint.right_lane_marking)
+        adjacent = (waypoint.get_left_lane() if side == "left"
+                    else waypoint.get_right_lane())
+        allowed = ((carla.LaneChange.Left, carla.LaneChange.Both) if side == "left"
+                   else (carla.LaneChange.Right, carla.LaneChange.Both))
+        return bool(marking is not None and marking.lane_change in allowed and
+                    adjacent is not None and adjacent.lane_type == carla.LaneType.Driving
+                    and waypoint.lane_id * adjacent.lane_id > 0)
+
+    def _build_snapshot(self, reason, target_speed_kmh, timestamp, control=None):
+        transform = self._vehicle.get_transform()
+        plan = getattr(self, "_decision_route_plan", None)
+        if plan is None:
+            plan = self._route_plan_snapshot(transform)
+        option = getattr(self, "_decision_navigation_option", self._direction)
+        target_waypoint = getattr(self, "_decision_target_waypoint",
+                                  self._local_planner.target_waypoint)
+        current_waypoint = self._map.get_waypoint(transform.location)
+        snapshot = self._empty_snapshot(reason)
+        ego_location = transform.location
+        nearest = sorted(self._last_predictions, key=lambda item: (
+            (float(item.means[0, 0]) - ego_location.x) ** 2 +
+            (float(item.means[0, 1]) - ego_location.y) ** 2))[:self._prediction_max_actors]
+        snapshot.update({
+            "decision_sim_time": float(timestamp),
+            "state": self._state,
+            "state_id": self._STATE_IDS.get(self._state, -1),
+            "state_since_sim_time": float(self._state_since),
+            "state_duration_s": float(max(timestamp - self._state_since, 0.0)),
+            "reason": str(reason),
+            "reason_code": self._REASON_IDS.get(str(reason), -1),
+            "reason_codes": [self._REASON_IDS.get(str(reason), -1)],
+            "target_speed_mps": float(max(target_speed_kmh, 0.0) / 3.6),
+            "target_acceleration_mps2": float(self._last_target_accel_mps2),
+            "speed_limit_mps": float(self._speed_limit / 3.6),
+            "route_plan": plan,
+            "decision_ego_transform": self._transform_payload(transform),
+            "prediction": {
+                "horizon_s": self._prediction_horizon_s,
+                "step_s": self._prediction_step_s,
+                "tracked_actor_count": self._tracker.track_count,
+                "valid_track_count": len(self._last_predictions),
+                "actors": [{
+                    "actor_id": item.actor_id, "actor_type": item.actor_type,
+                    "speed_mps": item.speed_mps,
+                    "extent_xy_m": list(item.extent_xy),
+                    "times_s": item.times.tolist(),
+                    "mean_world_xy": item.means.tolist(),
+                    "covariance_world_xy": item.covariances.tolist(),
+                } for item in nearest],
+            },
+            "lane_change": {
+                "available_left": self._lane_available(current_waypoint, "left"),
+                "available_right": self._lane_available(current_waypoint, "right"),
+                "cooldown_s": float(max(self._lane_change_cooldown, 0.0)),
+            },
+        })
+        if option is not None:
+            snapshot["navigation"] = {
+                "road_option": int(option),
+                "incoming_road_option": int(self._incoming_direction)
+                if self._incoming_direction is not None else None,
+                "target_waypoint": self._transform_payload(target_waypoint.transform)
+                if target_waypoint is not None else None,
+                "source": "local_planner",
+            }
+        if control is not None:
+            snapshot["applied_control"] = {
+                "throttle": float(control.throttle), "steer": float(control.steer),
+                "brake": float(control.brake), "hand_brake": bool(control.hand_brake),
+                "reverse": bool(control.reverse),
+            }
+        self._last_snapshot = snapshot
+        return snapshot
+
+    def _finish_control(self, control, reason, timestamp, target_speed_kmh=None):
+        target = (self._local_planner._target_speed if target_speed_kmh is None
+                  else target_speed_kmh)
+        self._build_snapshot(reason, target, timestamp, control)
+        return control
 
     def traffic_light_manager(self):
         """
@@ -99,6 +363,11 @@ class BehaviorAgent(BasicAgent):
             :param vehicle_list: list of all the nearby vehicles
         """
 
+        if self._lane_change_cooldown > 0 or self._last_risk.get("max_risk", 0.0) \
+                >= self._risk_yield_threshold:
+            return
+        if waypoint.left_lane_marking is None or waypoint.right_lane_marking is None:
+            return
         left_turn = waypoint.left_lane_marking.lane_change
         right_turn = waypoint.right_lane_marking.lane_change
 
@@ -107,24 +376,27 @@ class BehaviorAgent(BasicAgent):
 
         behind_vehicle_state, behind_vehicle, _ = self._vehicle_obstacle_detected(vehicle_list, max(
             self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, low_angle_th=160)
-        if behind_vehicle_state and self._speed < get_speed(behind_vehicle):
+        if behind_vehicle_state and self._speed < get_speed(behind_vehicle) \
+                and self._local_planner.target_waypoint is not None:
+            plan = list(self._local_planner.get_plan())
+            end_waypoint = plan[-1][0] if plan else self._local_planner.target_waypoint
             if (right_turn == carla.LaneChange.Right or right_turn ==
-                    carla.LaneChange.Both) and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
+                    carla.LaneChange.Both) and right_wpt is not None and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
                 new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
                     self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=1)
                 if not new_vehicle_state:
-                    print("Tailgating, moving to the right!")
-                    end_waypoint = self._local_planner.target_waypoint
                     self._behavior.tailgate_counter = 200
+                    self._lane_change_cooldown = self._lane_change_cooldown_s
+                    self._set_state("LANE_CHANGE", self._world.get_snapshot().timestamp.elapsed_seconds)
                     self.set_destination(end_waypoint.transform.location,
                                          right_wpt.transform.location)
-            elif left_turn == carla.LaneChange.Left and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
+            elif left_turn in (carla.LaneChange.Left, carla.LaneChange.Both) and left_wpt is not None and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
                 new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
                     self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=-1)
                 if not new_vehicle_state:
-                    print("Tailgating, moving to the left!")
-                    end_waypoint = self._local_planner.target_waypoint
                     self._behavior.tailgate_counter = 200
+                    self._lane_change_cooldown = self._lane_change_cooldown_s
+                    self._set_state("LANE_CHANGE", self._world.get_snapshot().timestamp.elapsed_seconds)
                     self.set_destination(end_waypoint.transform.location,
                                          left_wpt.transform.location)
 
@@ -205,104 +477,162 @@ class BehaviorAgent(BasicAgent):
         """
 
         vehicle_speed = get_speed(vehicle)
-        delta_v = max(1, (self._speed - vehicle_speed) / 3.6)
-        ttc = distance / delta_v if delta_v != 0 else distance / np.nextafter(0., 1.)
+        delta_v = max(1e-3, (self._speed - vehicle_speed) / 3.6)
+        ttc = distance / delta_v
 
         # Under safety time distance, slow down.
         if self._behavior.safety_time > ttc > 0.0:
-            target_speed = min([
+            target_speed = max(0.0, min([
                 positive(vehicle_speed - self._behavior.speed_decrease),
                 self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
+                max(0.0, self._speed_limit - self._behavior.speed_lim_dist)]))
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
 
         # Actual safety distance area, try to follow the speed of the vehicle in front.
         elif 2 * self._behavior.safety_time > ttc >= self._behavior.safety_time:
-            target_speed = min([
+            target_speed = max(0.0, min([
                 max(self._min_speed, vehicle_speed),
                 self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
+                max(0.0, self._speed_limit - self._behavior.speed_lim_dist)]))
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
 
         # Normal behavior.
         else:
-            target_speed = min([
+            target_speed = max(0.0, min([
                 self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
+                max(0.0, self._speed_limit - self._behavior.speed_lim_dist)]))
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
 
         return control
+
+    def _predictive_target_speed(self, risk):
+        """Translate route risk into an anticipatory speed target in km/h."""
+        target = min(self._behavior.max_speed,
+                     max(0.0, self._speed_limit - self._behavior.speed_lim_dist))
+        max_risk = float(risk.get("max_risk", 0.0))
+        ttc = float(risk.get("expected_ttc_s", float("inf")))
+        if max_risk >= self._risk_stop_threshold or (ttc < 1.0 and max_risk > 0.35):
+            return 0.0, "predicted_conflict"
+        if max_risk >= self._risk_yield_threshold or ttc < 2.0:
+            return min(target, max(self._min_speed, self._speed * 0.45)), "predicted_conflict"
+        if max_risk >= self._risk_slow_threshold:
+            return min(target, max(self._min_speed, self._speed * 0.75)), "comfortable_braking"
+        return target, "cruise"
+
+    def _traffic_light_target(self, ego_waypoint):
+        self._last_light_distance_m = float("inf")
+        if self._ignore_traffic_lights:
+            return None, None
+        speed = self._speed / 3.6
+        threshold = max(self._base_tlight_threshold + speed * 3.0, 8.0)
+        stop_distance = speed * self._reaction_time_s + speed ** 2 / max(
+            2.0 * self._comfort_decel_mps2, 1e-3)
+        for light in self._world.get_actors().filter("*traffic_light*"):
+            if light.state not in (carla.TrafficLightState.Red,
+                                   carla.TrafficLightState.Yellow):
+                continue
+            trigger = self._lights_map.get(light.id)
+            if trigger is None:
+                trigger = self._map.get_waypoint(get_trafficlight_trigger_location(light))
+                self._lights_map[light.id] = trigger
+            if trigger.road_id != ego_waypoint.road_id:
+                continue
+            distance = trigger.transform.location.distance(self._vehicle.get_location())
+            if distance > threshold or not is_within_distance(
+                    trigger.transform, self._vehicle.get_transform(), threshold, [0, 90]):
+                continue
+            if light.state == carla.TrafficLightState.Red:
+                self._last_light_distance_m = distance
+                return 0.0, "red_light"
+            if distance > stop_distance + 2.0:
+                self._last_light_distance_m = distance
+                return 0.0, "yellow_light"
+        return None, None
 
     def run_step(self, debug=False):
-        """
-        Execute one step of navigation.
-
-            :param debug: boolean for debugging
-            :return control: carla.VehicleControl
-        """
+        """Choose a state and speed before issuing a single control command."""
+        world_snapshot = self._world.get_snapshot()
+        timestamp = float(world_snapshot.timestamp.elapsed_seconds)
+        dt = float(getattr(world_snapshot.timestamp, "delta_seconds", 0.1) or 0.1)
         self._update_information()
-
-        control = None
+        self._decision_route_plan = self._route_plan_snapshot(self._vehicle.get_transform())
+        self._decision_navigation_option = self._direction
+        self._decision_target_waypoint = self._local_planner.target_waypoint
         if self._behavior.tailgate_counter > 0:
             self._behavior.tailgate_counter -= 1
+        self._lane_change_cooldown = max(0.0, self._lane_change_cooldown - dt)
 
-        ego_vehicle_loc = self._vehicle.get_location()
-        ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
+        ego_waypoint = self._map.get_waypoint(self._vehicle.get_location())
+        risk = self._risk_assessment(timestamp)
+        target, reason = self._predictive_target_speed(risk)
+        light_target, light_reason = self._traffic_light_target(ego_waypoint)
+        if light_target is not None:
+            target, reason = light_target, light_reason
+            self._set_state("STOPPING", timestamp)
+            if self._last_light_distance_m < max(3.0, self._speed / 3.6):
+                self._last_target_speed_mps = 0.0
+                self._last_target_accel_mps2 = 0.0
+                return self._finish_control(self.emergency_stop(), reason, timestamp, 0.0)
 
-        # 1: Red lights and stops behavior
-        if self.traffic_light_manager():
-            return self.emergency_stop()
-
-        # 2.1: Pedestrian avoidance behaviors
-        walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
-
+        walker_state, walker, walker_distance = self.pedestrian_avoid_manager(ego_waypoint)
         if walker_state:
-            # Distance is computed from the center of the two cars,
-            # we use bounding boxes to calculate the actual distance
-            distance = w_distance - max(
-                walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+            gap = walker_distance - max(walker.bounding_box.extent.x,
+                                        walker.bounding_box.extent.y) - max(
+                                            self._vehicle.bounding_box.extent.x,
+                                            self._vehicle.bounding_box.extent.y)
+            if gap < self._behavior.braking_distance:
+                self._set_state("STOPPING", timestamp)
+                self._last_target_speed_mps = 0.0
+                self._last_target_accel_mps2 = 0.0
+                return self._finish_control(self.emergency_stop(), "pedestrian_risk",
+                                            timestamp, 0.0)
+            target = min(target, max(0.0, self._speed * 0.4))
+            reason = "pedestrian_risk"
+            self._set_state("YIELD", timestamp)
 
-            # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance:
-                return self.emergency_stop()
-
-        # 2.2: Car following behaviors
-        vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
-
+        vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_waypoint)
         if vehicle_state:
-            # Distance is computed from the center of the two cars,
-            # we use bounding boxes to calculate the actual distance
-            distance = distance - max(
-                vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+            gap = distance - max(vehicle.bounding_box.extent.x,
+                                 vehicle.bounding_box.extent.y) - max(
+                                     self._vehicle.bounding_box.extent.x,
+                                     self._vehicle.bounding_box.extent.y)
+            if gap < self._behavior.braking_distance:
+                self._set_state("STOPPING", timestamp)
+                self._last_target_speed_mps = 0.0
+                self._last_target_accel_mps2 = 0.0
+                return self._finish_control(self.emergency_stop(), "emergency_stop",
+                                            timestamp, 0.0)
+            follow_speed = min(max(0.0, get_speed(vehicle)),
+                               max(0.0, gap / max(self._behavior.safety_time, 0.1) * 3.6))
+            target = min(target, follow_speed)
+            if light_target is None and reason == "cruise":
+                reason = "follow_vehicle"
+            if light_target is None:
+                self._set_state("FOLLOW", timestamp)
+        elif light_target is None and self._state == "LANE_CHANGE" and \
+                self._lane_change_cooldown > self._lane_change_cooldown_s - 1.0:
+            reason = "lane_change_safe"
+        elif light_target is None and reason == "predicted_conflict":
+            self._set_state("YIELD", timestamp)
+        elif light_target is None and reason == "comfortable_braking":
+            self._set_state("YIELD", timestamp)
+        elif light_target is None:
+            self._set_state("CRUISE", timestamp)
 
-            # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance:
-                return self.emergency_stop()
-            else:
-                control = self.car_following_manager(vehicle, distance)
-
-        # 3: Intersection behavior
-        elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - 5])
-            self._local_planner.set_speed(target_speed)
-            control = self._local_planner.run_step(debug=debug)
-
-        # 4: Normal behavior
-        else:
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
-            self._local_planner.set_speed(target_speed)
-            control = self._local_planner.run_step(debug=debug)
-
-        return control
+        if self._incoming_waypoint is not None and self._incoming_waypoint.is_junction \
+                and self._incoming_direction in (RoadOption.LEFT, RoadOption.RIGHT):
+            target = min(target, max(0.0, self._speed_limit - 5.0))
+        if target <= 0.0 and self._speed / 3.6 < 0.5:
+            self._last_target_speed_mps = 0.0
+            self._last_target_accel_mps2 = 0.0
+            return self._finish_control(self.emergency_stop(), reason, timestamp, 0.0)
+        target = self._smooth_target_speed(target, dt)
+        self._local_planner.set_speed(target)
+        control = self._local_planner.run_step(debug=debug)
+        return self._finish_control(control, reason, timestamp)
 
     def emergency_stop(self):
         """

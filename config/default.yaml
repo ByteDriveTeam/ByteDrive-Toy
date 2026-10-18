@@ -101,6 +101,23 @@ carla_collector:
     controller: behavior_agent    # behavior_agent / model；默认保持专家采集兼容
     behavior: normal           # cautious / normal / aggressive
     vehicle_filter: vehicle.lincoln.mkz_2020
+    behavior_agent:
+      predictive_enabled: true
+      prediction_horizon_s: 3.0
+      prediction_step_s: 0.25
+      prediction_process_noise: 1.5
+      prediction_measurement_noise: 0.25
+      prediction_max_stale_s: 1.0
+      prediction_max_actors: 16
+      reaction_time_s: 0.7
+      comfort_decel_mps2: 3.0
+      max_accel_mps2: 2.2
+      max_jerk_mps3: 4.0
+      route_plan_horizon_m: 40.0
+      risk_slow_threshold: 0.18
+      risk_yield_threshold: 0.42
+      risk_stop_threshold: 0.78
+      lane_change_cooldown_s: 5.0
 
   # 相机阵列：分辨率全局共享；rig 决定相机数量，并分别配置各视角的 FOV 与外参
   cameras:
@@ -658,7 +675,9 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v3-hdmap-navigation
+    version: v4-expert-metadata
+    include_expert_metadata: true
+    expert_plan_points: 32
     slice_duration_s: 3.0
     navigation_lookahead_m: 40.0
     navigation_turn_threshold_deg: 30.0

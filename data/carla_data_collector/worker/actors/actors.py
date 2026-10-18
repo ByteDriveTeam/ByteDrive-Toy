@@ -42,10 +42,12 @@ def spawn_ego_vehicle(world, vehicle_filter, start_pose6):
     return ego
 
 
-def spawn_ego(world, vehicle_filter, behavior, start_pose6):
+def spawn_ego(world, vehicle_filter, behavior, start_pose6,
+              behavior_config=None):
     """在起点生成主车并挂 BehaviorAgent。返回 (ego, agent)。"""
     ego = spawn_ego_vehicle(world, vehicle_filter, start_pose6)
-    return ego, BehaviorAgent(ego, behavior=behavior)
+    return ego, BehaviorAgent(ego, behavior=behavior,
+                              behavior_config=behavior_config)
 
 
 def spawn_traffic_vehicles(client, world, tm, num, vehicle_filter):

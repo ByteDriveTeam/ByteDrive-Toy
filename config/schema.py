@@ -68,10 +68,31 @@ class WeatherCfg:
 
 
 @dataclass
+class BehaviorAgentCfg:
+    predictive_enabled: bool
+    prediction_horizon_s: float
+    prediction_step_s: float
+    prediction_process_noise: float
+    prediction_measurement_noise: float
+    prediction_max_stale_s: float
+    prediction_max_actors: int
+    reaction_time_s: float
+    comfort_decel_mps2: float
+    max_accel_mps2: float
+    max_jerk_mps3: float
+    route_plan_horizon_m: float
+    risk_slow_threshold: float
+    risk_yield_threshold: float
+    risk_stop_threshold: float
+    lane_change_cooldown_s: float
+
+
+@dataclass
 class EgoCfg:
     controller: str
     behavior: str
     vehicle_filter: str
+    behavior_agent: BehaviorAgentCfg
 
 
 @dataclass
@@ -810,6 +831,8 @@ class DrivingCacheCfg:
     navigation_lane_match_radius_m: float
     navigation_heading_tolerance_deg: float
     navigation_lane_stable_points: int
+    include_expert_metadata: bool
+    expert_plan_points: int
 
 
 @dataclass
@@ -1215,6 +1238,14 @@ def validate_config(cfg):
     # 校验对象: ego.controller / behavior —— 双控制模式及专家风格枚举
     assert cc.ego.controller in ("behavior_agent", "model"), \
         "ego.controller 仅支持 behavior_agent/model"
+    ba = cc.ego.behavior_agent
+    assert ba.prediction_horizon_s > 0 and 0 < ba.prediction_step_s <= ba.prediction_horizon_s
+    assert ba.prediction_process_noise > 0 and ba.prediction_measurement_noise > 0
+    assert ba.prediction_max_stale_s > 0 and ba.reaction_time_s >= 0
+    assert ba.prediction_max_actors > 0
+    assert ba.comfort_decel_mps2 > 0 and ba.max_accel_mps2 > 0 and ba.max_jerk_mps3 > 0
+    assert ba.route_plan_horizon_m > 0 and ba.lane_change_cooldown_s >= 0
+    assert 0 <= ba.risk_slow_threshold < ba.risk_yield_threshold < ba.risk_stop_threshold <= 1
     assert cc.ego.behavior in ("cautious", "normal", "aggressive"), \
         "ego.behavior 仅支持 cautious/normal/aggressive"
 
@@ -1907,6 +1938,7 @@ def _validate_data(data, model_lane, camera_rig):
         "data.driving.behavior 交通灯匹配半径/Seg 容差/最少像素数取值非法"
 
     cache = data.driving_cache
+    assert cache.expert_plan_points > 0
     assert cache.slice_duration_s > 0 and cache.version.strip(), \
         "data.driving_cache.slice_duration_s must be positive and version must be non-empty"
     assert cache.navigation_lookahead_m > 0 and 0 < cache.navigation_turn_threshold_deg < 180, \

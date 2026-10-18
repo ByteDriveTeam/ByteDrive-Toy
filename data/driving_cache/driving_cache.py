@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -68,6 +69,9 @@ class DrivingSliceCache:
                    "navigation_lane_match_radius_m": cfg.data.driving_cache.navigation_lane_match_radius_m,
                    "navigation_heading_tolerance_deg": cfg.data.driving_cache.navigation_heading_tolerance_deg,
                    "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
+                   "expert_schema_version": 1,
+                   "include_expert_metadata": cfg.data.driving_cache.include_expert_metadata,
+                   "expert_plan_points": cfg.data.driving_cache.expert_plan_points,
                    "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         return "{}-{}".format(version, digest)
@@ -88,9 +92,12 @@ class DrivingSliceCache:
 
     def store(self, key, sample, action_mean=None, action_std=None):
         path = self._file(key)
-        if sample.get("navigation_command") is None \
-                and (sample.get("frame_meta") or {}).get("navigation_command") is None \
-                and "route_geometry" not in sample:
+        needs_navigation = sample.get("navigation_command") is None \
+            and (sample.get("frame_meta") or {}).get("navigation_command") is None \
+            and "route_geometry" not in sample
+        needs_expert = self.cfg.data.driving_cache.include_expert_metadata \
+            and sample.get("frame_meta") is None
+        if needs_navigation or needs_expert:
             scene_dir = _scene_dir(sample, self.cfg)
             if (scene_dir / "lmdb").is_dir():
                 reader = self._navigation_readers.pop(scene_dir, None)
@@ -225,6 +232,50 @@ def _navigation_command_from_scene(sample, cfg):
         reader.close()
 
 
+def _expert_tensors(frame_meta, plan_points):
+    """Represent optional expert decisions without changing supervision labels."""
+    expert = (frame_meta or {}).get("expert") or {}
+    risk = expert.get("risk") or {}
+    route = (expert.get("route_plan") or {}).get("points") or []
+    pose = expert.get("decision_ego_transform") or \
+        ((frame_meta or {}).get("ego") or {}).get("transform") or [0.0] * 6
+    x0, y0, yaw = float(pose[0]), float(pose[1]), math.radians(float(pose[5]))
+    c, s = math.cos(yaw), math.sin(yaw)
+    plan = torch.zeros((plan_points, 4), dtype=torch.float32)
+    mask = torch.zeros((plan_points,), dtype=torch.float32)
+    for index, point in enumerate(route[:plan_points]):
+        location = point.get("location_world") or [x0, y0, 0.0]
+        rotation = point.get("rotation_world") or [0.0, 0.0, 0.0]
+        dx, dy = float(location[0]) - x0, float(location[1]) - y0
+        delta_yaw = math.radians(float(rotation[2]) - float(pose[5]))
+        plan[index] = torch.tensor([
+            c * dx + s * dy, -s * dx + c * dy,
+            math.atan2(math.sin(delta_yaw), math.cos(delta_yaw)),
+            float(point.get("road_option", 0)),
+        ])
+        mask[index] = 1.0
+
+    def finite(name):
+        value = float(risk.get(name, -1.0))
+        return value if math.isfinite(value) else -1.0
+
+    return {
+        "expert_available": torch.tensor(float(bool(expert)), dtype=torch.float32),
+        "expert_state": torch.tensor(int(expert.get("state_id", -1)), dtype=torch.long),
+        "expert_reason": torch.tensor(int(expert.get("reason_code", -1)), dtype=torch.long),
+        "expert_target_speed": torch.tensor(float(expert.get("target_speed_mps", 0.0))),
+        "expert_target_acceleration": torch.tensor(
+            float(expert.get("target_acceleration_mps2", 0.0))),
+        "expert_risk": torch.tensor([
+            finite("max_risk"), finite("expected_ttc_s"),
+            finite("longitudinal_gap_m"), finite("lateral_gap_m"),
+            finite("predicted_conflict_probability"),
+        ], dtype=torch.float32),
+        "expert_route_plan": plan,
+        "expert_route_plan_valid": mask,
+    }
+
+
 def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
     """打包训练必需字段，并把路线转成指令、航点转成标准化控制量。"""
     required = ("rgb", "intrinsics", "ego_state", "motion_matrices",
@@ -234,6 +285,11 @@ def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
         raise KeyError("驾驶缓存缺少字段: {}".format(", ".join(missing)))
     packed = {name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
               for name, value in sample.items() if name in required}
+    if cfg is not None and cfg.data.driving_cache.include_expert_metadata:
+        frame_meta = sample.get("frame_meta")
+        if frame_meta is None and sample.get("scene_reader") is not None:
+            frame_meta = sample["scene_reader"].frame_meta(int(sample["index"]))
+        packed.update(_expert_tensors(frame_meta, cfg.data.driving_cache.expert_plan_points))
     command = sample.get("navigation_command")
     if command is None:
         command = (sample.get("frame_meta") or {}).get("navigation_command")

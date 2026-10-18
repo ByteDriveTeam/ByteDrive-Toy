@@ -22,6 +22,7 @@ sys.path.insert(0, str(_HERE.parents[1]))  # data/carla_data_collector
 sys.path.insert(0, str(_HERE.parents[3]))  # 仓库根 F:\ByteDrive
 
 import random
+from dataclasses import asdict
 
 import carla
 import numpy as np
@@ -133,7 +134,8 @@ def _handle_start_scene(state, args):
     rig = None
     try:
         ego, agent = actors.spawn_ego(world, cc.ego.vehicle_filter, cc.ego.behavior,
-                                      args["route"]["start"])
+                                      args["route"]["start"],
+                                      behavior_config=asdict(cc.ego.behavior_agent))
         vehicle_ids = actors.spawn_traffic_vehicles(
             client, world, tm, traffic["num_vehicles"], traffic["vehicle_filter"])
         crowd = actors.spawn_walkers(

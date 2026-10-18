@@ -112,13 +112,15 @@ Every scene is self-contained and may be removed, moved, or processed independen
 | --- | --- |
 | `meta` | Scene ID, seed, weather, route, map, FPS, calibration, static boxes, traffic lights and controlled lanes/stop points, video filenames |
 | `num_frames` | Number of low-rate sensor frames |
-| `{i}/meta` | Frame ID, simulation time, ego state, dynamic boxes, all light states, next route-relevant traffic control, and `navigation_command` |
+| `{i}/meta` | Frame ID, simulation time, ego state, dynamic boxes, all light states, next route-relevant traffic control, `navigation_command`, and optional `expert` decision |
 | `{i}/depth/{cam}` | Metric `float32 [H,W]` depth when enabled |
 | `{i}/semantic/{cam}` | CityScapes/CARLA `uint8 [H,W]` labels when enabled |
 | `{i}/optical_flow/{cam}` | `float32 [H,W,2]` motion vectors when enabled |
 | `{i}/lidar` | Lossless structured semantic LiDAR: x, y, z, cosine angle, object ID, semantic tag |
 | `num_kinematics` | Number of independent kinematics samples |
-| `kinematics/{k}` | Frame ID, time, pose, linear velocity/acceleration, angular velocity, and full vehicle control |
+| `kinematics/{k}` | Frame ID, time, pose, linear velocity/acceleration, angular velocity, full vehicle control, and optional `expert` decision |
+
+For BehaviorAgent scenes, `expert` records the pre-tick CARLA RoadOption, the full original LocalPlanner waypoint queue (world coordinates, lane IDs, and route distance), driving state and reason IDs, target speed/acceleration, Bayesian actor forecasts and route-risk summaries, applied control, collision/lane-invasion counters, and both decision and result frame IDs/times. `ego.behavior_agent.route_plan_horizon_m` limits only risk evaluation. `SceneReader.expert_decision(i)` and `expert_route_plan(i)` read these fields; older scenes return `None`. The existing annotation fields and `navigation_command` keep their formats. `data.driving_cache.include_expert_metadata` adds masked, fixed-length expert tensors to a new cache namespace without changing supervision labels.
 
 `navigation_command` uses IDs 0 straight, 1 left turn, 2 right turn, 3 right lane change, and 4 left lane change. The collector reads the next 40 m of the planned route (configured by `data.driving_cache.navigation_lookahead_m`) and gives CARLA RoadOption priority. `SceneReader.navigation_command(i, cfg)` reads the stored ID; for older scenes it matches future ego poses and headings to HDMap lane centers. A stable transition between adjacent lanes on the same road determines lane-change direction; remaining cases use route geometry to identify turns. The driving cache uses this reader when the old LMDB scene is available.
 

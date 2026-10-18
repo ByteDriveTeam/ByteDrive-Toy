@@ -157,6 +157,15 @@ class SceneReader:
         with self._env.begin() as txn:
             return msgpack.unpackb(txn.get(self._key(i, "meta")), raw=False)
 
+    def expert_decision(self, i):
+        """Read the optional expert decision; legacy scenes return None."""
+        return self.frame_meta(i).get("expert")
+
+    def expert_route_plan(self, i):
+        """Read the original planner queue captured before the control tick."""
+        expert = self.expert_decision(i)
+        return expert.get("route_plan") if expert else None
+
     def navigation_command(self, i, cfg):
         """读取五类指令；旧场景先用 HDMap 识别变道，再由轨迹转角识别转弯。"""
         frame = self.frame_meta(i)

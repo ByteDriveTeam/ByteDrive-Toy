@@ -133,13 +133,15 @@ data/carla_data_collector/
 | --- | --- |
 | `meta` | 场景级元数据：scene_id、seed、天气、路线、地图、fps、相机内外参、lidar 外参、静态包围框、交通灯及其受控车道/停止点、视频文件名 |
 | `num_frames` | 帧数 |
-| `{i}/meta` | 第 i 个低频传感器帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态、当前路线下一交通控制点、`navigation_command` |
+| `{i}/meta` | 第 i 个低频传感器帧：frame_id、sim_time、主车状态、动态包围框、全部交通灯状态、当前路线下一交通控制点、`navigation_command`，以及可选 `expert` 决策 |
 | `{i}/depth/{cam}` | 第 i 帧该相机深度图（解码为米、float32 H×W）；`depth` 开关关闭则无 |
 | `{i}/semantic/{cam}` | 第 i 帧该相机语义图（CityScapes 标签、uint8 H×W；与同名 RGB/Depth 像素对齐）；`semantic` 关则无 |
 | `{i}/optical_flow/{cam}` | 第 i 帧该相机光流（float32 H×W×2 运动矢量）；`optical_flow` 关则无（默认关） |
 | `{i}/lidar` | 第 i 帧语义 Lidar（结构化点：x,y,z,cos_angle,obj_idx,obj_tag，无损）；`lidar.enabled` 关则无 |
 | `num_kinematics` | 独立运动学时间轴的记录数 |
-| `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量 |
+| `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量，以及可选 `expert` 决策 |
+
+BehaviorAgent 场景的 `expert` 保存控制前的原始 CARLA RoadOption、完整的 LocalPlanner 原始航点队列（世界坐标、车道 ID、沿路距离）、驾驶状态和决策原因、目标速度/加速度、贝叶斯周车预测与路线风险摘要、实际控制量、碰撞/压线计数，以及决策帧和结果帧的编号与时间。`ego.behavior_agent.route_plan_horizon_m` 只限制风险评估前视距离。`SceneReader.expert_decision(i)` 和 `expert_route_plan(i)` 可读取这些字段，旧场景返回 `None`。原有标注字段与 `navigation_command` 格式不变。`data.driving_cache.include_expert_metadata` 将定长且带有效掩码的专家特征写入新的缓存命名空间，不更改监督标签。
 
 `navigation_command` 固定编码为 0 直行、1 左转、2 右转、3 右变道、4 左变道。采集时读取规划路线前方 `data.driving_cache.navigation_lookahead_m` 米，优先采用 CARLA RoadOption。`SceneReader.navigation_command(i, cfg)` 对新场景直接读取；旧场景把未来自车位姿与航向匹配到 HDMap 的车道中心线，同一道路上相邻车道的稳定变化决定变道方向，其余情况由轨迹几何判断转弯。训练缓存处理旧 LMDB 场景时复用该读取器。
 

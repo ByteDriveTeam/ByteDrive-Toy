@@ -23,6 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+import msgpack
 
 from common import protocol as P
 from common.shm import Arena
@@ -111,17 +112,24 @@ def _frame_payloads(arena, frames, cam_names, mods, lidar_on):
             metadata["relevant_traffic_control"] = fr["relevant_traffic_control"]
         if "navigation_command" in fr:
             metadata["navigation_command"] = int(fr["navigation_command"])
+        if "expert" in fr:
+            metadata["expert"] = fr["expert"]
         yield {"meta": metadata, "arrays": arrays}
 
 
-def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on):
+def _estimate_lmdb_bytes(frames, cam_names, height, width, mods, lidar_on,
+                         kinematics=()):
     """估算写入 LMDB 的字节：按启用模态累加每相机像素开销 + 语义lidar(原 blob) + 每帧元数据余量。"""
     pixels = height * width * len(cam_names)
     # 深度 float32(4) + 语义图 uint8(1) + 光流双通道 float32(8)，按开关计入
     per_pixel = (4 if mods.depth else 0) + (1 if mods.semantic else 0) + (8 if mods.optical_flow else 0)
-    per_frame = pixels * per_pixel + 64 * 1024  # 像素开销 + 元数据余量
+    per_frame = pixels * per_pixel + 64 * 1024
+    expert_total = sum(len(msgpack.packb(fr.get("expert", {}), use_bin_type=True))
+                       for fr in frames)
+    kinematics_total = sum(len(msgpack.packb(state, use_bin_type=True))
+                           for state in kinematics)
     lidar_total = sum(fr["blobs"]["lidar"][P.BLOB_SIZE] for fr in frames) if lidar_on else 0
-    return per_frame * len(frames) + lidar_total
+    return per_frame * len(frames) + expert_total + kinematics_total + lidar_total
 
 
 def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, status, static_meta,
@@ -162,13 +170,16 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
             cc.simulation.fixed_delta_seconds * cc.collection.kinematics_every_n_ticks),
         "drive_id": drive_id, "segment_idx": segment_idx,
         "controller": controller, "complete": bool(complete),
+        "expert_schema_version": 1 if controller == "behavior_agent" else None,
         "route": {k: route[k] for k in ("start_idx", "end_idx", "start", "end")},
         "intrinsics": static_meta["intrinsics"], "extrinsics": static_meta["extrinsics"],
         "lidar_extrinsic": static_meta["lidar_extrinsic"], "static_bboxes": static_meta["static_bboxes"],
         "traffic_lights": static_meta["traffic_lights"],
         "camera_names": cam_names, "video_files": video_files,
     }
-    est = _estimate_lmdb_bytes(frames, cam_names, cc.cameras.height, cc.cameras.width, mods, lidar_on)
+    est = _estimate_lmdb_bytes(
+        frames, cam_names, cc.cameras.height, cc.cameras.width, mods, lidar_on,
+        kinematics)
     # 每段一个独立 LMDB，co-located 于场景目录；map_size 上限为单段量级
     writer = LmdbWriter(scene_dir / "lmdb", cc.output.lmdb_map_size_gb)
     try:

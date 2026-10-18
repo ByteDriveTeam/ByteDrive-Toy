@@ -25,6 +25,7 @@
 """
 
 import numpy as np
+import copy
 
 from common import protocol as P
 from common.navigation_command import navigation_command_from_plan
@@ -168,7 +169,20 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
     while counters["total"] < collection_cfg.max_frames_per_scene and not agent.done():
         crowd.retarget_arrived()  # 到达目标的行人重派新目标，避免后半程站住不动
         # 同步模式：先下控制、再 tick，使本帧物理按该控制推进
-        ego.apply_control(agent.run_step())
+        decision_world_snapshot = world.get_snapshot()
+        control = agent.run_step()
+        expert = (agent.get_decision_snapshot()
+                  if hasattr(agent, "get_decision_snapshot") else {})
+        expert = copy.deepcopy(expert)
+        expert["decision_frame_id"] = int(decision_world_snapshot.frame)
+        expert["decision_sim_time"] = float(
+            decision_world_snapshot.timestamp.elapsed_seconds)
+        expert["applied_control"] = {
+            "throttle": float(control.throttle), "steer": float(control.steer),
+            "brake": float(control.brake), "hand_brake": bool(control.hand_brake),
+            "reverse": bool(control.reverse),
+        }
+        ego.apply_control(control)
         frame_id = world.tick()
         counters["tick_idx"] += 1
         capture_due = (counters["tick_idx"] - 1) % capture_stride == 0
@@ -191,10 +205,15 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
         counters["collision_events"] = collision_events
         counters["collision_followup"] = collision_followup
         snapshot_time = world.get_snapshot().timestamp.elapsed_seconds
+        expert["result_frame_id"] = int(frame_id)
+        expert["result_sim_time"] = float(snapshot_time)
+        expert["events"] = {"collision_count": int(rig.collision_events),
+                            "lane_invasion_count": int(rig.lane_invasions)}
         ego_state = _ego_state(ego) if capture_due or kinematics_due else None
         if kinematics_due:
             kinematics.append({
-                "frame_id": frame_id, "sim_time": snapshot_time, "ego": ego_state})
+                "frame_id": frame_id, "sim_time": snapshot_time, "ego": ego_state,
+                "expert": copy.deepcopy(expert)})
         if not capture_due:
             continue
 
@@ -213,6 +232,7 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
             "blobs": blobs,
             "bboxes": annotations.dynamic_bboxes(world, ego.id),
             "traffic_light_states": traffic_states,
+            "expert": copy.deepcopy(expert),
             "relevant_traffic_control": traffic_control.relevant_traffic_control(
                 ego, agent, traffic_light_metadata, traffic_states),
             "navigation_command": navigation_command_from_plan(
