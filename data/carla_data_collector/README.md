@@ -90,7 +90,7 @@ data/carla_data_collector/
     writer/                   # Per-scene LMDB
     orchestrator/             # Collection lifecycle and retries
     run.py                    # CLI entry point
-  agents/                     # Unmodified CARLA agents
+  agents/                     # CARLA agents with improved BehaviorAgent, forecasting, and risk field
   scene_layout.py             # Adapted official map-layout utility
 ```
 
@@ -120,9 +120,24 @@ Every scene is self-contained and may be removed, moved, or processed independen
 | `num_kinematics` | Number of independent kinematics samples |
 | `kinematics/{k}` | Frame ID, time, pose, linear velocity/acceleration, angular velocity, full vehicle control, and optional `expert` decision |
 
-For BehaviorAgent scenes, `expert` records the pre-tick CARLA RoadOption, the full original LocalPlanner waypoint queue (world coordinates, lane IDs, and route distance), driving state and reason IDs, target speed/acceleration, Bayesian actor forecasts and route-risk summaries, applied control, collision/lane-invasion counters, and both decision and result frame IDs/times. `ego.behavior_agent.route_plan_horizon_m` limits only risk evaluation. `SceneReader.expert_decision(i)` and `expert_route_plan(i)` read these fields; older scenes return `None`. The existing annotation fields and `navigation_command` keep their formats. `data.driving_cache.include_expert_metadata` adds masked, fixed-length expert tensors to a new cache namespace without changing supervision labels.
+For BehaviorAgent scenes, `expert` records the pre-tick CARLA RoadOption, the full original LocalPlanner waypoint queue (world coordinates, lane IDs, and route distance), driving state and reason IDs, target speed/acceleration, Bayesian actor forecasts and route-risk summaries, applied control, collision/lane-invasion counters, and both decision and result frame IDs/times. `ego.behavior_agent.route_plan_horizon_m` limits only risk evaluation. `SceneReader.expert_decision(i)` and `expert_route_plan(i)` read these fields. The v8 driving cache packs selected expert annotations without reconstructing legacy scenes.
 
-`navigation_command` uses IDs 0 straight, 1 left turn, 2 right turn, 3 right lane change, and 4 left lane change. The collector reads the next 40 m of the planned route (configured by `data.driving_cache.navigation_lookahead_m`) and gives CARLA RoadOption priority. `SceneReader.navigation_command(i, cfg)` reads the stored ID; for older scenes it matches future ego poses and headings to HDMap lane centers. A stable transition between adjacent lanes on the same road determines lane-change direction; remaining cases use route geometry to identify turns. The driving cache uses this reader when the old LMDB scene is available.
+The agent matches CARLA's native light stop waypoints to the queued route's road and lane before braking. It caps speed ahead of tight turns using route curvature (`corner_lateral_accel_mps2`, `corner_preview_m`) and holds a moderate speed until heading and lane position recover (`turn_alignment_speed_mps`, `lane_centering_speed_mps`). `planner_base_min_distance_m` and `planner_distance_ratio` keep the tracking waypoint closer on tight bends. Pedestrian forecasts derive velocity from consecutive simulator positions because walker actor velocity can lag actual motion; a predicted crossing within stopping distance triggers early braking. The active reason IDs for `curve_speed` and `lane_centering` are 12 and 13.
+
+Active state IDs are 0 `CRUISE`, 1 `FOLLOW`, 2 `YIELD`, 3 `STOPPING`, 4 `LANE_CHANGE`, 5 `APPROACH_STOP`, and 6 `CREEP`. Active reason IDs are 0 `cruise`, 1 `follow_vehicle`, 2 `predicted_conflict`, 3 `pedestrian_risk`, 4 `red_light`, 5 `yellow_light`, 6 `comfortable_braking`, 7 `lane_change_safe`, 8 `emergency_stop`, 9 `red_light_approach`, 10 `yellow_light_approach`, 11 `red_light_creep`, 12 `curve_speed`, and 13 `lane_centering`.
+
+| `expert` field | Content |
+| --- | --- |
+| `decision_frame_id/result_frame_id`, `decision_sim_time/result_sim_time`, `decision_ego_transform` | Pre-control and post-tick alignment; world pose `[x,y,z,roll,pitch,yaw]` |
+| `navigation`, `route_plan.points` | Raw RoadOption and target waypoint; complete planner queue with world pose, road/lane IDs, junction flag, and `arc_m` |
+| `state/state_id`, `reason/reason_code`, `state_since_sim_time/state_duration_s` | Expert state machine and decision reason, including approach, stop, and low-speed creep states |
+| `target_speed_mps/target_acceleration_mps2/speed_limit_mps`, `applied_control` | Expert target values and issued throttle, steer, brake, and direction controls |
+| `prediction.actors`, `risk` | Up to 16 neighboring actor forecasts with mean world trajectories, covariance, times, and extents; route risk and estimated conflict time |
+| `traffic_light_id/traffic_light_distance_m`, `lane_change`, `events` | Relevant light, lane-change availability/cooldown, cumulative collision/lane-invasion counts |
+
+`ego` and `bboxes` remain simulator ground truth. Forecasts, risks, and states under `expert` are policy-produced decision records, not ground-truth future trajectories. The driving cache exposes `annotation_state`, `annotation_reason`, `annotation_probabilities[3]` (forecast conflict, left lane availability, right lane availability), and their validity masks. Lane availability checks markings and adjacent driving lanes; it does not certify a safe traffic gap. Expert route points, risk gaps, and TTC remain in scene metadata but are not auxiliary model targets.
+
+`navigation_command` uses IDs 0 straight, 1 left turn, 2 right turn, 3 right lane change, and 4 left lane change. The collector stores this command with each captured frame after consulting the HDMap route, and the v8 driving cache requires the stored ID.
 
 ### Additional model-mode keys
 

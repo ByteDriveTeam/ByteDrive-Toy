@@ -218,7 +218,11 @@ class _VisualProcessor(nn.Module):
         bb, spec = cfg.model.dinov3_backbone, cfg.model.unified_driving
         self.dim, self.patch_size = spec.dim, bb.patch_size
         self.num_register_tokens = spec.num_register_tokens
-        self.special_tokens = 2 + self.num_register_tokens
+        self.num_annotation_queries = spec.annotation_query_count
+        self.special_tokens = 2 + self.num_register_tokens + self.num_annotation_queries
+        self.register_start = 2
+        self.annotation_start = self.register_start + self.num_register_tokens
+        self.patch_start = self.special_tokens
         self.backbone = DinoV3Backbone(bb)
         self.dino_feature_norms = nn.ModuleList(
             [nn.LayerNorm(bb.hidden_dim) for _ in bb.feature_layers])
@@ -227,6 +231,8 @@ class _VisualProcessor(nn.Module):
         self.navigation_token = nn.Embedding(len(spec.navigation_commands), spec.dim)
         self.motion_token = nn.Linear(4, spec.dim)
         self.register_tokens = nn.Parameter(torch.randn(self.num_register_tokens, spec.dim) * 0.02)
+        self.annotation_queries = nn.Parameter(
+            torch.randn(self.num_annotation_queries, spec.dim) * 0.02)
         self.blocks = nn.ModuleList([_TransformerBlock(
             spec.dim, spec.self_heads_3d, spec.ffn_hidden, spec.rope_theta) for _ in range(8)])
         self.aggregate = nn.Sequential(nn.LayerNorm(spec.dim * 4), nn.Linear(spec.dim * 4, spec.dim))
@@ -241,6 +247,9 @@ class _VisualProcessor(nn.Module):
         self.token_output_norm = nn.LayerNorm(spec.dim)
         self.geometry_output_norm = nn.LayerNorm(spec.dim)
         self.image_geometry = _ConditionMLP(3, spec.dim, spec.geometry_hidden)
+        self.annotation_state_head = nn.Linear(spec.dim, spec.annotation_state_classes)
+        self.annotation_reason_head = nn.Linear(spec.dim, spec.annotation_reason_classes)
+        self.annotation_probability_head = nn.Linear(spec.dim, spec.annotation_probability_dim)
 
     def forward(self, rgb, navigation_command, ego_state, intrinsics, motion_matrices):
         batch, frames, channels, height, width = rgb.shape
@@ -263,13 +272,14 @@ class _VisualProcessor(nn.Module):
         condition = torch.stack((self.navigation_token(navigation_command).to(motion_token.dtype),
                                  motion_token), dim=1)
         registers = self.register_tokens.unsqueeze(0).expand(batch, -1, -1)
-        tokens = torch.cat((condition, registers, patches), dim=1)
+        annotation_queries = self.annotation_queries.unsqueeze(0).expand(batch, -1, -1)
+        tokens = torch.cat((condition, registers, annotation_queries, patches), dim=1)
         positions = self._positions(batch, frames, small_h, small_w, tokens.device, self.special_tokens)
         outputs = []
         for index, block in enumerate(self.blocks, 1):
             tokens = block(tokens, positions)
             if index in (2, 4, 6, 8):
-                outputs.append(tokens[:, self.special_tokens:])
+                outputs.append(tokens[:, self.patch_start:])
         # 聚合、PixelShuffle、残差卷积和末端 LayerNorm 固定在 FP32。
         with torch.autocast(device_type=outputs[-1].device.type, enabled=False):
             normalized = [F.layer_norm(item.float(), (self.dim,)) for item in outputs]
@@ -285,7 +295,16 @@ class _VisualProcessor(nn.Module):
             intrinsics, motion_matrices, batch, frames, small_h, small_w, self.patch_size)
         image_geometry = self.geometry_output_norm(image_geometry.float()).to(restored.dtype)
         geometry_tokens = image_geometry.reshape(batch, frames * small_h * small_w, self.dim)
-        return tokens, torch.cat((geometry_tokens.new_zeros(batch, self.special_tokens, self.dim), geometry_tokens), dim=1), restored
+        annotation_tokens = tokens[:, self.annotation_start:self.patch_start]
+        annotation_tokens = annotation_tokens.float()
+        with torch.autocast(device_type=annotation_tokens.device.type, enabled=False):
+            annotation = {
+                "tokens": annotation_tokens,
+                "state_logits": self.annotation_state_head(annotation_tokens[:, 0]),
+                "reason_logits": self.annotation_reason_head(annotation_tokens[:, 1]),
+                "probability_logits": self.annotation_probability_head(annotation_tokens[:, 2]),
+            }
+        return tokens, torch.cat((geometry_tokens.new_zeros(batch, self.special_tokens, self.dim), geometry_tokens), dim=1), restored, annotation
 
     @staticmethod
     def _positions(batch, frames, height, width, device, special_tokens):
@@ -364,6 +383,9 @@ class _TrajectoryDecoder(nn.Module):
         self.navigation = nn.Embedding(len(spec.navigation_commands), self.dim)
         self.ego = _ConditionMLP(4, self.dim, spec.condition_hidden)
         self.time = _ConditionMLP(self.dim, self.dim, spec.condition_hidden)
+        self.num_annotation_queries = spec.annotation_query_count
+        self.annotation_queries = nn.Parameter(
+            torch.randn(self.num_annotation_queries, self.dim) * 0.02)
         self.blocks = nn.ModuleList([_AdaLNZeroBlock(
             self.dim, spec.cross_heads, spec.self_heads_3d, spec.ffn_hidden,
             (16, 16, 16), spec.rope_theta) for _ in range(6)])
@@ -371,6 +393,9 @@ class _TrajectoryDecoder(nn.Module):
         self.action_heads = nn.ModuleList([nn.Linear(self.dim, 2) for _ in range(6)])
         self.geometry = geometry
         self.geometry_norm = nn.LayerNorm(self.dim)
+        self.annotation_state_head = nn.Linear(self.dim, spec.annotation_state_classes)
+        self.annotation_reason_head = nn.Linear(self.dim, spec.annotation_reason_classes)
+        self.annotation_probability_head = nn.Linear(self.dim, spec.annotation_probability_dim)
 
     def forward(self, state, visual_tokens, visual_geometry, time_step, navigation_command, ego_state):
         batch = state.shape[0]
@@ -384,13 +409,24 @@ class _TrajectoryDecoder(nn.Module):
         trajectory_points = trajectory_xy.unsqueeze(2).expand(batch, self.points, z.shape[2], 2)
         trajectory_points = torch.cat((trajectory_points, z.expand(batch, self.points, -1, 1)), dim=-1)
         geometry = self.geometry_norm(self.geometry(trajectory_points.mean(dim=2)))
+        annotation_queries = self.annotation_queries.unsqueeze(0).expand(batch, -1, -1)
+        query = torch.cat((query, annotation_queries), dim=1)
+        positions = torch.cat((positions, positions.new_zeros(batch, self.num_annotation_queries, 3)), dim=1)
+        geometry = torch.cat((geometry, geometry.new_zeros(batch, self.num_annotation_queries, self.dim)), dim=1)
         condition = (self.time(_sinusoidal_time(time_step, self.dim))
                      + self.navigation(navigation_command) + self.ego(ego_state))
         fields = []
         for block, norm, head in zip(self.blocks, self.output_norms, self.action_heads):
             query = block(query, visual_tokens, condition, positions, geometry, visual_geometry)
-            fields.append(head(norm(query)))
-        return fields
+            fields.append(head(norm(query[:, :self.points])))
+        annotation_tokens = self.output_norms[-1](query[:, self.points:]).float()
+        annotation = {
+            "tokens": annotation_tokens,
+            "state_logits": self.annotation_state_head(annotation_tokens[:, 0]),
+            "reason_logits": self.annotation_reason_head(annotation_tokens[:, 1]),
+            "probability_logits": self.annotation_probability_head(annotation_tokens[:, 2]),
+        }
+        return {"flows": fields, "annotation": annotation}
 
 
 class UnifiedDrivingModel(nn.Module):
@@ -425,7 +461,7 @@ class UnifiedDrivingModel(nn.Module):
                                      len(self.cfg.model.unified_driving.navigation_commands))
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
-            tokens, geometry, _ = self.visual(
+            tokens, geometry, _, _ = self.visual(
                 rgb, navigation_command, ego_state, intrinsics, motion_matrices)
         state = torch.randn(
             rgb.shape[0], self.trajectory_decoder.points, 2,
@@ -437,7 +473,7 @@ class UnifiedDrivingModel(nn.Module):
                     (rgb.shape[0],), index / float(steps), device=rgb.device, dtype=torch.float32)
                 flow = self.trajectory_decoder(
                     state, tokens, geometry, time_step,
-                    navigation_command, ego_state.float())[-1]
+                    navigation_command, ego_state.float())["flows"][-1]
                 state = state + flow.float() / float(steps)
         return state
 
@@ -472,17 +508,20 @@ class UnifiedDrivingModel(nn.Module):
                                      len(self.cfg.model.unified_driving.navigation_commands))
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
-            tokens, geometry, feature_maps = self.visual(
+            tokens, geometry, feature_maps, visual_annotation = self.visual(
                 rgb, navigation_command, ego_state, intrinsics, motion_matrices)
         outputs = {"visual_tokens": tokens, "image_geometry": geometry,
-                   "visual_features": feature_maps}
+                   "visual_features": feature_maps,
+                   "visual_annotation": visual_annotation}
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=False):
             tokens_fp32 = tokens.float()
             if time_step is not None and bev_state is not None:
                 outputs["bev_flow"] = self.bev_decoder(
                     bev_state.float(), tokens_fp32, geometry.float(), time_step.float())
             if time_step is not None and traj_state is not None:
-                outputs["traj_flows"] = self.trajectory_decoder(
+                trajectory_output = self.trajectory_decoder(
                     traj_state.float(), tokens_fp32, geometry.float(), time_step.float(),
                     navigation_command, ego_state.float())
+                outputs["traj_flows"] = trajectory_output["flows"]
+                outputs["traj_annotation"] = trajectory_output["annotation"]
         return outputs

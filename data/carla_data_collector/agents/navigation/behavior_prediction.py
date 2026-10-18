@@ -35,6 +35,7 @@ class _Track:
         self.P = np.eye(6, dtype=np.float64) * 10.0
         self.timestamp = None
         self.last_seen = None
+        self.last_observed_position = None
         self.initialized = False
 
     @staticmethod
@@ -69,7 +70,6 @@ class _Track:
         position = np.asarray(position, dtype=np.float64)[:2]
         velocity = np.asarray(velocity, dtype=np.float64)[:2]
         timestamp = float(timestamp)
-        z = np.concatenate((position, velocity))
         if not self.initialized or self.timestamp is None or timestamp <= self.timestamp:
             self.x[:] = 0.0
             self.x[:2] = position
@@ -80,10 +80,20 @@ class _Track:
             self.P[4:, 4:] *= 4.0
             self.timestamp = timestamp
             self.last_seen = timestamp
+            self.last_observed_position = position.copy()
             self.initialized = True
             return
 
         dt = min(max(timestamp - self.timestamp, 1e-3), 1.0)
+        if self.actor_type == "pedestrian" and self.last_observed_position is not None:
+            # CARLA walkers can report near-zero actor velocity while their
+            # controller moves them across the road. Consecutive ground-truth
+            # positions are the reliable motion observation in that case.
+            velocity = (position - self.last_observed_position) / dt
+            walk_speed = float(np.linalg.norm(velocity))
+            if walk_speed > 4.5:
+                velocity *= 4.5 / walk_speed
+        z = np.concatenate((position, velocity))
         F = self._transition(dt)
         self.x = F.dot(self.x)
         self.P = F.dot(self.P).dot(F.T) + self._process_covariance(dt)
@@ -98,11 +108,17 @@ class _Track:
         except np.linalg.LinAlgError:
             gain = self.P.dot(H.T).dot(np.linalg.pinv(S))
         self.x = self.x + gain.dot(innovation)
+        # Simulator positions are exact at the current tick. Anchor the mean
+        # to the observation so an old velocity prior cannot leave it behind.
+        self.x[:2] = position
+        if self.actor_type == "pedestrian":
+            self.x[2:4] = velocity
         self.P = (np.eye(6) - gain.dot(H)).dot(self.P)
         self.P = 0.5 * (self.P + self.P.T)
         self.P[np.diag_indices(6)] = np.maximum(self.P[np.diag_indices(6)], 1e-6)
         self.timestamp = timestamp
         self.last_seen = timestamp
+        self.last_observed_position = position.copy()
 
     def predict(self, horizon_s, step_s):
         horizon_s = float(max(horizon_s, 0.0))

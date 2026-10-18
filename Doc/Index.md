@@ -56,7 +56,7 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — Public API for single-frame BEVSeg dataset
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
 - [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame standardized unicycle action driving slice cache
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second driving cache with route-derived navigation commands and standardized controls
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — v8 three-second cache with standardized unicycle controls, 7 state and 14 reason classes, conflict probability, and lane availability targets
 - [data/driving_cache/checks/driving_cache_checks.py](../data/driving_cache/checks/driving_cache_checks.py) — Navigation route and command input checks for driving cache
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — Public API for trajectory and velocity vocabulary generation
 - [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — Streaming construction and clustering of CARLA ego geometric trajectory and velocity vocabulary
@@ -123,7 +123,7 @@ Python 3.12 collector:
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
 - [model/driving_model/__init__.py](../model/driving_model/__init__.py) — Driving model public API and re-export entry
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — DrivingModel alias redirection entry point to UnifiedDrivingModel
-- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Four-frame monocular spatio-temporal token backbone with dual flow-matching decoders
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Four-frame monocular spatio-temporal token backbone with visual/trajectory annotation queries and dual flow-matching decoders
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
 - [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — Public API for the grouped discrete BEVSeg compressor

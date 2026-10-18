@@ -15,6 +15,7 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 __all__ = ["compute_flow_matching_losses", "train_unified_driving_epoch"]
@@ -57,13 +58,41 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
     ]
     components["trajectory"] = sum(weight * loss for weight, loss in zip(
         _TRAJECTORY_LAYER_WEIGHTS, trajectory_losses))
+    annotation_losses = []
+    if "annotation_valid" in batch:
+        annotation_losses.append(_annotation_loss(outputs["visual_annotation"], batch))
+        if "traj_annotation" in outputs:
+            annotation_losses.append(_annotation_loss(outputs["traj_annotation"], batch))
+    components["annotation"] = (sum(annotation_losses) / len(annotation_losses)
+                                 if annotation_losses else action_target.new_zeros(()))
     if "bev_latent" in batch:
         components["bev"] = (outputs["bev_flow"].float() - bev_velocity).square().mean()
     else:
         components["bev"] = action_target.new_zeros(())
-    total = components["trajectory"] + components["bev"]
+    total = components["trajectory"] + components["bev"] \
+        + cfg.model.unified_driving.annotation_loss_weight * components["annotation"]
     components["total"] = total
     return total, components
+
+
+def _annotation_loss(prediction, batch):
+    """只监督有定义的驾驶状态、决策原因、冲突概率与车道可用性。"""
+    valid = batch["annotation_valid"].float().view(-1)
+    state_target = batch["annotation_state"].long().view(-1)
+    reason_target = batch["annotation_reason"].long().view(-1)
+    state = prediction["state_logits"].float()
+    reason = prediction["reason_logits"].float()
+    state_loss = F.cross_entropy(state, state_target, ignore_index=-1, reduction="none")
+    reason_loss = F.cross_entropy(reason, reason_target, ignore_index=-1, reduction="none")
+    state_mask = valid * (state_target >= 0).float()
+    reason_mask = valid * (reason_target >= 0).float()
+    probability_mask = valid[:, None] * batch["annotation_probability_valid"].float()
+    probability_loss = F.binary_cross_entropy_with_logits(
+        prediction["probability_logits"].float(),
+        batch["annotation_probabilities"].float(), reduction="none")
+    return (state_loss * state_mask).sum() / state_mask.sum().clamp_min(1.0) \
+        + (reason_loss * reason_mask).sum() / reason_mask.sum().clamp_min(1.0) \
+        + (probability_loss * probability_mask).sum() / probability_mask.sum().clamp_min(1.0)
 
 
 def train_unified_driving_epoch(model, loader, optimizer, cfg, device):

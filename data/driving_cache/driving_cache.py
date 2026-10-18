@@ -1,30 +1,15 @@
-"""新驾驶训练切片缓存：把训练输入打包为可直接读取的 Tensor 字典。
-
+"""驾驶训练切片缓存。
 模块: data/driving_cache/driving_cache.py
-依赖: hashlib, json, pathlib, tempfile, torch
-读取配置: data.driving_cache.dir/version/slice_duration_s/navigation_lookahead_m/
-          navigation_turn_threshold_deg/navigation_lane_match_radius_m/
-          navigation_heading_tolerance_deg/navigation_lane_stable_points,
-          data.scene_cache_size / driving.scene_root,
-          model.unified_driving.navigation_commands
-对外接口:
-    - DrivingSliceCache(cfg) -> object
-    - load(key) -> dict[str, Tensor] | None
-    - store(key, sample) -> Path
-    - close() -> None
-    - navigation_command_from_route(route_geometry, route_index, cfg) -> int
-    - pack_driving_sample(sample, action_mean, action_std, cfg) -> dict[str, Tensor]
-说明: 路线选项优先决定五类指令；旧 LMDB 经 HDMap 恢复变道，缓存只保存类别 ID；轨迹控制量在训练集
-      Z-Score 空间写入，BEV latent 在线计算。
+读取配置: data.driving_cache.*、model.unified_driving.annotation_*、model.unified_driving.navigation_commands
+说明: 每个三秒切片保存四帧输入、标准化单轮车动作、导航指令和带掩码的专家辅助标注；BEV latent 在线生成。
+对外接口: DrivingSliceCache、DrivingSliceDataset、pack_driving_sample、prepare_driving_cache。
 """
-
 from __future__ import annotations
 
 import hashlib
 import json
 import math
 import os
-from collections import OrderedDict
 from pathlib import Path
 import tempfile
 
@@ -53,7 +38,6 @@ class DrivingSliceCache:
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self._navigation_readers = OrderedDict()
         self.root = resolve_repo_path(cfg.data.driving_cache.dir)
         self.namespace = self._namespace(cfg.data.driving_cache.version, cfg)
         self.path = self.root / self.namespace
@@ -69,9 +53,8 @@ class DrivingSliceCache:
                    "navigation_lane_match_radius_m": cfg.data.driving_cache.navigation_lane_match_radius_m,
                    "navigation_heading_tolerance_deg": cfg.data.driving_cache.navigation_heading_tolerance_deg,
                    "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
-                   "expert_schema_version": 1,
-                   "include_expert_metadata": cfg.data.driving_cache.include_expert_metadata,
-                   "expert_plan_points": cfg.data.driving_cache.expert_plan_points,
+                   "annotation_schema_version": 5,
+                   "risk_targets": "masked_conflict_and_lane_availability",
                    "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         return "{}-{}".format(version, digest)
@@ -92,22 +75,6 @@ class DrivingSliceCache:
 
     def store(self, key, sample, action_mean=None, action_std=None):
         path = self._file(key)
-        needs_navigation = sample.get("navigation_command") is None \
-            and (sample.get("frame_meta") or {}).get("navigation_command") is None \
-            and "route_geometry" not in sample
-        needs_expert = self.cfg.data.driving_cache.include_expert_metadata \
-            and sample.get("frame_meta") is None
-        if needs_navigation or needs_expert:
-            scene_dir = _scene_dir(sample, self.cfg)
-            if (scene_dir / "lmdb").is_dir():
-                reader = self._navigation_readers.pop(scene_dir, None)
-                if reader is None:
-                    from vis.data_vis.reader import SceneReader
-                    reader = SceneReader(scene_dir, open_videos=False)
-                self._navigation_readers[scene_dir] = reader
-                while len(self._navigation_readers) > self.cfg.data.scene_cache_size:
-                    self._navigation_readers.popitem(last=False)[1].close()
-                sample = dict(sample, scene_reader=reader)
         packed = pack_driving_sample(sample, action_mean, action_std, self.cfg)
         fd, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".pt", dir=str(self.path))
         os.close(fd)
@@ -120,10 +87,8 @@ class DrivingSliceCache:
         return path
 
     def close(self):
-        """释放缓存预生成阶段复用的场景读取器。"""
-        for reader in self._navigation_readers.values():
-            reader.close()
-        self._navigation_readers.clear()
+        """关闭切片缓存；切片文件本身采用原子替换写入。"""
+        return None
 
 
 class DrivingSliceDataset(Dataset):
@@ -195,84 +160,43 @@ def navigation_command_from_route(route_geometry, route_index, cfg):
         cfg.data.driving_cache.navigation_turn_threshold_deg)
 
 
-def _navigation_command_from_trajectory(trajectory, cfg):
-    """脱离场景文件的旧样本仅能从局部航点近似恢复直行或转弯。"""
-    waypoints = torch.as_tensor(trajectory, dtype=torch.float32)[:, :2]
-    points = torch.cat((torch.zeros_like(waypoints[:1]), waypoints), dim=0)
-    distances = (points[1:] - points[:-1]).norm(dim=-1)
-    arc = torch.cat((distances.new_zeros(1), distances.cumsum(0)))
-    return _route_command(
-        {"points": points.tolist(), "arc_m": arc.tolist()}, 0,
-        cfg.data.driving_cache.navigation_lookahead_m,
-        cfg.data.driving_cache.navigation_turn_threshold_deg)
+def _sample_expert(sample):
+    """从当前帧或显式专家快照读取标注，不推断未提供的标签。"""
+    return (sample.get("frame_meta") or {}).get("expert") or sample.get("expert") or {}
 
 
-def _scene_dir(sample, cfg):
-    """解析旧样本的场景目录，支持绝对路径和 scene_* 名称。"""
-    scene_dir = Path(str(sample["scene"]))
-    if not scene_dir.is_dir():
-        scene_dir = resolve_repo_path(cfg.data.driving.scene_root) / scene_dir
-    return scene_dir.resolve()
+def _risk_targets(expert):
+    """只缓存冲突概率与左右车道可用性，缺失值由逐维掩码排除。"""
+    risk, lane = expert.get("risk") or {}, expert.get("lane_change") or {}
+    conflict_value = risk.get("predicted_conflict_probability")
+    conflict = float(conflict_value) if conflict_value is not None else float("nan")
+    probability_valid = torch.tensor([
+        math.isfinite(conflict) and 0.0 <= conflict <= 1.0,
+        "available_left" in lane, "available_right" in lane,
+    ], dtype=torch.bool)
+    probabilities = torch.tensor([
+        conflict if probability_valid[0] else 0.0,
+        float(bool(lane.get("available_left", False))),
+        float(bool(lane.get("available_right", False))),
+    ])
+    return probabilities, probability_valid
 
 
-def _navigation_command_from_scene(sample, cfg):
-    """旧 LMDB 场景优先使用 HDMap 和完整未来运动学恢复五类导航指令。"""
-    reader = sample.get("scene_reader")
-    if reader is not None:
-        return reader.navigation_command(int(sample["index"]), cfg)
-    scene_dir = _scene_dir(sample, cfg)
-    if not (scene_dir / "lmdb").is_dir():
-        return None
-    from vis.data_vis.reader import SceneReader
-
-    reader = SceneReader(scene_dir, open_videos=False)
-    try:
-        return reader.navigation_command(int(sample["index"]), cfg)
-    finally:
-        reader.close()
-
-
-def _expert_tensors(frame_meta, plan_points):
-    """Represent optional expert decisions without changing supervision labels."""
-    expert = (frame_meta or {}).get("expert") or {}
-    risk = expert.get("risk") or {}
-    route = (expert.get("route_plan") or {}).get("points") or []
-    pose = expert.get("decision_ego_transform") or \
-        ((frame_meta or {}).get("ego") or {}).get("transform") or [0.0] * 6
-    x0, y0, yaw = float(pose[0]), float(pose[1]), math.radians(float(pose[5]))
-    c, s = math.cos(yaw), math.sin(yaw)
-    plan = torch.zeros((plan_points, 4), dtype=torch.float32)
-    mask = torch.zeros((plan_points,), dtype=torch.float32)
-    for index, point in enumerate(route[:plan_points]):
-        location = point.get("location_world") or [x0, y0, 0.0]
-        rotation = point.get("rotation_world") or [0.0, 0.0, 0.0]
-        dx, dy = float(location[0]) - x0, float(location[1]) - y0
-        delta_yaw = math.radians(float(rotation[2]) - float(pose[5]))
-        plan[index] = torch.tensor([
-            c * dx + s * dy, -s * dx + c * dy,
-            math.atan2(math.sin(delta_yaw), math.cos(delta_yaw)),
-            float(point.get("road_option", 0)),
-        ])
-        mask[index] = 1.0
-
-    def finite(name):
-        value = float(risk.get(name, -1.0))
-        return value if math.isfinite(value) else -1.0
-
+def _annotation_tensors(expert, spec):
+    """校验采集器编号并缓存专家类别及三个带有效掩码的风险目标。"""
+    state_id = int(expert.get("state_id", -1))
+    reason_id = int(expert.get("reason_code", -1))
+    if state_id != -1 and not 0 <= state_id < spec.annotation_state_classes:
+        raise ValueError("专家驾驶状态编号超出当前标注类别: {}".format(state_id))
+    if reason_id != -1 and not 0 <= reason_id < spec.annotation_reason_classes:
+        raise ValueError("专家决策原因编号超出当前标注类别: {}".format(reason_id))
+    probabilities, probability_valid = _risk_targets(expert)
     return {
-        "expert_available": torch.tensor(float(bool(expert)), dtype=torch.float32),
-        "expert_state": torch.tensor(int(expert.get("state_id", -1)), dtype=torch.long),
-        "expert_reason": torch.tensor(int(expert.get("reason_code", -1)), dtype=torch.long),
-        "expert_target_speed": torch.tensor(float(expert.get("target_speed_mps", 0.0))),
-        "expert_target_acceleration": torch.tensor(
-            float(expert.get("target_acceleration_mps2", 0.0))),
-        "expert_risk": torch.tensor([
-            finite("max_risk"), finite("expected_ttc_s"),
-            finite("longitudinal_gap_m"), finite("lateral_gap_m"),
-            finite("predicted_conflict_probability"),
-        ], dtype=torch.float32),
-        "expert_route_plan": plan,
-        "expert_route_plan_valid": mask,
+        "annotation_valid": torch.tensor(float(bool(expert)), dtype=torch.float32),
+        "annotation_state": torch.tensor(state_id, dtype=torch.long),
+        "annotation_reason": torch.tensor(reason_id, dtype=torch.long),
+        "annotation_probabilities": probabilities,
+        "annotation_probability_valid": probability_valid.float(),
     }
 
 
@@ -285,24 +209,13 @@ def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
         raise KeyError("驾驶缓存缺少字段: {}".format(", ".join(missing)))
     packed = {name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
               for name, value in sample.items() if name in required}
-    if cfg is not None and cfg.data.driving_cache.include_expert_metadata:
-        frame_meta = sample.get("frame_meta")
-        if frame_meta is None and sample.get("scene_reader") is not None:
-            frame_meta = sample["scene_reader"].frame_meta(int(sample["index"]))
-        packed.update(_expert_tensors(frame_meta, cfg.data.driving_cache.expert_plan_points))
+    if cfg is not None:
+        packed.update(_annotation_tensors(_sample_expert(sample), cfg.model.unified_driving))
     command = sample.get("navigation_command")
     if command is None:
         command = (sample.get("frame_meta") or {}).get("navigation_command")
     if command is None:
-        if cfg is None:
-            raise KeyError("缺少 navigation_command，且未提供旧数据回退所需的 cfg")
-        if "route_geometry" in sample and "route_index" in sample:
-            command = navigation_command_from_route(
-                sample["route_geometry"], sample["route_index"], cfg)
-        else:
-            command = _navigation_command_from_scene(sample, cfg)
-            if command is None:
-                command = _navigation_command_from_trajectory(packed["trajectory"], cfg)
+        raise KeyError("新驾驶缓存必须提供 navigation_command")
     if isinstance(command, str):
         if cfg is None:
             raise ValueError("字符串导航指令需要 cfg.model.unified_driving.navigation_commands")

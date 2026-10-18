@@ -109,7 +109,7 @@ data/carla_data_collector/
     writer.py                 # 每场景独立 LMDB：非 RGB 帧 + 运动学时间轴
     orchestrator.py           # 主循环：建队列→驱动→碰撞重试→读 arena→编码+写库
     run.py                    # CLI 入口
-  agents/                     # Carla 官方 agents（BehaviorAgent 等），未改动
+  agents/                     # BehaviorAgent、actor prediction and risk field extensions
   scene_layout.py             # 地图布局工具（官方示例），未改动
 ```
 
@@ -141,9 +141,15 @@ data/carla_data_collector/
 | `num_kinematics` | 独立运动学时间轴的记录数 |
 | `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量，以及可选 `expert` 决策 |
 
-BehaviorAgent 场景的 `expert` 保存控制前的原始 CARLA RoadOption、完整的 LocalPlanner 原始航点队列（世界坐标、车道 ID、沿路距离）、驾驶状态和决策原因、目标速度/加速度、贝叶斯周车预测与路线风险摘要、实际控制量、碰撞/压线计数，以及决策帧和结果帧的编号与时间。`ego.behavior_agent.route_plan_horizon_m` 只限制风险评估前视距离。`SceneReader.expert_decision(i)` 和 `expert_route_plan(i)` 可读取这些字段，旧场景返回 `None`。原有标注字段与 `navigation_command` 格式不变。`data.driving_cache.include_expert_metadata` 将定长且带有效掩码的专家特征写入新的缓存命名空间，不更改监督标签。
+BehaviorAgent 的 `expert` 快照记录状态、决策原因、目标速度和加速度、风险预测、规划路线及实际控制。v8 驾驶缓存只提取用于辅助训练的标注，不恢复旧场景数据。
 
-`navigation_command` 固定编码为 0 直行、1 左转、2 右转、3 右变道、4 左变道。采集时读取规划路线前方 `data.driving_cache.navigation_lookahead_m` 米，优先采用 CARLA RoadOption。`SceneReader.navigation_command(i, cfg)` 对新场景直接读取；旧场景把未来自车位姿与航向匹配到 HDMap 的车道中心线，同一道路上相邻车道的稳定变化决定变道方向，其余情况由轨迹几何判断转弯。训练缓存处理旧 LMDB 场景时复用该读取器。
+该快照还记录弯道限速、车道居中和行人横穿风险。专家风险属于策略推断，`ego` 与 `bboxes` 才是仿真真值。
+
+有效状态编号为 0 `CRUISE`、1 `FOLLOW`、2 `YIELD`、3 `STOPPING`、4 `LANE_CHANGE`、5 `APPROACH_STOP`、6 `CREEP`。有效原因编号为 0 `cruise`、1 `follow_vehicle`、2 `predicted_conflict`、3 `pedestrian_risk`、4 `red_light`、5 `yellow_light`、6 `comfortable_braking`、7 `lane_change_safe`、8 `emergency_stop`、9 `red_light_approach`、10 `yellow_light_approach`、11 `red_light_creep`、12 `curve_speed`、13 `lane_centering`。
+
+驾驶缓存提供 `annotation_valid`、`annotation_state`、`annotation_reason`、`annotation_probabilities[3]`（预测冲突概率、左侧车道可用性、右侧车道可用性）及逐维有效掩码。车道可用性只检查车道线与相邻驾驶车道，不保证动态交通间隙安全。风险间距、TTC 与专家规划航点仍保留在场景元数据中，但不作为模型辅助预测目标。
+
+`navigation_command` 固定为 0 直行、1 左转、2 右转、3 右变道、4 左变道。采集器根据 HDMap 路线保存指令，v8 驾驶缓存要求直接读取该指令。
 
 模型模式额外包含：
 

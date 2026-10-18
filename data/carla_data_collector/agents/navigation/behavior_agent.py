@@ -9,6 +9,7 @@ waypoints and avoiding other vehicles. The agent also responds to traffic lights
 traffic signs, and has different possible configurations. """
 
 import copy
+import math
 import numpy as np
 import carla
 from agents.navigation.basic_agent import BasicAgent
@@ -17,8 +18,7 @@ from agents.navigation.behavior_types import Cautious, Aggressive, Normal
 from agents.navigation.behavior_prediction import BayesianActorTracker
 from agents.navigation.risk_field import evaluate_route_risk
 
-from agents.tools.misc import (get_speed, positive, is_within_distance,
-                               compute_distance, get_trafficlight_trigger_location)
+from agents.tools.misc import get_speed, positive, compute_distance
 
 class BehaviorAgent(BasicAgent):
     """
@@ -35,14 +35,15 @@ class BehaviorAgent(BasicAgent):
 
     _STATE_IDS = {
         "CRUISE": 0, "FOLLOW": 1, "YIELD": 2, "STOPPING": 3,
-        "LANE_CHANGE": 4, "RECOVERY": 5,
+        "LANE_CHANGE": 4, "APPROACH_STOP": 5, "CREEP": 6,
     }
     _REASON_IDS = {
         "cruise": 0, "follow_vehicle": 1, "predicted_conflict": 2,
         "pedestrian_risk": 3, "red_light": 4, "yellow_light": 5,
-        "comfortable_braking": 6, "tailgating_pressure": 7,
-        "lane_change_safe": 8, "lane_change_blocked": 9,
-        "recovery": 10, "destination": 11, "emergency_stop": 12,
+        "comfortable_braking": 6, "lane_change_safe": 7,
+        "emergency_stop": 8, "red_light_approach": 9,
+        "yellow_light_approach": 10, "red_light_creep": 11,
+        "curve_speed": 12, "lane_centering": 13,
     }
 
     def __init__(self, vehicle, behavior='normal', opt_dict=None, map_inst=None,
@@ -54,7 +55,12 @@ class BehaviorAgent(BasicAgent):
             :param behavior: type of agent to apply
         """
 
+        config = dict(behavior_config or {})
         planner_options = dict(opt_dict or {})
+        planner_options.setdefault("base_min_distance",
+                                   float(config.get("planner_base_min_distance_m", 1.5)))
+        planner_options.setdefault("distance_ratio",
+                                   float(config.get("planner_distance_ratio", 0.25)))
         super().__init__(vehicle, opt_dict=planner_options, map_inst=map_inst, grp_inst=grp_inst)
         self._look_ahead_steps = 0
 
@@ -80,7 +86,6 @@ class BehaviorAgent(BasicAgent):
         else:
             raise ValueError("behavior must be cautious, normal, or aggressive")
 
-        config = dict(behavior_config or {})
         self._predictive_enabled = bool(config.get("predictive_enabled", True))
         self._prediction_horizon_s = float(config.get("prediction_horizon_s", 3.0))
         self._prediction_step_s = float(config.get("prediction_step_s", 0.25))
@@ -94,6 +99,15 @@ class BehaviorAgent(BasicAgent):
         self._risk_yield_threshold = float(config.get("risk_yield_threshold", 0.42))
         self._risk_stop_threshold = float(config.get("risk_stop_threshold", 0.78))
         self._lane_change_cooldown_s = float(config.get("lane_change_cooldown_s", 5.0))
+        self._creep_speed_mps = float(config.get("creep_speed_mps", 1.0))
+        self._stop_line_margin_m = float(config.get("stop_line_margin_m", 3.5))
+        self._corner_lateral_accel_mps2 = float(
+            config.get("corner_lateral_accel_mps2", 2.0))
+        self._corner_preview_m = float(config.get("corner_preview_m", 30.0))
+        self._turn_alignment_speed_mps = float(
+            config.get("turn_alignment_speed_mps", 4.0))
+        self._lane_centering_speed_mps = float(
+            config.get("lane_centering_speed_mps", 5.0))
         self._tracker = BayesianActorTracker(
             horizon_s=self._prediction_horizon_s,
             step_s=self._prediction_step_s,
@@ -105,6 +119,11 @@ class BehaviorAgent(BasicAgent):
         self._state_since = 0.0
         self._lane_change_cooldown = 0.0
         self._last_light_distance_m = float("inf")
+        self._last_light_id = None
+        self._active_stop_light_id = None
+        self._active_stop_waypoint = None
+        self._light_stop_cache = {}
+        self._creep_light_id = None
         self._last_target_speed_mps = 0.0
         self._last_target_accel_mps2 = 0.0
         self._last_risk = {}
@@ -143,6 +162,8 @@ class BehaviorAgent(BasicAgent):
             "target_speed_mps": 0.0,
             "target_acceleration_mps2": 0.0,
             "speed_limit_mps": 0.0,
+            "traffic_light_distance_m": None,
+            "traffic_light_id": None,
             "risk": dict(self._last_risk),
             "prediction": {"horizon_s": self._prediction_horizon_s,
                            "step_s": self._prediction_step_s,
@@ -298,6 +319,10 @@ class BehaviorAgent(BasicAgent):
             "target_speed_mps": float(max(target_speed_kmh, 0.0) / 3.6),
             "target_acceleration_mps2": float(self._last_target_accel_mps2),
             "speed_limit_mps": float(self._speed_limit / 3.6),
+            "traffic_light_distance_m": (
+                float(self._last_light_distance_m)
+                if math.isfinite(self._last_light_distance_m) else None),
+            "traffic_light_id": self._last_light_id,
             "route_plan": plan,
             "decision_ego_transform": self._transform_payload(transform),
             "prediction": {
@@ -514,42 +539,153 @@ class BehaviorAgent(BasicAgent):
                      max(0.0, self._speed_limit - self._behavior.speed_lim_dist))
         max_risk = float(risk.get("max_risk", 0.0))
         ttc = float(risk.get("expected_ttc_s", float("inf")))
-        if max_risk >= self._risk_stop_threshold or (ttc < 1.0 and max_risk > 0.35):
+        if max_risk >= self._risk_stop_threshold or (ttc < 1.0 and max_risk > 0.55):
             return 0.0, "predicted_conflict"
-        if max_risk >= self._risk_yield_threshold or ttc < 2.0:
+        if max_risk >= self._risk_yield_threshold or (ttc < 2.0 and max_risk > 0.35):
             return min(target, max(self._min_speed, self._speed * 0.45)), "predicted_conflict"
         if max_risk >= self._risk_slow_threshold:
             return min(target, max(self._min_speed, self._speed * 0.75)), "comfortable_braking"
         return target, "cruise"
 
+    def _corner_speed_limit_kmh(self):
+        """Brake before a tight planned turn, using its three-point curvature."""
+        points = self._decision_route_plan["points"]
+        ego_speed = self._speed / 3.6
+        buffer_m = ego_speed * self._reaction_time_s + 4.0
+        limit_mps = float("inf")
+        for index in range(1, len(points) - 1):
+            middle = points[index]
+            distance = middle["arc_m"]
+            if distance > self._corner_preview_m:
+                break
+            before = points[index - 1]["location_world"]
+            center = middle["location_world"]
+            after = points[index + 1]["location_world"]
+            ax, ay = center[0] - before[0], center[1] - before[1]
+            bx, by = after[0] - center[0], after[1] - center[1]
+            first = math.hypot(ax, ay)
+            second = math.hypot(bx, by)
+            chord = math.hypot(after[0] - before[0], after[1] - before[1])
+            if min(first, second, chord) < 0.75:
+                continue
+            curvature = 2.0 * abs(ax * by - ay * bx) / (first * second * chord)
+            if curvature < 0.025:
+                continue
+            corner_speed = math.sqrt(self._corner_lateral_accel_mps2 / curvature)
+            approach_m = max(distance - buffer_m, 0.0)
+            allowed = math.sqrt(corner_speed ** 2 +
+                                2.0 * self._comfort_decel_mps2 * approach_m)
+            limit_mps = min(limit_mps, allowed)
+        return limit_mps * 3.6
+
+    def _tracking_speed_limit_kmh(self, ego_waypoint):
+        """Hold a moderate speed until the vehicle is aligned with its lane."""
+        points = self._decision_route_plan["points"]
+        if not points:
+            return float("inf"), None
+        transform = self._vehicle.get_transform()
+        target_yaw = points[0]["rotation_world"][2]
+        yaw_error = abs((transform.rotation.yaw - target_yaw + 180.0) % 360.0 - 180.0)
+        if yaw_error > 12.0:
+            return self._turn_alignment_speed_mps * 3.6, "curve_speed"
+        center = ego_waypoint.transform.location
+        offset = math.hypot(transform.location.x - center.x,
+                            transform.location.y - center.y)
+        if offset > min(0.6, ego_waypoint.lane_width * 0.15):
+            return self._lane_centering_speed_mps * 3.6, "lane_centering"
+        return float("inf"), None
+
+    def _route_stop_distance(self, stop, ego_waypoint):
+        """Project a native stop waypoint onto matching lanes of the queued route."""
+        location = self._vehicle.get_location()
+        forward = stop.transform.get_forward_vector()
+        stop_location = stop.transform.location
+        if ((stop_location.x - location.x) * forward.x +
+                (stop_location.y - location.y) * forward.y) <= 0.0:
+            return None
+        stop_key = (stop.road_id, stop.section_id, stop.lane_id)
+        previous_xy = (location.x, location.y)
+        previous_key = (ego_waypoint.road_id, ego_waypoint.section_id,
+                        ego_waypoint.lane_id)
+        previous_arc = 0.0
+        nearest = None
+        for point in self._decision_route_plan["points"]:
+            current_xy = point["location_world"][:2]
+            current_key = (point["road_id"], point["section_id"], point["lane_id"])
+            arc = point["arc_m"]
+            if stop_key == previous_key or stop_key == current_key:
+                dx = current_xy[0] - previous_xy[0]
+                dy = current_xy[1] - previous_xy[1]
+                length_sq = dx * dx + dy * dy
+                if length_sq > 1e-6:
+                    along = min(max(((stop_location.x - previous_xy[0]) * dx +
+                                     (stop_location.y - previous_xy[1]) * dy) /
+                                    length_sq, 0.0), 1.0)
+                    lateral = math.hypot(
+                        stop_location.x - previous_xy[0] - along * dx,
+                        stop_location.y - previous_xy[1] - along * dy)
+                    if lateral <= stop.lane_width * 0.5:
+                        projected = previous_arc + along * (arc - previous_arc)
+                        if nearest is None or projected < nearest:
+                            nearest = projected
+            previous_xy, previous_key, previous_arc = current_xy, current_key, arc
+        return nearest
+
     def _traffic_light_target(self, ego_waypoint):
         self._last_light_distance_m = float("inf")
+        self._last_light_id = None
         if self._ignore_traffic_lights:
             return None, None
         speed = self._speed / 3.6
-        threshold = max(self._base_tlight_threshold + speed * 3.0, 8.0)
+        threshold = max(self._route_plan_horizon_m,
+                        self._base_tlight_threshold + speed * 3.0, 8.0)
         stop_distance = speed * self._reaction_time_s + speed ** 2 / max(
             2.0 * self._comfort_decel_mps2, 1e-3)
-        for light in self._world.get_actors().filter("*traffic_light*"):
+        chosen = None
+        lights = self._world.get_actors().filter("*traffic_light*")
+        ego_location = self._vehicle.get_location()
+        for light in lights:
             if light.state not in (carla.TrafficLightState.Red,
                                    carla.TrafficLightState.Yellow):
                 continue
-            trigger = self._lights_map.get(light.id)
-            if trigger is None:
-                trigger = self._map.get_waypoint(get_trafficlight_trigger_location(light))
-                self._lights_map[light.id] = trigger
-            if trigger.road_id != ego_waypoint.road_id:
+            if light.get_location().distance(ego_location) > threshold + 20.0:
                 continue
-            distance = trigger.transform.location.distance(self._vehicle.get_location())
-            if distance > threshold or not is_within_distance(
-                    trigger.transform, self._vehicle.get_transform(), threshold, [0, 90]):
-                continue
-            if light.state == carla.TrafficLightState.Red:
-                self._last_light_distance_m = distance
-                return 0.0, "red_light"
-            if distance > stop_distance + 2.0:
-                self._last_light_distance_m = distance
-                return 0.0, "yellow_light"
+            stops = self._light_stop_cache.get(light.id)
+            if stops is None:
+                stops = light.get_stop_waypoints()
+                self._light_stop_cache[light.id] = stops
+            for stop in stops:
+                distance = self._route_stop_distance(stop, ego_waypoint)
+                if distance is None or distance > threshold:
+                    continue
+                if light.state == carla.TrafficLightState.Yellow \
+                        and distance <= stop_distance + 2.0:
+                    continue
+                if chosen is None or distance < chosen[0]:
+                    chosen = (distance, light, stop)
+        if chosen is not None:
+            self._last_light_distance_m = chosen[0]
+            self._last_light_id = int(chosen[1].id)
+            self._active_stop_waypoint = chosen[2]
+            return 0.0, ("red_light" if chosen[1].state == carla.TrafficLightState.Red
+                         else "yellow_light")
+        if self._active_stop_light_id is not None:
+            for light in lights:
+                if light.id != self._active_stop_light_id or \
+                        light.state != carla.TrafficLightState.Red:
+                    continue
+                stop = self._active_stop_waypoint
+                if stop is None:
+                    continue
+                stop_location = stop.transform.location
+                forward = stop.transform.get_forward_vector()
+                ahead = ((stop_location.x - ego_location.x) * forward.x +
+                         (stop_location.y - ego_location.y) * forward.y)
+                distance = stop_location.distance(ego_location)
+                if ahead > 0.0 and distance <= threshold + 3.0:
+                    self._last_light_distance_m = distance
+                    self._last_light_id = int(light.id)
+                    return 0.0, "red_light"
         return None, None
 
     def run_step(self, debug=False):
@@ -570,12 +706,65 @@ class BehaviorAgent(BasicAgent):
         target, reason = self._predictive_target_speed(risk)
         light_target, light_reason = self._traffic_light_target(ego_waypoint)
         if light_target is not None:
-            target, reason = light_target, light_reason
-            self._set_state("STOPPING", timestamp)
-            if self._last_light_distance_m < max(3.0, self._speed / 3.6):
+            speed_mps = self._speed / 3.6
+            stop_distance = speed_mps * self._reaction_time_s + \
+                speed_mps ** 2 / max(2.0 * self._comfort_decel_mps2, 1e-3)
+            remaining = max(self._last_light_distance_m - 2.0 -
+                            speed_mps * self._reaction_time_s, 0.0)
+            stop_speed_kmh = math.sqrt(2.0 * self._comfort_decel_mps2 * remaining) * 3.6
+            target = min(target, stop_speed_kmh)
+            if (self._active_stop_light_id == self._last_light_id or
+                    self._last_light_distance_m <= stop_distance + 3.0):
+                self._active_stop_light_id = self._last_light_id
+                can_creep = (light_reason == "red_light" and
+                             self._last_light_distance_m > self._stop_line_margin_m + 1.0 and
+                             risk.get("max_risk", 0.0) < self._risk_yield_threshold and
+                             (self._creep_light_id == self._last_light_id or
+                              (speed_mps < 0.3 and
+                               risk.get("max_risk", 0.0) < self._risk_slow_threshold)))
+                if can_creep:
+                    self._creep_light_id = self._last_light_id
+                    target = min(target, self._creep_speed_mps * 3.6)
+                    self._last_target_speed_mps = min(
+                        self._last_target_speed_mps, self._creep_speed_mps)
+                    self._last_target_accel_mps2 = min(
+                        self._last_target_accel_mps2, 0.0)
+                    reason = "red_light_creep"
+                    self._set_state("CREEP", timestamp)
+                else:
+                    self._creep_light_id = None
+                    reason = light_reason
+                    self._set_state("STOPPING", timestamp)
+                    if speed_mps < 0.5 or \
+                            self._last_light_distance_m <= self._stop_line_margin_m + 1.0:
+                        target = 0.0
+            else:
+                reason = light_reason + "_approach"
+                self._set_state("APPROACH_STOP", timestamp)
+            if self._state == "STOPPING" and \
+                    self._last_light_distance_m < max(3.0, speed_mps):
                 self._last_target_speed_mps = 0.0
                 self._last_target_accel_mps2 = 0.0
                 return self._finish_control(self.emergency_stop(), reason, timestamp, 0.0)
+        else:
+            self._active_stop_light_id = None
+            self._active_stop_waypoint = None
+            self._creep_light_id = None
+
+        pedestrian_gap = float(risk.get("longitudinal_gap_m", float("inf")))
+        pedestrian_ttc = float(risk.get("expected_ttc_s", float("inf")))
+        speed_mps = self._speed / 3.6
+        emergency_distance = (speed_mps * 0.3 + speed_mps ** 2 /
+                              max(2.0 * self._comfort_decel_mps2, 1e-3) + 4.0)
+        if (risk.get("closest_actor_type") == "pedestrian" and
+                risk.get("max_risk", 0.0) >= self._risk_slow_threshold and
+                pedestrian_ttc <= 2.0 and
+                0.0 <= pedestrian_gap <= emergency_distance):
+            self._set_state("STOPPING", timestamp)
+            self._last_target_speed_mps = 0.0
+            self._last_target_accel_mps2 = 0.0
+            return self._finish_control(self.emergency_stop(), "pedestrian_risk",
+                                        timestamp, 0.0)
 
         walker_state, walker, walker_distance = self.pedestrian_avoid_manager(ego_waypoint)
         if walker_state:
@@ -625,13 +814,26 @@ class BehaviorAgent(BasicAgent):
         if self._incoming_waypoint is not None and self._incoming_waypoint.is_junction \
                 and self._incoming_direction in (RoadOption.LEFT, RoadOption.RIGHT):
             target = min(target, max(0.0, self._speed_limit - 5.0))
+        corner_target = self._corner_speed_limit_kmh()
+        if corner_target < target:
+            target = corner_target
+            if reason == "cruise":
+                reason = "curve_speed"
+        tracking_target, tracking_reason = self._tracking_speed_limit_kmh(ego_waypoint)
+        if tracking_target < target:
+            target = tracking_target
+            if reason in ("cruise", "curve_speed"):
+                reason = tracking_reason
         if target <= 0.0 and self._speed / 3.6 < 0.5:
             self._last_target_speed_mps = 0.0
             self._last_target_accel_mps2 = 0.0
             return self._finish_control(self.emergency_stop(), reason, timestamp, 0.0)
+        stop_for_conflict = reason == "predicted_conflict" and target <= 0.0
         target = self._smooth_target_speed(target, dt)
         self._local_planner.set_speed(target)
         control = self._local_planner.run_step(debug=debug)
+        if self._state == "STOPPING" or stop_for_conflict:
+            control.throttle = 0.0
         return self._finish_control(control, reason, timestamp)
 
     def emergency_stop(self):

@@ -5,6 +5,14 @@ import math
 import numpy as np
 
 
+def _interval_probability(mean, sigma, half_width):
+    """Probability that a Gaussian center falls inside a physical corridor."""
+    scale = max(float(sigma), 1e-3) * math.sqrt(2.0)
+    upper = (float(half_width) - float(mean)) / scale
+    lower = (-float(half_width) - float(mean)) / scale
+    return float(np.clip(0.5 * (math.erf(upper) - math.erf(lower)), 0.0, 1.0))
+
+
 def _route_geometry(route_points):
     points = np.asarray(route_points, dtype=np.float64)
     if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] < 2:
@@ -28,7 +36,9 @@ def _nearest_route_point(position, points, arc, tangent):
     distance = np.linalg.norm(delta, axis=1)
     index = int(np.argmin(distance))
     forward = float(-np.dot(delta[index], tangent[index]))
-    return index, float(distance[index]), float(max(arc[index] + forward, 0.0))
+    # Preserve a negative station for actors behind the route origin.  Clamping
+    # it to zero makes a following vehicle overlap the ego in route space.
+    return index, float(distance[index]), float(arc[index] + forward)
 
 
 def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
@@ -55,6 +65,24 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
     closest_gap = float("inf")
     closest_lateral = float("inf")
     for prediction in predictions or ():
+        if len(prediction.means) == 0:
+            continue
+        # Longitudinal braking cannot resolve a conflict caused by a vehicle
+        # already following the ego.  Do not let an aggressive extrapolation
+        # from behind turn it into a front obstacle for this decision cycle.
+        _, _, initial_arc = _nearest_route_point(
+            prediction.means[0], points, arc, tangent)
+        if prediction.actor_type == "vehicle" and initial_arc < ego_arc - 0.5:
+            continue
+        extent = max(prediction.extent_xy[1], 0.25)
+        corridor = float(route_width_m) + extent
+        # A parallel actor whose predicted centers stay outside the route is
+        # less likely to make an unobserved lane change than a generic free-space
+        # Gaussian acceleration model suggests. Crossing forecasts keep full risk.
+        min_mean_lateral = min(
+            (_nearest_route_point(mean, points, arc, tangent)[1]
+             for mean in prediction.means), default=float("inf"))
+        non_crossing_prior = 0.15 if min_mean_lateral > corridor + 0.5 else 1.0
         for step, (mean, covariance) in enumerate(zip(
                 prediction.means, prediction.covariances)):
             index, distance, actor_arc = _nearest_route_point(mean, points, arc, tangent)
@@ -63,8 +91,6 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
             if longitudinal < -2.0:
                 continue
             lateral = distance
-            extent = max(prediction.extent_xy[1], 0.25)
-            corridor = float(route_width_m) + extent
             if lateral > corridor + 4.0:
                 continue
             tangent_vec = tangent[index]
@@ -73,21 +99,26 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
             lateral_signed = float(np.dot(rel, normal))
             variance = max(float(normal.dot(covariance).dot(normal)), 0.05)
             longitudinal_variance = max(float(tangent_vec.dot(covariance).dot(tangent_vec)), 0.05)
-            sigma_lateral = math.sqrt(variance) + extent
-            sigma_longitudinal = math.sqrt(longitudinal_variance) + max(prediction.extent_xy[0], 0.5)
-            lateral_probability = math.exp(-0.5 * (lateral_signed / sigma_lateral) ** 2)
+            sigma_lateral = math.sqrt(variance)
+            sigma_longitudinal = math.sqrt(longitudinal_variance)
+            lateral_probability = _interval_probability(
+                lateral_signed, sigma_lateral, corridor)
             future_gap = longitudinal - max(float(ego_speed_mps), 0.0) * time_s
-            longitudinal_probability = math.exp(-0.5 * (future_gap / sigma_longitudinal) ** 2)
-            probability = float(np.clip(lateral_probability * longitudinal_probability, 0.0, 1.0))
+            longitudinal_probability = _interval_probability(
+                future_gap, sigma_longitudinal,
+                max(prediction.extent_xy[0], 0.5) + 2.2)
+            probability = float(np.clip(
+                lateral_probability * longitudinal_probability * non_crossing_prior,
+                0.0, 1.0))
             distance_weight = math.exp(-max(longitudinal, 0.0) / max(risk_decay_m, 1e-3))
             actor_weight = 1.15 if prediction.actor_type == "pedestrian" else 1.0
             risk = float(np.clip(probability * distance_weight * actor_weight, 0.0, 1.0))
-            max_risk = max(max_risk, risk)
-            max_probability = max(max_probability, probability)
-            if longitudinal >= 0.0 and longitudinal < closest_gap:
+            if risk > max_risk:
+                max_risk = risk
                 closest_gap = longitudinal
                 closest_lateral = abs(lateral_signed)
                 closest = prediction
+            max_probability = max(max_probability, probability)
             if probability > 0.25 and longitudinal >= 0:
                 expected_ttc = min(expected_ttc, time_s)
     return {

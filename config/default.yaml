@@ -118,6 +118,14 @@ carla_collector:
       risk_yield_threshold: 0.42
       risk_stop_threshold: 0.78
       lane_change_cooldown_s: 5.0
+      creep_speed_mps: 1.0
+      stop_line_margin_m: 3.5
+      corner_lateral_accel_mps2: 2.0
+      corner_preview_m: 30.0
+      turn_alignment_speed_mps: 4.0
+      lane_centering_speed_mps: 5.0
+      planner_base_min_distance_m: 1.5
+      planner_distance_ratio: 0.25
 
   # 相机阵列：分辨率全局共享；rig 决定相机数量，并分别配置各视角的 FOV 与外参
   cameras:
@@ -462,6 +470,11 @@ model:
     rope_theta: 10000.0
     cache_slice_s: 3.0
     navigation_commands: [straight, left_turn, right_turn, right_lane_change, left_lane_change]
+    annotation_query_count: 3
+    annotation_state_classes: 7
+    annotation_reason_classes: 14
+    annotation_probability_dim: 3
+    annotation_loss_weight: 0.15
 
   driving:
     work_dim: 384                # 工作维 D（neck 融合输出、注意力、BEV 全程）
@@ -675,9 +688,7 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v4-expert-metadata
-    include_expert_metadata: true
-    expert_plan_points: 32
+    version: v8-active-annotations
     slice_duration_s: 3.0
     navigation_lookahead_m: 40.0
     navigation_turn_threshold_deg: 30.0

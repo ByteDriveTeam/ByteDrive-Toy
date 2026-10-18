@@ -85,6 +85,14 @@ class BehaviorAgentCfg:
     risk_yield_threshold: float
     risk_stop_threshold: float
     lane_change_cooldown_s: float
+    creep_speed_mps: float
+    stop_line_margin_m: float
+    corner_lateral_accel_mps2: float
+    corner_preview_m: float
+    turn_alignment_speed_mps: float
+    lane_centering_speed_mps: float
+    planner_base_min_distance_m: float
+    planner_distance_ratio: float
 
 
 @dataclass
@@ -731,6 +739,11 @@ class UnifiedDrivingCfg:
     rope_theta: float
     cache_slice_s: float
     navigation_commands: List[str]
+    annotation_query_count: int
+    annotation_state_classes: int
+    annotation_reason_classes: int
+    annotation_probability_dim: int
+    annotation_loss_weight: float
 
 
 @dataclass
@@ -831,8 +844,6 @@ class DrivingCacheCfg:
     navigation_lane_match_radius_m: float
     navigation_heading_tolerance_deg: float
     navigation_lane_stable_points: int
-    include_expert_metadata: bool
-    expert_plan_points: int
 
 
 @dataclass
@@ -1245,6 +1256,10 @@ def validate_config(cfg):
     assert ba.prediction_max_actors > 0
     assert ba.comfort_decel_mps2 > 0 and ba.max_accel_mps2 > 0 and ba.max_jerk_mps3 > 0
     assert ba.route_plan_horizon_m > 0 and ba.lane_change_cooldown_s >= 0
+    assert ba.creep_speed_mps > 0 and ba.stop_line_margin_m > 0
+    assert ba.corner_lateral_accel_mps2 > 0 and ba.corner_preview_m > 0
+    assert ba.turn_alignment_speed_mps > 0 and ba.lane_centering_speed_mps > 0
+    assert ba.planner_base_min_distance_m > 0 and ba.planner_distance_ratio >= 0
     assert 0 <= ba.risk_slow_threshold < ba.risk_yield_threshold < ba.risk_stop_threshold <= 1
     assert cc.ego.behavior in ("cautious", "normal", "aggressive"), \
         "ego.behavior 仅支持 cautious/normal/aggressive"
@@ -1796,6 +1811,14 @@ def _validate_unified_driving(spec):
     assert spec.navigation_commands == ["straight", "left_turn", "right_turn",
                                         "right_lane_change", "left_lane_change"], \
         "model.unified_driving.navigation_commands 必须按固定五类顺序定义"
+    assert spec.annotation_query_count == 3, \
+        "model.unified_driving.annotation_query_count 必须为 3"
+    assert spec.annotation_state_classes == 7 and spec.annotation_reason_classes == 14, \
+        "model.unified_driving 的状态和原因类别数必须匹配采集器的 7/14 类"
+    assert spec.annotation_probability_dim == 3, \
+        "model.unified_driving.annotation_probability_dim 必须为 3"
+    assert math.isfinite(spec.annotation_loss_weight) and spec.annotation_loss_weight >= 0, \
+        "model.unified_driving.annotation_loss_weight 必须 >= 0"
 
 
 def _validate_privileged_bev_vae_train(train):
@@ -1938,7 +1961,6 @@ def _validate_data(data, model_lane, camera_rig):
         "data.driving.behavior 交通灯匹配半径/Seg 容差/最少像素数取值非法"
 
     cache = data.driving_cache
-    assert cache.expert_plan_points > 0
     assert cache.slice_duration_s > 0 and cache.version.strip(), \
         "data.driving_cache.slice_duration_s must be positive and version must be non-empty"
     assert cache.navigation_lookahead_m > 0 and 0 < cache.navigation_turn_threshold_deg < 180, \
