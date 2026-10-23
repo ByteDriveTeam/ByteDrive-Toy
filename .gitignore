@@ -127,3 +127,6 @@ out/
 *.zip
 scenes/
 output/
+
+# 宣传视频（本地生成，不入库）
+promo-video/

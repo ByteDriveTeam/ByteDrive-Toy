@@ -347,11 +347,19 @@ class Mamba3(nn.Module):
 
 
 def _parallel_affine_scan(alpha: torch.Tensor, source: torch.Tensor, initial: torch.Tensor):
-    """按 chunk 内前缀积/和并行求解 h_t=alpha_t*h_(t-1)+source_t。"""
-    prefix = torch.cumprod(alpha.float(), dim=1)
-    scaled = source / prefix.unsqueeze(-1).unsqueeze(-1)
-    states = prefix.unsqueeze(-1).unsqueeze(-1) * (
-        initial.unsqueeze(1) + torch.cumsum(scaled, dim=1))
+    """Inclusive parallel scan for affine recurrence without division."""
+    coefficient = alpha.float()
+    offset = source.float()
+    stride = 1
+    while stride < coefficient.shape[1]:
+        right = coefficient[:, stride:]
+        offset = torch.cat((offset[:, :stride],
+                            offset[:, stride:] + right.unsqueeze(-1).unsqueeze(-1)
+                            * offset[:, :-stride]), dim=1)
+        coefficient = torch.cat((coefficient[:, :stride],
+                                 right * coefficient[:, :-stride]), dim=1)
+        stride *= 2
+    states = coefficient.unsqueeze(-1).unsqueeze(-1) * initial.unsqueeze(1) + offset
     return states, states[:, -1]
 
 
