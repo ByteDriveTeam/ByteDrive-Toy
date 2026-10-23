@@ -1,15 +1,16 @@
-"""双帧三目+LiDAR 驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV 的公开 API 入口。
+"""四帧块因果驾驶模型与局部二维加速度词表规划的公开 API。
 
 模块: model/driving_model/__init__.py
-依赖: model.driving_model.driving_model
-读取配置: —（转由 DrivingModel 读取 config.model.driving 等键）
+依赖: model.driving_model.unified_driving_model
+读取配置: —（转由 DrivingModel 读取 config.model.unified_driving 等键）
 对外接口:
     - DrivingModel(cfg) -> nn.Module
-说明: 跨模块统一 `from model.driving_model import DrivingModel`；实现见 driving_model.py，校验见 checks/。
+    - nearest_planar_action_words(gt_xy, initial_velocity, actions, dt_s, weight_floor, decay_s) -> Tensor
+说明: 跨模块统一 `from model.driving_model import DrivingModel`；实现见 unified_driving_model.py。
 """
 
-from model.driving_model.unified_driving_model import UnifiedDrivingModel
+from model.driving_model.unified_driving_model import UnifiedDrivingModel, nearest_planar_action_words
 
 DrivingModel = UnifiedDrivingModel
 
-__all__ = ["DrivingModel", "UnifiedDrivingModel"]
+__all__ = ["DrivingModel", "UnifiedDrivingModel", "nearest_planar_action_words"]

@@ -13,6 +13,7 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [Doc/开发规范.md](开发规范.md) — Simplified Chinese development guidelines
 - [Doc/Index.md](Index.md) — English primary file and documentation index
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — Simplified Chinese file and documentation index
+- [Doc/UnifiedDrivingModel.md](UnifiedDrivingModel.md) — Block-causal visual processing and local planar acceleration vocabulary driving contract
 - [Doc/BEVSeg.md](BEVSeg.md) — BEVSeg coordinate, semantic-channel, grouped-codebook, and PixelShuffle reconstruction contract
 - [Doc/BEVSegVAE64.md](BEVSegVAE64.md) — Full-BEV continuous-latent VAE with 64x spatial compression contract
 - [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) — Continuous-latent privileged BEV VAE and noise measurement contract
@@ -55,12 +56,13 @@ elative path — one-line responsibility; companion X_checks.py files belong to 
 - [data/bevseg_cache/bevseg_cache.py](../data/bevseg_cache/bevseg_cache.py) — Bounded, concurrent, lossless compressed NumPy cache with automatic missing-entry detection and warmup progress
 - [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — Public API for single-frame BEVSeg dataset
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — One-second-stride, single-frame BEVSeg samples from all CARLA scenes
-- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame standardized unicycle action driving slice cache
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — v8 three-second cache with standardized unicycle controls, 7 state and 14 reason classes, conflict probability, and lane availability targets
+- [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — Public API for the four-frame Top1 residual driving cache
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — Three-second Top1 word and standardized physical acceleration residual cache with risk and expert targets
 - [data/driving_cache/checks/driving_cache_checks.py](../data/driving_cache/checks/driving_cache_checks.py) — Navigation route and command input checks for driving cache
+- [data/driving_cache/trajectory_risk.py](../data/driving_cache/trajectory_risk.py) — Scene actor, signal, lane, boundary, and history risk labels for action words
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — Public API for trajectory and velocity vocabulary generation
-- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — Streaming construction and clustering of CARLA ego geometric trajectory and velocity vocabulary
-- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — Trajectory and velocity vocabulary generation CLI
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — CARLA geometry and speed clustering with farthest trajectory sampling of planar acceleration words
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — Geometry, speed, and planar acceleration vocabulary generation CLI
 
 ### data/carla_data_collector/ — heterogeneous CARLA collection
 
@@ -123,7 +125,7 @@ Python 3.12 collector:
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — Conditional multimode planner using eight learned tokens for 10 Hz trajectories
 - [model/driving_model/__init__.py](../model/driving_model/__init__.py) — Driving model public API and re-export entry
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — DrivingModel alias redirection entry point to UnifiedDrivingModel
-- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Four-frame monocular spatio-temporal token backbone with visual/trajectory annotation queries and dual flow-matching decoders
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Twelve-layer block-causal visual processor and planar acceleration vocabulary residual decoder
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
 - [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — Public API for the grouped discrete BEVSeg compressor
@@ -154,7 +156,7 @@ Python 3.12 collector:
 - [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — Public API for privileged BEV VAE training and evaluation
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — Privileged BEV VAE reconstruction, KL loss, and epoch loop
 - [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — Public API for UnifiedDrivingModel flow-matching training
-- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Standardized unicycle action and multi-frame BEV flow-matching training loss and epoch loop
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — Vocabulary selection, standardized planar acceleration residual, BEV losses, and epoch loop
 
 ## clone_loop/ — behavior-cloning closed loop
 
@@ -242,8 +244,8 @@ Python 3.7 simulation worker:
 - [vis/data_vis/viewer/__init__.py](../vis/data_vis/viewer/__init__.py) — Public interactive OpenCV viewer window API
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV timeline, playback, layer controls, and screenshots
 - [vis/trajectory_vocab_vis/__init__.py](../vis/trajectory_vocab_vis/__init__.py) — Public API for static trajectory and velocity vocabulary visualization
-- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — Geometric trajectory and velocity vocabulary plot and clustering evaluation renderer
-- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — Trajectory and velocity vocabulary PNG visualization CLI
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — Detect and plot coupled action or decomposed geometry and speed vocabularies
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — Vocabulary PNG CLI with an explicit artifact file or directory option
 
 ### Perception predictions
 

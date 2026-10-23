@@ -9,6 +9,13 @@ trajectory_vocabulary:
   output_dir: data/carla_data_collector/dataset/vocabulary
   geometry_size: 64
   speed_size: 64
+  action_size: 512
+  action_horizon_s: 3.0
+  action_hz: 10.0
+  action_output: trajectory_action_vocab.npz
+  # 只限制 FTS 词原型候选；标准化与残差统计仍使用所有抽样窗口，保留低速和静止模式。
+  action_candidate_max_accel_mps2: 12.0
+  action_candidate_max_jerk_mps3: 100.0
   geometry_horizon_m: 8.0
   geometry_interval_m: 0.1
   speed_horizon_s: 1.0
@@ -113,11 +120,18 @@ carla_collector:
       comfort_decel_mps2: 3.0
       max_accel_mps2: 2.2
       max_jerk_mps3: 4.0
+      longitudinal_horizon_s: 3.0
+      longitudinal_step_s: 0.25
+      longitudinal_preview_s: 0.5
       route_plan_horizon_m: 40.0
+      risk_lateral_margin_m: 0.35
+      front_min_gap_m: 3.0
+      front_confidence_z: 1.0
+      front_lookahead_s: 1.5
+      front_emergency_decel_mps2: 8.0
       risk_slow_threshold: 0.18
       risk_yield_threshold: 0.42
       risk_stop_threshold: 0.78
-      lane_change_cooldown_s: 5.0
       creep_speed_mps: 1.0
       stop_line_margin_m: 3.5
       corner_lateral_accel_mps2: 2.0
@@ -457,6 +471,16 @@ model:
 # → BEV Transformer → 统一空间解码 + 8 扇区多模态轨迹/行为联合 Token。感知 = 本驾驶系统的前端子任务。
   unified_driving:
     dim: 384
+    visual_layers: 12
+    action_vocab_size: 512
+    action_fourier_bands: 4
+    action_attention_rank: 64
+    residual_ffn_blocks: 3
+    trajectory_sample_steps: 10
+    nearest_weight_floor: 0.25
+    nearest_decay_s: 1.0
+    risk_negative_weight: 1.2
+    risk_jerk_limit_mps3: 4.0
     ffn_hidden: 1536
     condition_hidden: 1536
     geometry_hidden: 256
@@ -688,7 +712,7 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v8-active-annotations
+    version: v13-top1-standardized-residual
     slice_duration_s: 3.0
     navigation_lookahead_m: 40.0
     navigation_turn_threshold_deg: 30.0

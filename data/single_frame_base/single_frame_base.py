@@ -5,13 +5,16 @@
       data.single_frame_base.checks.single_frame_base_checks
 读取配置: —（scene_root/camera/dino_mean/dino_std/scene_cache_size 由子类以参数传入，来源 config.data.*）
 对外接口:
-    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size) -> Dataset
+    - SingleFrameSceneBase(scene_root, camera, dino_mean, dino_std, scene_cache_size,
+                           successful_only=False) -> Dataset
         .frame_index -> list[(Path, int)]       # (场景目录, 帧号)
         .reader(scene_dir) -> SceneReader        # 惰性构造并按 worker 缓存
         .bgr_uint8(bgr) -> Tensor                # BGR uint8 → 紧凑 [3,H,W]，设备侧再归一化
         .normalize_rgb(bgr) -> Tensor            # 兼容可视化/独立调用的 DINO 归一化
         .scene_num_frames(scene_dir) -> int      # 轻量读 LMDB num_frames
+    - successful_scene_meta(meta) -> bool        # 完成且未失败的终止场景
 说明: 把感知/驾驶两个单帧数据集的公共读取逻辑收拢一处（DRY，规范 §8）：索引期只用 LMDB 轻量读 num_frames、
+      驾驶任务额外读取场景状态并整场排除失败行驶；
       不建 VideoCapture；训练数据以 BGR uint8 保持原生分辨率紧凑返回，另保留兼容独立调用的 DINO 归一化助手；
       SceneReader 惰性按需构造并在每个 worker 内做有界 LRU，淘汰时显式关闭视频与 LMDB，避免场景数增长导致 OOM。
       cv2.VideoCapture 非跨进程安全，故缓存不会跨 worker 共享。子类只需实现 __getitem__。
@@ -33,20 +36,26 @@ from data.single_frame_base.checks.single_frame_base_checks import check_has_fra
 from vis.data_vis.reader import SceneReader, list_scenes
 
 
-__all__ = ["SingleFrameSceneBase", "resolve_repo_path"]
+__all__ = ["SingleFrameSceneBase", "resolve_repo_path", "successful_scene_meta"]
+
+
+def successful_scene_meta(meta) -> bool:
+    """只接受完成且未失败的终止场景，供驾驶采样和词表统计共用。"""
+    return (meta.get("complete") is True and meta.get("failed") is False
+            and meta.get("status") in ("ok", "max_frames"))
 
 
 class SingleFrameSceneBase(Dataset):
     """单帧场景数据集基类：共享索引、有界 reader 缓存与 RGB 归一化。"""
 
     def __init__(self, scene_root, camera: str, dino_mean, dino_std,
-                 scene_cache_size: int) -> None:
+                 scene_cache_size: int, successful_only: bool = False) -> None:
         self._root = resolve_repo_path(scene_root)
         check_scene_root(self._root)
         self._camera = camera
         self._mean = torch.tensor(dino_mean, dtype=torch.float32).view(3, 1, 1)
         self._std = torch.tensor(dino_std, dtype=torch.float32).view(3, 1, 1)
-        self._index = _build_frame_index(self._root)
+        self._index = _build_frame_index(self._root, successful_only)
         check_has_frames(self._index, self._root)
         self._scene_cache_size = scene_cache_size
         self._readers = OrderedDict()
@@ -100,7 +109,7 @@ def writable_contiguous(arr: np.ndarray) -> np.ndarray:
     return arr if arr.flags.writeable else arr.copy()
 
 
-def _scene_num_frames(scene_dir: Path) -> int:
+def _scene_num_frames(scene_dir: Path, successful_only: bool = False) -> int:
     """轻量读场景 LMDB 的 num_frames（不建 VideoCapture），场景不可读则返回 0。"""
     try:
         env = lmdb.open(str(scene_dir / "lmdb"), readonly=True, subdir=True, lock=False)
@@ -109,13 +118,18 @@ def _scene_num_frames(scene_dir: Path) -> int:
     try:
         with env.begin() as txn:
             blob = txn.get(b"num_frames")
+            meta_blob = txn.get(b"meta") if successful_only else None
+        if successful_only:
+            meta = msgpack.unpackb(meta_blob, raw=False) if meta_blob is not None else {}
+            if not successful_scene_meta(meta):
+                return 0
         return int(msgpack.unpackb(blob)) if blob is not None else 0
     finally:
         env.close()
 
 
-def _build_frame_index(root: Path) -> List[Tuple[Path, int]]:
-    """遍历场景，枚举每一帧，构建 (场景目录, 帧号) 索引（采用所有帧）。"""
+def _build_frame_index(root: Path, successful_only: bool = False) -> List[Tuple[Path, int]]:
+    """遍历场景建立帧索引；驾驶任务可在索引前排除失败行驶。"""
     return [(scene_dir, frame_idx)
             for scene_dir in list_scenes(root)
-            for frame_idx in range(_scene_num_frames(scene_dir))]
+            for frame_idx in range(_scene_num_frames(scene_dir, successful_only))]

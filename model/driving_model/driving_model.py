@@ -6,7 +6,7 @@
 对外接口:
     - DrivingModel(cfg) -> nn.Module
     - UnifiedDrivingModel(cfg) -> nn.Module
-说明: 重定向至 UnifiedDrivingModel 四帧单目时空流匹配主模型。
+说明: 重定向至四帧块因果视觉与局部二维加速度词表主模型。
 """
 
 from model.driving_model.unified_driving_model import UnifiedDrivingModel

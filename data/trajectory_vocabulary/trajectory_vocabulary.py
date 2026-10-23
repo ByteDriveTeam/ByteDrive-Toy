@@ -1,10 +1,11 @@
-"""从 CARLA ego 运动学时间轴构造并聚类几何/速度词表。
+"""从 CARLA ego 时间轴生成几何、速度和局部二维加速度词表。
 
 模块: data/trajectory_vocabulary/trajectory_vocabulary.py
-依赖: numpy, vis.data_vis.reader
-读取配置: trajectory_vocabulary.*
+依赖: numpy, data.single_frame_base, vis.data_vis.reader
+读取配置: trajectory_vocabulary.*、model.unified_driving.nearest_weight_floor/nearest_decay_s
 对外接口:
     - generate_vocabulary(cfg) -> dict
+    - generate_action_vocabulary(cfg, model_spec) -> dict
 说明: 先按 0.5 秒重采样，再以块状计算特征和距离，避免保存全量高频时间轴及距离矩阵。
 """
 
@@ -12,7 +13,11 @@ from pathlib import Path
 import time
 
 import numpy as np
+import torch
 
+from data.driving_cache import trajectory_to_planar_accelerations
+from data.single_frame_base import successful_scene_meta
+from model.driving_model.unified_driving_model import signed_log
 from vis.data_vis.reader import SceneReader, list_scenes
 from vis.data_vis.geometry import transform_points, world_to_ego
 
@@ -89,8 +94,8 @@ def _collect(cfg):
     scene_list = [root] if (root / "lmdb").is_dir() else list_scenes(root)
     for scene in scene_list:
         try:
-            reader = SceneReader(scene)
-            if reader.failed or bool(reader.meta.get("complete", True)) is False:
+            reader = SceneReader(scene, open_videos=False)
+            if not successful_scene_meta(reader.meta):
                 reader.close(); continue
             g, s = _window_features(reader.kinematics(), cfg)
             reader.close()
@@ -110,16 +115,24 @@ def _collect(cfg):
     return geometry, speed, scenes, total
 
 
-def _fts(x, k, block, seed):
-    rng = np.random.default_rng(seed); centers = np.empty((k, x.shape[1]), np.float32)
-    chosen = int(rng.integers(len(x))); centers[0] = x[chosen]
+def _fts_indices(x, k, block, seed, first=None):
+    """按最远轨迹采样返回真实窗口索引；相同特征不会重复占词。"""
+    rng = np.random.default_rng(seed)
+    selected = np.empty(k, dtype=np.int64)
+    selected[0] = int(rng.integers(len(x))) if first is None else int(first)
     nearest = np.full(len(x), np.inf, np.float32)
-    for c in range(1, k):
+    for index in range(1, k):
         for a in range(0, len(x), block):
-            b = min(a + block, len(x)); d = ((x[a:b] - centers[c - 1]) ** 2).sum(1)
+            b = min(a + block, len(x)); d = ((x[a:b] - x[selected[index - 1]]) ** 2).sum(1)
             nearest[a:b] = np.minimum(nearest[a:b], d)
-        chosen = int(np.argmax(nearest)); centers[c] = x[chosen]
-    return centers
+        selected[index] = int(np.argmax(nearest))
+        if nearest[selected[index]] <= 0:
+            raise ValueError("独立轨迹不足以生成指定数量的最远采样词")
+    return selected
+
+
+def _fts(x, k, block, seed):
+    return x[_fts_indices(x, k, block, seed)]
 
 
 def _kmeans(x, k, cfg):
@@ -129,11 +142,28 @@ def _kmeans(x, k, cfg):
                                max_iter=cfg.kmeans_iterations, random_state=cfg.random_seed,
                                n_init=1).fit(x).cluster_centers_.astype(np.float32)
     except ImportError:
-        centers = _fts(x, k, cfg.sample_block_size, cfg.random_seed)
-        for _ in range(min(cfg.kmeans_iterations, 20)):
-            labels = np.argmin(((x[:, None] - centers[None]) ** 2).sum(2), 1)
-            for j in range(k):
-                if np.any(labels == j): centers[j] = x[labels == j].mean(0)
+        rng = np.random.default_rng(cfg.random_seed)
+        subset = x[rng.choice(len(x), size=min(len(x), cfg.sample_block_size), replace=False)]
+        centers = np.empty((k, x.shape[1]), dtype=np.float32)
+        centers[0] = subset[rng.integers(len(subset))]
+        nearest = np.full(len(subset), np.inf, dtype=np.float64)
+        for index in range(1, k):
+            nearest = np.minimum(nearest, ((subset - centers[index - 1]) ** 2).sum(-1))
+            probability = nearest / nearest.sum() if nearest.sum() > 0 else None
+            centers[index] = subset[rng.choice(len(subset), p=probability)]
+        counts = np.zeros(k, dtype=np.float64)
+        for _ in range(cfg.kmeans_iterations):
+            batch = x[rng.integers(len(x), size=cfg.kmeans_batch_size)]
+            distance = ((batch * batch).sum(-1, keepdims=True)
+                        + (centers * centers).sum(-1)[None] - 2.0 * batch @ centers.T)
+            labels = distance.argmin(-1)
+            observed = np.bincount(labels, minlength=k)
+            sums = np.zeros_like(centers)
+            np.add.at(sums, labels, batch)
+            active = observed > 0
+            centers[active] = ((counts[active, None] * centers[active] + sums[active])
+                               / (counts[active, None] + observed[active, None]))
+            counts += observed
         return centers
 
 
@@ -217,3 +247,150 @@ def generate_vocabulary(cfg):
     np.save(out / cfg.geometry_output, {**base, "kind": "geometry", "vocab": gv, "metrics": gm}, allow_pickle=True)
     np.save(out / cfg.speed_output, {**base, "kind": "speed", "vocab": sv, "metrics": sm}, allow_pickle=True)
     return {"geometry": gv, "speed": sv, "metrics": {"geometry": gm, "speed": sm}, **base}
+
+
+def _action_windows(kinematics, cfg):
+    """按动作采样频率取得真实未来轨迹、物理动作与当前运动学状态。"""
+    if len(kinematics) < 3:
+        return None
+    raw_time = np.asarray([row["sim_time"] for row in kinematics], dtype=np.float64)
+    valid = np.r_[True, np.diff(raw_time) > 0]
+    raw_time = raw_time[valid]
+    rows = [row for row, keep in zip(kinematics, valid) if keep]
+    if len(raw_time) < 3:
+        return None
+    step = 1.0 / cfg.action_hz
+    points = int(round(cfg.action_horizon_s * cfg.action_hz))
+    grid = np.arange(raw_time[0], raw_time[-1] + step * 0.25, step)
+    grid = grid[grid <= raw_time[-1] + 1e-8]
+    if len(grid) <= points:
+        return None
+    pose = np.asarray([row["ego"]["transform"] for row in rows], dtype=np.float64)
+    velocity = np.asarray([row["ego"]["velocity"][:2] for row in rows], dtype=np.float64)
+    acceleration = np.asarray([row["ego"].get("acceleration", [0, 0])[:2]
+                               for row in rows], dtype=np.float64)
+    xy = np.stack([np.interp(grid, raw_time, pose[:, axis]) for axis in (0, 1)], axis=-1)
+    yaw = np.interp(grid, raw_time, np.unwrap(np.deg2rad(pose[:, 5])))
+    motion = np.stack([np.interp(grid, raw_time, column)
+                       for column in np.concatenate((velocity, acceleration), axis=1).T], axis=-1)
+    starts = np.arange(0, len(grid) - points,
+                       max(1, int(round(cfg.window_stride_s * cfg.action_hz))))
+    future = xy[starts[:, None] + np.arange(1, points + 1)]
+    delta = future - xy[starts, None]
+    cosine, sine = np.cos(yaw[starts])[:, None], np.sin(yaw[starts])[:, None]
+    local = np.stack((cosine * delta[..., 0] + sine * delta[..., 1],
+                      -sine * delta[..., 0] + cosine * delta[..., 1]), axis=-1)
+    good = np.isfinite(local).all((1, 2))
+    local, motion = local[good], motion[starts[good]]
+    if len(local) == 0:
+        return None
+    motion = motion.reshape(-1, 2, 2)
+    motion = np.stack((cosine[good] * motion[..., 0] + sine[good] * motion[..., 1],
+                       -sine[good] * motion[..., 0] + cosine[good] * motion[..., 1]),
+                      axis=-1).reshape(-1, 4)
+    actions = trajectory_to_planar_accelerations(
+        torch.from_numpy(local).float(), torch.from_numpy(motion).float(), step).numpy()
+    return (local.astype(np.float32), actions.astype(np.float32),
+            motion[:, :2].astype(np.float32), motion.astype(np.float32))
+
+
+def _action_examples(cfg):
+    """只采有效场景，避免把失败行驶和缺失未来时间窗口作为词。"""
+    root = Path(cfg.scene_root)
+    scenes = [root] if (root / "lmdb").is_dir() else list_scenes(root)
+    local_rows, action_rows, speed_rows, motion_rows = [], [], [], []
+    total, used = 0, 0
+    for scene in scenes:
+        try:
+            reader = SceneReader(scene, open_videos=False)
+            if not successful_scene_meta(reader.meta):
+                reader.close()
+                continue
+            window = _action_windows(reader.kinematics(), cfg)
+            reader.close()
+        except (OSError, ValueError, KeyError):
+            continue
+        if window is None:
+            continue
+        local, actions, speed, motion = window
+        local_rows.append(local)
+        action_rows.append(actions)
+        speed_rows.append(speed)
+        motion_rows.append(motion)
+        total += len(actions)
+        used += 1
+    if total < cfg.action_size:
+        raise RuntimeError("有效动作窗口少于请求的动作词数")
+    indices = np.random.default_rng(cfg.random_seed).choice(
+        total, size=min(total, cfg.max_samples), replace=False)
+    arrays = [np.concatenate(rows)[indices]
+              for rows in (local_rows, action_rows, speed_rows, motion_rows)]
+    return (*arrays, used, total)
+
+
+def generate_action_vocabulary(cfg, model_spec):
+    """按未来轨迹最远采样生成物理动作词及独立的标准化统计。"""
+    start = time.perf_counter()
+    local, actions, speed, motion, scenes, count = _action_examples(cfg)
+    action_mean = actions.mean(axis=(0, 1)).astype(np.float32)
+    action_std = actions.std(axis=(0, 1)).clip(1e-3).astype(np.float32)
+    motion_signed = signed_log(torch.from_numpy(motion)).numpy()
+    motion_mean = motion_signed.mean(axis=0).astype(np.float32)
+    motion_std = motion_signed.std(axis=0).clip(1e-3).astype(np.float32)
+    index = np.arange(local.shape[1], dtype=np.float32)
+    weights = (model_spec.nearest_weight_floor
+               + (1.0 - model_spec.nearest_weight_floor)
+               * np.exp(-index / (cfg.action_hz * model_spec.nearest_decay_s)))
+    features = (local * np.sqrt(weights)[None, :, None]).reshape(len(local), -1)
+    # 数值二阶差分会放大定位抖动；只限制成功场景中的词原型候选。
+    peak_acceleration = np.linalg.norm(actions, axis=-1).max(axis=1)
+    peak_jerk = np.linalg.norm(np.diff(actions, axis=1), axis=-1).max(axis=1) * cfg.action_hz
+    eligible = np.flatnonzero((peak_acceleration <= cfg.action_candidate_max_accel_mps2)
+                              & (peak_jerk <= cfg.action_candidate_max_jerk_mps3))
+    if len(eligible) < cfg.action_size:
+        raise ValueError("满足动作词候选连续性限制的窗口少于请求的词数")
+    distinct = eligible[np.unique(actions[eligible].reshape(len(eligible), -1),
+                                  axis=0, return_index=True)[1]]
+    if len(distinct) < cfg.action_size:
+        raise ValueError("独立的二维加速度窗口少于请求的词数")
+    candidates = features[distinct]
+    stationary = np.abs(actions[distinct]).sum((1, 2)).argmin()
+    selected = distinct[_fts_indices(
+        candidates, cfg.action_size, cfg.sample_block_size, cfg.random_seed, stationary)]
+    words = actions[selected].astype(np.float32)
+    mean = np.zeros(2, dtype=np.float64)
+    square = np.zeros(2, dtype=np.float64)
+    matched = 0
+    chunk = max(1, cfg.sample_block_size // cfg.action_size)
+    dt = 1.0 / cfg.action_hz
+    for offset in range(0, len(actions), chunk):
+        end = min(offset + chunk, len(actions))
+        word_velocity = speed[offset:end, None, None, :] + np.cumsum(words[None], axis=2) * dt
+        word_xy = np.cumsum(word_velocity, axis=2) * dt
+        distance = ((word_xy - local[offset:end, None]) ** 2
+                    * weights[None, None, :, None]).sum((2, 3))
+        nearest = distance.argmin(axis=1)
+        residual = actions[offset:end] - words[nearest]
+        mean += residual.sum((0, 1))
+        square += np.square(residual).sum((0, 1))
+        matched += residual.shape[0] * residual.shape[1]
+    residual_mean = (mean / matched).astype(np.float32)
+    residual_std = np.sqrt(np.maximum(square / matched - residual_mean.astype(np.float64) ** 2,
+                                      1e-6)).astype(np.float32)
+    out = Path(cfg.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    destination = out / cfg.action_output
+    np.savez_compressed(destination, actions=words,
+                        normalized_actions=((words - action_mean) / action_std).astype(np.float32),
+                        source_trajectory=local[selected].astype(np.float32),
+                        source_velocity=speed[selected].astype(np.float32),
+                        candidate_count=np.int64(len(eligible)),
+                        action_mean=action_mean,
+                        action_std=action_std, residual_mean=residual_mean,
+                        residual_std=residual_std, motion_mean=motion_mean,
+                        motion_std=motion_std, horizon_s=np.float32(cfg.action_horizon_s),
+                        hz=np.float32(cfg.action_hz))
+    return {"path": str(destination), "scene_count": scenes,
+            "sample_count": len(actions), "source_window_count": count,
+            "unique_action_count": len(distinct), "candidate_count": len(eligible),
+            "elapsed_s": time.perf_counter() - start}

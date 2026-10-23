@@ -1,4 +1,4 @@
-"""四帧单目时空 Token DrivingModel 与双流匹配解码器。
+"""四帧块因果 DrivingModel 与二维加速度词表残差解码器。
 
 模块: model/driving_model/unified_driving_model.py
 依赖: torch, config.schema.Config, model.dinov3_backbone.DinoV3Backbone
@@ -7,13 +7,17 @@
     - UnifiedDrivingModel(cfg) -> nn.Module
     - forward(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
               time_step=None, bev_state=None, traj_state=None) -> dict
-说明: 五类导航指令作为视觉 Token 和轨迹 AdaLN 条件；轨迹流匹配在标准化
-      加速度/曲率空间训练。主干默认 BF16，解码器和输出头在 FP32 中运行。
+说明: 动作词、导航条件、局部运动状态特征相加；残差流状态与词及条件拼接，
+      残差终点在标准化二维加速度空间训练。
+      主干默认 BF16，解码器和输出头在 FP32 中运行。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterator, Optional
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -26,7 +30,7 @@ from model.privileged_bev_vae import PrivilegedBEVVAE
 
 
 __all__ = ["UnifiedDrivingModel", "signed_log", "inverse_signed_log",
-           "integrate_unicycle_actions"]
+           "integrate_planar_accelerations", "nearest_planar_action_words"]
 
 
 def signed_log(x: torch.Tensor) -> torch.Tensor:
@@ -40,10 +44,10 @@ def inverse_signed_log(x: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def integrate_unicycle_actions(actions: torch.Tensor, ego_state: torch.Tensor,
-                               action_mean=(0.0, 0.0), action_std=(1.0, 1.0),
-                               dt_s: float = 0.1) -> torch.Tensor:
-    """推理阶段反标准化并积分 [a, kappa]，返回 [x, y, theta] 航点。"""
+def integrate_planar_accelerations(actions: torch.Tensor, ego_state: torch.Tensor,
+                                   dt_s: float, action_mean=(0.0, 0.0),
+                                   action_std=(1.0, 1.0)) -> torch.Tensor:
+    """反标准化车体初始坐标系二维加速度，积分出局部 [x,y,theta]。"""
     if actions.ndim != 3 or actions.shape[-1] != 2:
         raise ValueError("actions 必须为 [B,30,2]")
     if ego_state.ndim != 2 or ego_state.shape[0] != actions.shape[0] or ego_state.shape[-1] < 2:
@@ -51,17 +55,29 @@ def integrate_unicycle_actions(actions: torch.Tensor, ego_state: torch.Tensor,
     mean = actions.new_tensor(action_mean).view(1, 1, 2)
     std = actions.new_tensor(action_std).view(1, 1, 2)
     physical = actions * std + mean
-    velocity = inverse_signed_log(ego_state[..., :2].float()).norm(dim=-1)
+    velocity = inverse_signed_log(ego_state[..., :2].float())
     position = actions.new_zeros(actions.shape[0], 2)
-    heading = actions.new_zeros(actions.shape[0])
     waypoints = []
-    for control in physical.unbind(dim=1):
-        acceleration, curvature = control.unbind(dim=-1)
-        position = position + velocity.unsqueeze(-1) * torch.stack((heading.cos(), heading.sin()), dim=-1) * dt_s
-        heading = heading + velocity * curvature * dt_s
-        velocity = (velocity + acceleration * dt_s).clamp_min(0.0)
+    for acceleration in physical.unbind(dim=1):
+        velocity = velocity + acceleration * dt_s
+        position = position + velocity * dt_s
+        heading = torch.atan2(velocity[:, 1], velocity[:, 0])
         waypoints.append(torch.cat((position, heading.unsqueeze(-1)), dim=-1))
     return torch.stack(waypoints, dim=1)
+
+
+@torch.no_grad()
+def nearest_planar_action_words(gt_xy: torch.Tensor, initial_velocity: torch.Tensor,
+                                actions: torch.Tensor, dt_s: float,
+                                weight_floor: float, decay_s: float) -> torch.Tensor:
+    """按当前物理速度积分词表，并以近端加权笛卡尔距离选出每条 GT 的最近词。"""
+    word_velocity = (initial_velocity[:, None, None, :]
+                     + actions[None].cumsum(2) * dt_s)
+    word_xy = word_velocity.cumsum(2) * dt_s
+    times = torch.arange(actions.shape[1], device=gt_xy.device) * dt_s
+    weight = weight_floor + (1.0 - weight_floor) * (-times / decay_s).exp()
+    distance = ((word_xy - gt_xy[:, None]).square().sum(-1) * weight).sum(-1)
+    return distance.argmin(-1)
 
 
 class _SwiGLU(nn.Module):
@@ -125,7 +141,8 @@ class _Attention(nn.Module):
         batch, tokens, _ = x.shape
         return x.reshape(batch, tokens, self.heads, self.head_dim).transpose(1, 2)
 
-    def forward(self, query, context=None, positions=None, q_geometry=None, k_geometry=None):
+    def forward(self, query, context=None, positions=None, q_geometry=None, k_geometry=None,
+                attention_mask=None):
         context = query if context is None else context
         q_input = self.q(query)
         k_input = self.k(context)
@@ -139,7 +156,7 @@ class _Attention(nn.Module):
             rope_positions = positions.unsqueeze(1) if positions.ndim == 3 else positions
             q = _rotate(q, rope_positions, self.rope_axes, self.rope_theta)
             k = _rotate(k, rope_positions, self.rope_axes, self.rope_theta)
-        output = F.scaled_dot_product_attention(q, k, v)
+        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
         return self.o(output.transpose(1, 2).reshape(query.shape[0], query.shape[1], -1))
 
 
@@ -153,8 +170,10 @@ class _TransformerBlock(nn.Module):
         self.norm_ffn = nn.LayerNorm(dim)
         self.ffn = _SwiGLU(dim, hidden)
 
-    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm_attn(x), positions=positions)
+    def forward(self, x: torch.Tensor, positions: torch.Tensor,
+                attention_mask: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm_attn(x), positions=positions,
+                          attention_mask=attention_mask)
         return x + self.ffn(self.norm_ffn(x))
 
 
@@ -234,7 +253,8 @@ class _VisualProcessor(nn.Module):
         self.annotation_queries = nn.Parameter(
             torch.randn(self.num_annotation_queries, spec.dim) * 0.02)
         self.blocks = nn.ModuleList([_TransformerBlock(
-            spec.dim, spec.self_heads_3d, spec.ffn_hidden, spec.rope_theta) for _ in range(8)])
+            spec.dim, spec.self_heads_3d, spec.ffn_hidden, spec.rope_theta)
+            for _ in range(spec.visual_layers)])
         self.aggregate = nn.Sequential(nn.LayerNorm(spec.dim * 4), nn.Linear(spec.dim * 4, spec.dim))
         self.restore_expand = nn.Conv2d(spec.dim, spec.dim * 4, 3, padding=1, bias=True)
         nn.init.zeros_(self.restore_expand.bias)
@@ -275,10 +295,13 @@ class _VisualProcessor(nn.Module):
         annotation_queries = self.annotation_queries.unsqueeze(0).expand(batch, -1, -1)
         tokens = torch.cat((condition, registers, annotation_queries, patches), dim=1)
         positions = self._positions(batch, frames, small_h, small_w, tokens.device, self.special_tokens)
+        attention_mask = self._attention_mask(
+            frames, small_h * small_w, tokens.device,
+            query_count=self.num_register_tokens + self.num_annotation_queries)
         outputs = []
         for index, block in enumerate(self.blocks, 1):
-            tokens = block(tokens, positions)
-            if index in (2, 4, 6, 8):
+            tokens = block(tokens, positions, attention_mask)
+            if index in (3, 6, 9, 12):
                 outputs.append(tokens[:, self.patch_start:])
         # 聚合、PixelShuffle、残差卷积和末端 LayerNorm 固定在 FP32。
         with torch.autocast(device_type=outputs[-1].device.type, enabled=False):
@@ -305,6 +328,24 @@ class _VisualProcessor(nn.Module):
                 "probability_logits": self.annotation_probability_head(annotation_tokens[:, 2]),
             }
         return tokens, torch.cat((geometry_tokens.new_zeros(batch, self.special_tokens, self.dim), geometry_tokens), dim=1), restored, annotation
+
+    @staticmethod
+    def _attention_mask(frames, patches_per_frame, device, condition_count=2,
+                        query_count=None):
+        """条件只读自身；全局查询只读不写；图像块按帧因果可见。"""
+        if query_count is None:
+            raise ValueError("视觉查询数量必须明确给出")
+        special = condition_count + query_count
+        patch_frames = torch.arange(frames, device=device).repeat_interleave(patches_per_frame)
+        patch_allowed = patch_frames[:, None] >= patch_frames[None, :]
+        length = special + len(patch_frames)
+        mask = torch.zeros(length, length, device=device, dtype=torch.bool)
+        mask[:condition_count, :condition_count] = torch.eye(
+            condition_count, device=device, dtype=torch.bool)
+        mask[condition_count:special, :] = True
+        mask[special:, :condition_count] = True
+        mask[special:, special:] = patch_allowed
+        return mask[None, None]
 
     @staticmethod
     def _positions(batch, frames, height, width, device, special_tokens):
@@ -373,64 +414,152 @@ class _BEVDecoder(nn.Module):
         return self.output(self.output_norm(query).transpose(1, 2).reshape(batch, self.dim, height, width))
 
 
-class _TrajectoryDecoder(nn.Module):
-    """三维 RoPE 的30点单轨迹流匹配解码器。"""
+class _VocabularyCrossBlock(nn.Module):
+    """词状态读取视觉上下文后经过必需的前馈层。"""
 
-    def __init__(self, spec, geometry):
+    def __init__(self, dim, heads, hidden):
+        super().__init__()
+        self.query_norm = nn.LayerNorm(dim)
+        self.context_norm = nn.LayerNorm(dim)
+        self.attention = _Attention(dim, heads)
+        self.ffn_norm = nn.LayerNorm(dim)
+        self.ffn = _SwiGLU(dim, hidden)
+
+    def forward(self, words, context):
+        words = words + self.attention(self.query_norm(words), self.context_norm(context))
+        return words + self.ffn(self.ffn_norm(words))
+
+
+class _LowRankVocabularyBlock(nn.Module):
+    """沿词轴压缩 K/V，使全部词以可配置低秩相互作用。"""
+
+    def __init__(self, dim, heads, hidden, count, rank):
+        super().__init__()
+        self.heads, self.head_dim = heads, dim // heads
+        self.norm = nn.LayerNorm(dim)
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.key_basis = nn.Parameter(torch.randn(rank, count) / count ** 0.5)
+        self.value_basis = nn.Parameter(torch.randn(rank, count) / count ** 0.5)
+        self.out = nn.Linear(dim, dim)
+        self.ffn_norm = nn.LayerNorm(dim)
+        self.ffn = _SwiGLU(dim, hidden)
+
+    def forward(self, words):
+        batch, count, dim = words.shape
+        q, k, v = self.qkv(self.norm(words)).chunk(3, dim=-1)
+        split = lambda x: x.reshape(batch, count, self.heads, self.head_dim).transpose(1, 2)
+        q, k, v = split(q), split(k), split(v)
+        k = torch.einsum("rn,bhnd->bhrd", self.key_basis, k)
+        v = torch.einsum("rn,bhnd->bhrd", self.value_basis, v)
+        mixed = F.scaled_dot_product_attention(_qk_norm(q), _qk_norm(k), v)
+        words = words + self.out(mixed.transpose(1, 2).reshape(batch, count, dim))
+        return words + self.ffn(self.ffn_norm(words))
+
+
+class _AdaLNResidualFFN(nn.Module):
+    """时间经 AdaLN-Zero 调制标准化残差预测。"""
+
+    def __init__(self, dim, hidden):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.ffn = _SwiGLU(dim, hidden)
+        self.modulation = nn.Linear(dim, dim * 3)
+        nn.init.zeros_(self.modulation.weight)
+        nn.init.zeros_(self.modulation.bias)
+
+    def forward(self, x, time_embedding):
+        shift, scale, gate = self.modulation(time_embedding).chunk(3, dim=-1)
+        return x + gate * self.ffn(self.norm(x) * (1.0 + scale) + shift)
+
+
+class _TrajectoryDecoder(nn.Module):
+    """由动作数值词、当前条件与标准化残差终点组成的词表解码器。"""
+
+    def __init__(self, spec, artifact):
         super().__init__()
         self.dim, self.points = spec.dim, spec.num_waypoints
-        self.state = nn.Linear(2, self.dim)
+        vocabulary = torch.as_tensor(artifact["actions"], dtype=torch.float32)
+        if vocabulary.shape != (spec.action_vocab_size, self.points, 2):
+            raise ValueError("动作词表形状与 model.unified_driving 不一致")
+        for name in ("actions", "action_mean", "action_std", "residual_mean",
+                     "residual_std", "motion_mean", "motion_std"):
+            self.register_buffer(name, torch.as_tensor(artifact[name], dtype=torch.float32))
+        normalized_actions = artifact.get("normalized_actions")
+        if normalized_actions is None:
+            normalized_actions = (vocabulary - self.action_mean) / self.action_std
+        self.register_buffer("normalized_actions", torch.as_tensor(normalized_actions, dtype=torch.float32))
+        if self.normalized_actions.shape != vocabulary.shape or not torch.allclose(
+                self.normalized_actions, (vocabulary - self.action_mean) / self.action_std, atol=1e-5):
+            raise ValueError("动作词表的标准化加速度与物理词及统计量不一致")
+        self.fourier_bands = spec.action_fourier_bands
+        self.fourier_project = nn.Linear(self.points * 2 * self.fourier_bands * 2, self.dim)
         self.navigation = nn.Embedding(len(spec.navigation_commands), self.dim)
-        self.ego = _ConditionMLP(4, self.dim, spec.condition_hidden)
+        self.motion = _ConditionMLP(4, self.dim, spec.condition_hidden)
+        self.cross = nn.ModuleList([
+            _VocabularyCrossBlock(self.dim, spec.cross_heads, spec.ffn_hidden)
+            for _ in range(2)])
+        self.interaction = _LowRankVocabularyBlock(
+            self.dim, spec.cross_heads, spec.ffn_hidden,
+            spec.action_vocab_size, spec.action_attention_rank)
+        self.score_norm = nn.LayerNorm(self.dim)
+        self.score = nn.Linear(self.dim, 1)
+        self.residual_input = nn.Linear(self.points * 2 + self.dim * 2, self.dim)
         self.time = _ConditionMLP(self.dim, self.dim, spec.condition_hidden)
-        self.num_annotation_queries = spec.annotation_query_count
-        self.annotation_queries = nn.Parameter(
-            torch.randn(self.num_annotation_queries, self.dim) * 0.02)
-        self.blocks = nn.ModuleList([_AdaLNZeroBlock(
-            self.dim, spec.cross_heads, spec.self_heads_3d, spec.ffn_hidden,
-            (16, 16, 16), spec.rope_theta) for _ in range(6)])
-        self.output_norms = nn.ModuleList([nn.LayerNorm(self.dim) for _ in range(6)])
-        self.action_heads = nn.ModuleList([nn.Linear(self.dim, 2) for _ in range(6)])
-        self.geometry = geometry
-        self.geometry_norm = nn.LayerNorm(self.dim)
-        self.annotation_state_head = nn.Linear(self.dim, spec.annotation_state_classes)
-        self.annotation_reason_head = nn.Linear(self.dim, spec.annotation_reason_classes)
-        self.annotation_probability_head = nn.Linear(self.dim, spec.annotation_probability_dim)
+        self.residual_blocks = nn.ModuleList([
+            _AdaLNResidualFFN(self.dim, spec.ffn_hidden)
+            for _ in range(spec.residual_ffn_blocks)])
+        self.residual_norm = nn.LayerNorm(self.dim)
+        self.residual_output = nn.Linear(self.dim, self.points * 2)
 
-    def forward(self, state, visual_tokens, visual_geometry, time_step, navigation_command, ego_state):
+    def _word_features(self):
+        """正余弦只编码标准化动作数值，不编码词 ID 或轨迹时间位置。"""
+        normalized = self.normalized_actions
+        frequencies = 2.0 ** torch.arange(
+            self.fourier_bands, device=normalized.device, dtype=normalized.dtype)
+        angles = normalized.flatten(1)[..., None] * frequencies * torch.pi
+        features = torch.stack((angles.sin(), angles.cos()), dim=-1).flatten(1)
+        return self.fourier_project(features)
+
+    def classify(self, visual_tokens, navigation_command, ego_state):
+        """只执行一次全词表交叉注意力，供流采样复用。"""
+        batch = visual_tokens.shape[0]
+        standardized_motion = (ego_state - self.motion_mean) / self.motion_std
+        condition = self.navigation(navigation_command) + self.motion(standardized_motion)
+        words = self._word_features().unsqueeze(0).expand(batch, -1, -1)
+        words = words + condition.unsqueeze(1)
+        for block in self.cross:
+            words = block(words, visual_tokens)
+        words = self.interaction(words)
+        logits = self.score(self.score_norm(words)).squeeze(-1)
+        top_index = logits.argmax(dim=-1)
+        return {"logits": logits, "probabilities": logits.sigmoid(),
+                "top_index": top_index, "words": words, "condition": condition}
+
+    def predict_residual(self, encoded, state, time_step, anchor_index=None):
+        """输出标准化二维加速度残差终点。"""
+        index = encoded["top_index"] if anchor_index is None else anchor_index
         batch = state.shape[0]
-        query = self.state(state)
-        point_time = torch.linspace(0.1, 3.0, self.points, device=state.device).view(1, -1, 1).expand(batch, -1, -1)
-        positions = torch.cat((state, point_time), dim=-1)
-        z = torch.arange(-3.0, 16.01, 0.1, device=state.device).view(1, 1, -1, 1)
-        z = (z + 3.0) / 19.0 * 2.0 - 1.0
-        # 动作状态处于标准化空间，位置分支不对控制量做逆变换。
-        trajectory_xy = state / 4.0
-        trajectory_points = trajectory_xy.unsqueeze(2).expand(batch, self.points, z.shape[2], 2)
-        trajectory_points = torch.cat((trajectory_points, z.expand(batch, self.points, -1, 1)), dim=-1)
-        geometry = self.geometry_norm(self.geometry(trajectory_points.mean(dim=2)))
-        annotation_queries = self.annotation_queries.unsqueeze(0).expand(batch, -1, -1)
-        query = torch.cat((query, annotation_queries), dim=1)
-        positions = torch.cat((positions, positions.new_zeros(batch, self.num_annotation_queries, 3)), dim=1)
-        geometry = torch.cat((geometry, geometry.new_zeros(batch, self.num_annotation_queries, self.dim)), dim=1)
-        condition = (self.time(_sinusoidal_time(time_step, self.dim))
-                     + self.navigation(navigation_command) + self.ego(ego_state))
-        fields = []
-        for block, norm, head in zip(self.blocks, self.output_norms, self.action_heads):
-            query = block(query, visual_tokens, condition, positions, geometry, visual_geometry)
-            fields.append(head(norm(query[:, :self.points])))
-        annotation_tokens = self.output_norms[-1](query[:, self.points:]).float()
-        annotation = {
-            "tokens": annotation_tokens,
-            "state_logits": self.annotation_state_head(annotation_tokens[:, 0]),
-            "reason_logits": self.annotation_reason_head(annotation_tokens[:, 1]),
-            "probability_logits": self.annotation_probability_head(annotation_tokens[:, 2]),
-        }
-        return {"flows": fields, "annotation": annotation}
+        selected = encoded["words"][torch.arange(batch, device=state.device), index]
+        hidden = self.residual_input(torch.cat(
+            (state.flatten(1), selected, encoded["condition"]), dim=-1))
+        time_embedding = self.time(_sinusoidal_time(time_step, self.dim))
+        for block in self.residual_blocks:
+            hidden = block(hidden, time_embedding)
+        return self.residual_output(self.residual_norm(hidden)).reshape(batch, self.points, 2)
+
+    def forward(self, visual_tokens, navigation_command, ego_state,
+                state=None, time_step=None, anchor_index=None):
+        result = self.classify(visual_tokens, navigation_command, ego_state)
+        if state is not None:
+            if time_step is None:
+                raise ValueError("残差状态需要流时间")
+            result["residual"] = self.predict_residual(
+                result, state, time_step, anchor_index)
+        return result
 
 
 class UnifiedDrivingModel(nn.Module):
-    """四帧前向单目 DrivingModel，输出 BEV 与轨迹速度场。"""
+    """四帧单目驾驶模型，词表选择与动作残差终点共同生成轨迹。"""
 
     def __init__(self, cfg: Config) -> None:
         super().__init__()
@@ -439,22 +568,32 @@ class UnifiedDrivingModel(nn.Module):
         spec = cfg.model.unified_driving
         self.shared_geometry = _ConditionMLP(3, spec.dim, spec.geometry_hidden)
         self.bev_decoder = _BEVDecoder(spec, self.shared_geometry)
-        self.trajectory_decoder = _TrajectoryDecoder(spec, self.shared_geometry)
+        vocabulary_path = Path(cfg.trajectory_vocabulary.output_dir) / cfg.trajectory_vocabulary.action_output
+        if not vocabulary_path.is_absolute():
+            vocabulary_path = Path(__file__).resolve().parents[2] / vocabulary_path
+        if not vocabulary_path.is_file():
+            raise FileNotFoundError("动作词表不存在: {}；先运行 python -m data.trajectory_vocabulary.run --actions".format(
+                vocabulary_path))
+        with np.load(vocabulary_path, allow_pickle=False) as saved:
+            artifact = {name: saved[name].copy() for name in saved.files}
+        self.trajectory_decoder = _TrajectoryDecoder(spec, artifact)
         self.bev_vae = PrivilegedBEVVAE(cfg)
         self.bev_vae.requires_grad_(False)
         self.bev_vae.eval()
         self.precision = cfg.train.precision
 
-    @staticmethod
-    def integrate_actions(actions, ego_state, action_mean=(0.0, 0.0), action_std=(1.0, 1.0),
-                          dt_s=0.1):
+    def integrate_actions(self, actions, ego_state, action_mean=(0.0, 0.0),
+                          action_std=(1.0, 1.0)):
         """推理后处理：把标准化控制量积分为连续航点。"""
-        return integrate_unicycle_actions(actions, ego_state, action_mean, action_std, dt_s)
+        return integrate_planar_accelerations(
+            actions, ego_state, self.cfg.model.unified_driving.waypoint_dt_s,
+            action_mean, action_std)
 
     @torch.no_grad()
     def sample_trajectory_actions(self, rgb, intrinsics, navigation_command, ego_state,
-                                  motion_matrices, steps: int = 10):
-        """从标准高斯噪声用 Euler 流匹配采样标准化 [加速度, 曲率]。"""
+                                  motion_matrices, steps: Optional[int] = None):
+        """以终点参数化流采样，并返回物理单位的局部二维加速度。"""
+        steps = self.cfg.model.unified_driving.trajectory_sample_steps if steps is None else steps
         if steps <= 0:
             raise ValueError("steps 必须为正整数")
         check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
@@ -467,15 +606,37 @@ class UnifiedDrivingModel(nn.Module):
             rgb.shape[0], self.trajectory_decoder.points, 2,
             device=rgb.device, dtype=torch.float32)
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=False):
-            tokens, geometry = tokens.float(), geometry.float()
+            encoded = self.trajectory_decoder.classify(
+                tokens.float(), navigation_command, ego_state.float())
             for index in range(steps):
                 time_step = torch.full(
                     (rgb.shape[0],), index / float(steps), device=rgb.device, dtype=torch.float32)
-                flow = self.trajectory_decoder(
-                    state, tokens, geometry, time_step,
-                    navigation_command, ego_state.float())["flows"][-1]
-                state = state + flow.float() / float(steps)
-        return state
+                endpoint = self.trajectory_decoder.predict_residual(
+                    encoded, state, time_step)
+                state = state + (endpoint - state) / float(steps - index)
+        decoder = self.trajectory_decoder
+        word = decoder.actions[encoded["top_index"]]
+        return word + state * decoder.residual_std + decoder.residual_mean
+
+    @torch.no_grad()
+    def sample_trajectory(self, rgb, intrinsics, navigation_command, ego_state,
+                          motion_matrices, steps: Optional[int] = None):
+        """返回物理加速度及其从局部初始二维速度积分得到的轨迹。"""
+        actions = self.sample_trajectory_actions(
+            rgb, intrinsics, navigation_command, ego_state, motion_matrices, steps)
+        waypoints = integrate_planar_accelerations(
+            actions, ego_state, dt_s=self.cfg.model.unified_driving.waypoint_dt_s)
+        return {"actions": actions, "trajectory": waypoints}
+
+    @torch.no_grad()
+    def nearest_trajectory_words(self, gt_xy, ego_state):
+        """从样本当前速度积分每个词，并与原始 GT 笛卡尔航点匹配。"""
+        decoder = self.trajectory_decoder
+        spec = self.cfg.model.unified_driving
+        initial_velocity = inverse_signed_log(ego_state[:, :2].float())
+        return nearest_planar_action_words(
+            gt_xy, initial_velocity, decoder.actions, spec.waypoint_dt_s,
+            spec.nearest_weight_floor, spec.nearest_decay_s)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         """返回除冻结 DINOv3 外的可训练参数。"""
@@ -502,8 +663,9 @@ class UnifiedDrivingModel(nn.Module):
                 navigation_command: torch.Tensor, ego_state: torch.Tensor,
                 motion_matrices: torch.Tensor, time_step: Optional[torch.Tensor] = None,
                 bev_state: Optional[torch.Tensor] = None,
-                traj_state: Optional[torch.Tensor] = None):
-        """处理四帧图像，并在给定流状态时输出两个速度场。"""
+                traj_state: Optional[torch.Tensor] = None,
+                traj_anchor_index: Optional[torch.Tensor] = None):
+        """处理四帧图像，并在给定流状态时预测动作残差终点。"""
         check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
                                      len(self.cfg.model.unified_driving.navigation_commands))
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
@@ -518,10 +680,14 @@ class UnifiedDrivingModel(nn.Module):
             if time_step is not None and bev_state is not None:
                 outputs["bev_flow"] = self.bev_decoder(
                     bev_state.float(), tokens_fp32, geometry.float(), time_step.float())
-            if time_step is not None and traj_state is not None:
-                trajectory_output = self.trajectory_decoder(
-                    traj_state.float(), tokens_fp32, geometry.float(), time_step.float(),
-                    navigation_command, ego_state.float())
-                outputs["traj_flows"] = trajectory_output["flows"]
-                outputs["traj_annotation"] = trajectory_output["annotation"]
+            trajectory_output = self.trajectory_decoder(
+                tokens_fp32, navigation_command, ego_state.float(),
+                traj_state.float() if traj_state is not None else None,
+                time_step.float() if time_step is not None else None,
+                traj_anchor_index)
+            outputs["traj_logits"] = trajectory_output["logits"]
+            outputs["traj_probabilities"] = trajectory_output["probabilities"]
+            outputs["traj_top_index"] = trajectory_output["top_index"]
+            if "residual" in trajectory_output:
+                outputs["traj_residual"] = trajectory_output["residual"]
         return outputs

@@ -41,8 +41,216 @@ def _nearest_route_point(position, points, arc, tangent):
     return index, float(distance[index]), float(arc[index] + forward)
 
 
+def _project_route_segment(position, points, arc):
+    """Project a position onto route segments, including beyond the endpoints."""
+    if hasattr(position, "x") and hasattr(position, "y"):
+        position = [position.x, position.y]
+    position = np.asarray(position, dtype=np.float64)[:2]
+    if len(points) < 2:
+        return 0.0, float(np.linalg.norm(position - points[0])), np.zeros(2)
+    segments = points[1:] - points[:-1]
+    lengths_sq = np.sum(segments * segments, axis=1)
+    raw = np.sum((position - points[:-1]) * segments, axis=1) / np.maximum(
+        lengths_sq, 1e-9)
+    clipped = np.clip(raw, 0.0, 1.0)
+    nearest = points[:-1] + clipped[:, None] * segments
+    index = int(np.argmin(np.sum((nearest - position) ** 2, axis=1)))
+    fraction = float(raw[index]) if index in (0, len(segments) - 1) else float(clipped[index])
+    length = math.sqrt(max(float(lengths_sq[index]), 1e-9))
+    direction = segments[index] / length
+    normal = np.asarray([-direction[1], direction[0]])
+    station = float(arc[index] + fraction * length)
+    lateral = float(np.dot(position - points[index], normal))
+    return station, lateral, direction
+
+
+def _vehicle_route_extents(prediction, route_direction):
+    """Project an oriented vehicle box using its predicted travel direction."""
+    length = max(float(prediction.extent_xy[0]), 0.5)
+    width = max(float(prediction.extent_xy[1]), 0.25)
+    second = 1 if len(prediction.means) > 1 else 0
+    motion = np.asarray(prediction.means[second], dtype=np.float64)[:2] - np.asarray(
+        prediction.means[0], dtype=np.float64)[:2]
+    magnitude = float(np.linalg.norm(motion))
+    if magnitude < 0.25:
+        motion = (np.asarray(prediction.means[-1], dtype=np.float64)[:2] -
+                  np.asarray(prediction.means[0], dtype=np.float64)[:2])
+        magnitude = float(np.linalg.norm(motion))
+    if magnitude < 0.25:
+        return length, width, 1.0
+    heading = motion / magnitude
+    heading_side = np.asarray([-heading[1], heading[0]])
+    aligned = abs(float(np.dot(heading, route_direction)))
+    crossed = abs(float(np.dot(heading_side, route_direction)))
+    return (aligned * length + crossed * width,
+            crossed * length + aligned * width, aligned)
+
+
+def plan_front_vehicle_speed(route_points, predictions, ego_position,
+                             ego_speed_mps, ego_half_length_m,
+                             ego_half_width_m, lateral_margin_m,
+                             reaction_time_s, comfort_decel_mps2,
+                             minimum_gap_m=3.0, confidence_z=1.0,
+                             lookahead_s=1.5, emergency_decel_mps2=8.0):
+    """Cap speed using the front vehicle's Bayesian route trajectory.
+
+    The current physical gap supplies the braking constraint. Near-term
+    posterior means and longitudinal covariance account for a lead vehicle
+    that is slowing or whose future position is uncertain. Stable vehicles in
+    adjacent lanes are excluded by their lateral occupancy probability.
+    """
+    result = {"speed_cap_mps": float("inf"), "emergency": False,
+              "actor_id": None, "gap_m": float("inf"), "kind": None}
+    geometry = _route_geometry(route_points)
+    if geometry is None or len(geometry[0]) < 2:
+        return result
+    points, arc, _, _ = geometry
+    ego_arc, _, ego_direction = _project_route_segment(ego_position, points, arc)
+    ego_xy = (np.asarray([ego_position.x, ego_position.y], dtype=np.float64)
+              if hasattr(ego_position, "x") else
+              np.asarray(ego_position, dtype=np.float64)[:2])
+    ego_speed = max(float(ego_speed_mps), 0.0)
+    decel = max(float(comfort_decel_mps2), 0.1)
+    for prediction in predictions or ():
+        if prediction.actor_type != "vehicle" or len(prediction.means) == 0:
+            continue
+        first_arc, first_lateral, first_direction = _project_route_segment(
+            prediction.means[0], points, arc)
+        extent_x, extent_y, alignment = _vehicle_route_extents(
+            prediction, first_direction)
+        # A route that curves back can project a physically trailing actor onto
+        # an upcoming segment. It cannot require ego braking while it remains
+        # well behind the ego's current heading.
+        relative_along = float(np.dot(
+            np.asarray(prediction.means[0], dtype=np.float64)[:2] - ego_xy,
+            ego_direction))
+        if relative_along < -(max(float(ego_half_length_m), 0.5) + extent_x + 1.0):
+            continue
+        corridor = max(float(ego_half_width_m), 0.5) + extent_y + max(
+            float(lateral_margin_m), 0.0)
+        first_cov = np.asarray(prediction.covariances[0], dtype=np.float64)
+        first_normal = np.asarray([-first_direction[1], first_direction[0]])
+        first_sigma = math.sqrt(max(float(first_normal.dot(first_cov).dot(
+            first_normal)), 0.05))
+        initially_in_route = (alignment >= 0.6 and
+                              abs(first_lateral) <= corridor and
+                              _interval_probability(
+                                  first_lateral, first_sigma, corridor) >= 0.5)
+        if not initially_in_route:
+            # A side vehicle matters when its *mean* enters the route while
+            # the ego would still occupy the crossing. The mean requirement
+            # keeps a parallel neighbor's growing covariance from braking us.
+            if ego_speed < 1.0:
+                continue
+            closest_mean_lateral = min(
+                abs(_project_route_segment(mean, points, arc)[1])
+                for mean in prediction.means)
+            # A long vehicle in the next lane can touch an inflated corridor
+            # without moving into our path. Require actual inward progress.
+            if (abs(first_lateral) > corridor and
+                    abs(first_lateral) - closest_mean_lateral < 0.75):
+                continue
+            for mean, covariance, time_s in zip(
+                    prediction.means, prediction.covariances, prediction.times):
+                time_s = float(time_s)
+                actor_arc, lateral, direction = _project_route_segment(
+                    mean, points, arc)
+                step_extent_x, step_extent_y, _ = _vehicle_route_extents(
+                    prediction, direction)
+                step_corridor = (max(float(ego_half_width_m), 0.5) +
+                                 step_extent_y + max(float(lateral_margin_m), 0.0))
+                if abs(lateral) > step_corridor or actor_arc <= ego_arc + 0.5:
+                    continue
+                entry_time = (actor_arc - ego_arc -
+                              max(float(ego_half_length_m), 0.5) - step_extent_x) / ego_speed
+                exit_time = (actor_arc - ego_arc +
+                             max(float(ego_half_length_m), 0.5) + step_extent_x) / ego_speed
+                if time_s < entry_time - 0.35 or time_s > exit_time + 0.35:
+                    continue
+                normal = np.asarray([-direction[1], direction[0]])
+                covariance = np.asarray(covariance, dtype=np.float64)
+                sigma_lateral = math.sqrt(max(float(normal.dot(
+                    covariance).dot(normal)), 0.05))
+                if _interval_probability(lateral, sigma_lateral,
+                                         step_corridor) < 0.35:
+                    continue
+                sigma_longitudinal = math.sqrt(max(float(direction.dot(
+                    covariance).dot(direction)), 0.05))
+                current_gap = (actor_arc - ego_arc -
+                               max(float(ego_half_length_m), 0.5) - step_extent_x)
+                lower_gap = current_gap - max(float(confidence_z), 0.0) * min(
+                    sigma_longitudinal, max(float(ego_half_length_m), 0.5))
+                usable_gap = max(lower_gap - max(float(minimum_gap_m), 0.0) -
+                                 max(float(reaction_time_s), 0.0) * ego_speed,
+                                 0.0)
+                speed_cap = math.sqrt(2.0 * decel * usable_gap)
+                hard_gap = (max(float(minimum_gap_m), 0.0) + 0.3 * ego_speed +
+                            ego_speed ** 2 /
+                            (2.0 * max(float(emergency_decel_mps2), decel)))
+                emergency = (current_gap < hard_gap or
+                             (speed_cap <= 0.5 and ego_speed > 1.0))
+                if speed_cap < result["speed_cap_mps"]:
+                    result = {"speed_cap_mps": float(speed_cap),
+                              "emergency": bool(emergency),
+                              "actor_id": int(prediction.actor_id),
+                              "gap_m": float(current_gap), "kind": "crossing"}
+                elif emergency:
+                    result["emergency"] = True
+            continue
+        first_time = float(prediction.times[0])
+        if len(prediction.means) > 1:
+            second_arc, _, _ = _project_route_segment(
+                prediction.means[1], points, arc)
+            second_time = float(prediction.times[1])
+            lead_speed = (second_arc - first_arc) / max(
+                second_time - first_time, 1e-3)
+        else:
+            lead_speed = float(prediction.speed_mps)
+        lead_speed = max(0.0, min(float(lead_speed),
+                                  max(float(prediction.speed_mps), 0.0) + 1.5))
+        current_arc = first_arc - lead_speed * first_time
+        if current_arc <= ego_arc + 0.5:
+            continue
+        gap = current_arc - ego_arc - max(float(ego_half_length_m), 0.5) - extent_x
+        effective_gap = gap
+        for mean, covariance, time_s in zip(
+                prediction.means, prediction.covariances, prediction.times):
+            time_s = float(time_s)
+            if time_s > lookahead_s + 1e-6:
+                break
+            actor_arc, lateral, direction = _project_route_segment(
+                mean, points, arc)
+            normal = np.asarray([-direction[1], direction[0]])
+            covariance = np.asarray(covariance, dtype=np.float64)
+            lateral_sigma = math.sqrt(max(float(normal.dot(covariance).dot(
+                normal)), 0.05))
+            if _interval_probability(lateral, lateral_sigma, corridor) < 0.5:
+                continue
+            longitudinal_sigma = math.sqrt(max(float(direction.dot(
+                covariance).dot(direction)), 0.05))
+            lower_arc = actor_arc - max(float(confidence_z), 0.0) * longitudinal_sigma
+            expected_arc = current_arc + lead_speed * time_s
+            effective_gap = min(effective_gap, gap + lower_arc - expected_arc)
+        usable_gap = max(effective_gap - max(float(minimum_gap_m), 0.0) -
+                         max(float(reaction_time_s), 0.0) * ego_speed, 0.0)
+        speed_cap = math.sqrt(lead_speed ** 2 + 2.0 * decel * usable_gap)
+        hard_gap = (max(float(minimum_gap_m), 0.0) + 0.3 * ego_speed +
+                    max(ego_speed ** 2 - lead_speed ** 2, 0.0) /
+                    (2.0 * max(float(emergency_decel_mps2), decel)))
+        emergency = gap < hard_gap and ego_speed > lead_speed + 0.8
+        if speed_cap < result["speed_cap_mps"]:
+            result = {"speed_cap_mps": float(speed_cap),
+                      "emergency": bool(emergency),
+                      "actor_id": int(prediction.actor_id),
+                      "gap_m": float(gap), "kind": "following"}
+        elif emergency:
+            result["emergency"] = True
+    return result
+
+
 def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
-                        route_width_m=2.0, risk_decay_m=35.0):
+                        route_width_m=2.0, risk_decay_m=35.0,
+                        pedestrian_route_width_m=None):
     """Return scalar risk and interpretable details for a route corridor.
 
     ``predictions`` are :class:`ActorPrediction` objects.  The returned values
@@ -75,14 +283,27 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
         if prediction.actor_type == "vehicle" and initial_arc < ego_arc - 0.5:
             continue
         extent = max(prediction.extent_xy[1], 0.25)
-        corridor = float(route_width_m) + extent
-        # A parallel actor whose predicted centers stay outside the route is
-        # less likely to make an unobserved lane change than a generic free-space
-        # Gaussian acceleration model suggests. Crossing forecasts keep full risk.
-        min_mean_lateral = min(
-            (_nearest_route_point(mean, points, arc, tangent)[1]
-             for mean in prediction.means), default=float("inf"))
-        non_crossing_prior = 0.15 if min_mean_lateral > corridor + 0.5 else 1.0
+        width = (pedestrian_route_width_m
+                 if prediction.actor_type == "pedestrian" and
+                 pedestrian_route_width_m is not None else route_width_m)
+        corridor = float(width) + extent
+        # Uncertainty growth alone should not make an adjacent-lane vehicle
+        # occupy the ego's path. Its mean must approach the physical corridor;
+        # a forecast crossing into the corridor still keeps full risk.
+        mean_lateral_offsets = []
+        for mean in prediction.means:
+            nearest, _, _ = _nearest_route_point(mean, points, arc, tangent)
+            normal = np.asarray([-tangent[nearest, 1], tangent[nearest, 0]])
+            mean_lateral_offsets.append(abs(float(np.dot(
+                np.asarray(mean[:2], dtype=np.float64) - points[nearest],
+                normal))))
+        min_mean_lateral = min(mean_lateral_offsets, default=float("inf"))
+        outside_fraction = float(np.clip(
+            (min_mean_lateral - corridor) / 0.2, 0.0, 1.0))
+        smooth_outside = outside_fraction ** 2 * (3.0 - 2.0 * outside_fraction)
+        non_crossing_prior = (
+            1.0 - 0.9 * smooth_outside
+            if prediction.actor_type == "vehicle" else 1.0)
         for step, (mean, covariance) in enumerate(zip(
                 prediction.means, prediction.covariances)):
             index, distance, actor_arc = _nearest_route_point(mean, points, arc, tangent)

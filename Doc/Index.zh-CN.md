@@ -14,6 +14,7 @@
 - [Doc/开发规范.md](开发规范.md) — 项目强制开发规范（文档/注释/配置/校验/简洁）
 - [Doc/Index.md](Index.md) — 英文文档索引（主要版本）
 - [Doc/Index.zh-CN.md](Index.zh-CN.md) — 中文文档索引
+- [Doc/UnifiedDrivingModel.md](UnifiedDrivingModel.md) — 块因果视觉处理与局部二维加速度词表驾驶模型规范
 - [Doc/BEVSeg.md](BEVSeg.md) — BEVSeg 驾驶语义栅格合成、分组码本压缩与 PixelShuffle 重建规范
 - [Doc/BEVSegVAE64.md](BEVSegVAE64.md) — 整幅 BEV 64 倍空间压缩连续 latent VAE 规范
 - [Doc/PrivilegedBEVVAE.md](PrivilegedBEVVAE.md) — 特权连续 latent BEV VAE 与噪声测定规范
@@ -57,11 +58,12 @@
 - [data/bevseg_dataset/__init__.py](../data/bevseg_dataset/__init__.py) — BEVSeg 单帧驾驶语义数据集公共 API
 - [data/bevseg_dataset/bevseg_dataset.py](../data/bevseg_dataset/bevseg_dataset.py) — 读取 CARLA 场景并返回单帧 ego 对齐 BEVSeg
 - [data/driving_cache/__init__.py](../data/driving_cache/__init__.py) — 新 DrivingModel 训练切片缓存公共 API
-- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — v8 驾驶切片缓存：保存标准化单轮车控制量、7 类状态与 14 类原因、冲突概率和车道可用性监督
+- [data/driving_cache/driving_cache.py](../data/driving_cache/driving_cache.py) — 三秒驾驶切片缓存：保存 Top1 词索引、标准化物理加速度残差、风险标志和专家辅助监督
 - [data/driving_cache/checks/driving_cache_checks.py](../data/driving_cache/checks/driving_cache_checks.py) — 驾驶缓存的路线与导航指令输入校验
+- [data/driving_cache/trajectory_risk.py](../data/driving_cache/trajectory_risk.py) — 根据场景障碍物、信号灯、车道线、道路边界和历史运动生成动作词风险标志
 - [data/trajectory_vocabulary/__init__.py](../data/trajectory_vocabulary/__init__.py) — 轨迹与速度词表模块公开 API
-- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 从 CARLA ego 运动学时间轴构造并聚类几何/速度词表
-- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 轨迹与速度词表生成命令行入口
+- [data/trajectory_vocabulary/trajectory_vocabulary.py](../data/trajectory_vocabulary/trajectory_vocabulary.py) — 从 CARLA ego 时间轴聚类几何与速度，并以最远轨迹采样生成局部二维加速度词表
+- [data/trajectory_vocabulary/run.py](../data/trajectory_vocabulary/run.py) — 几何、速度及局部二维加速度词表生成命令行入口
 
 ### data/carla_data_collector/ — Carla 合成数据采集（Py37 worker + Py312 collector 异构）
 
@@ -124,7 +126,7 @@ Py312 编排处理端 collector/（根 .venv 运行）
 - [model/trajectory_decoder/trajectory_decoder.py](../model/trajectory_decoder/trajectory_decoder.py) — 条件化多 Mode 规划解码器：以 8 个可学习 Token 输出 10Hz、4 秒轨迹
 - [model/driving_model/__init__.py](../model/driving_model/__init__.py) — 双帧三目+LiDAR 驾驶模型：融合几何图像、体素统计与刚性对齐历史 BEV 的公开 API 入口
 - [model/driving_model/driving_model.py](../model/driving_model/driving_model.py) — DrivingModel 统一别名重定向入口
-- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧单目时空 Token DrivingModel，包含视觉标注查询和轨迹标注查询，配合双流匹配解码器
+- [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧十二层块因果视觉主干及二维加速度词表残差解码器
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 重导出入口
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 单层纯 PyTorch Mamba-3：并行训练扫描与显式增量状态
 - [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — BEVSeg 分层离散压缩器公共 API
@@ -155,7 +157,7 @@ Py312 编排处理端 collector/（根 .venv 运行）
 - [train/privileged_bev_vae/__init__.py](../train/privileged_bev_vae/__init__.py) — 特权 BEV VAE 的训练与评估公开 API
 - [train/privileged_bev_vae/privileged_bev_vae.py](../train/privileged_bev_vae/privileged_bev_vae.py) — 特权 BEV VAE 的监督重建、KL 正则和 epoch 训练循环
 - [train/unified_driving/__init__.py](../train/unified_driving/__init__.py) — 新 DrivingModel 训练公共 API
-- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 标准化加速度/曲率流匹配损失与训练循环
+- [train/unified_driving/unified_driving.py](../train/unified_driving/unified_driving.py) — 词选择、标准化二维加速度残差、BEV 损失及训练循环
 
 ## clone_loop/ — 行为克隆闭环
 
@@ -243,8 +245,8 @@ Py37 仿真端 worker/
 - [vis/data_vis/viewer/__init__.py](../vis/data_vis/viewer/__init__.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图。公开 API 重导出入口
 - [vis/data_vis/viewer/viewer.py](../vis/data_vis/viewer/viewer.py) — OpenCV 交互窗口：帧滑条 + 键盘播放/单步/图层切换/截图
 - [vis/trajectory_vocab_vis/__init__.py](../vis/trajectory_vocab_vis/__init__.py) — 轨迹与速度词表静态可视化模块
-- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 绘制几何轨迹词表、速度词表和聚类评估图
-- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 轨迹词表 PNG 可视化命令行入口
+- [vis/trajectory_vocab_vis/trajectory_vocab_vis.py](../vis/trajectory_vocab_vis/trajectory_vocab_vis.py) — 按词表内容绘制分解词表或耦合动作词表
+- [vis/trajectory_vocab_vis/run.py](../vis/trajectory_vocab_vis/run.py) — 按指定路径自动可视化耦合或分解轨迹词表
 
 ### vis/pred_vis/ — 感知模型预测可视化（加载权重，渲染双头预测与 GT 对照）
 

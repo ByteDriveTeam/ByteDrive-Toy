@@ -81,10 +81,10 @@ ByteDrive-Toy 把以视觉为中心的自动驾驶研究流程组织为多阶段
    - **BEVSeg 栅格压缩器**：将 64 m × 64 m (256 × 256) HDMap、动态包围框和交通控制状态光栅化为驾驶相关语义栅格。384 维残差编码器、64 表分组离散码本与 ICNR PixelShuffle 解码器实现 16 倍空间压缩与有界缓存（参见 [Doc/BEVSeg.md](Doc/BEVSeg.md)）。
    - **连续隐空间 VAE**：4 阶段连续高斯隐空间特权 BEV VAE（参见 [Doc/PrivilegedBEVVAE.md](Doc/PrivilegedBEVVAE.md)）与全 BEV 64 倍空间压缩连续隐空间 VAE（将 256 × 256 压缩至 4 × 4 紧凑隐空间，参见 [Doc/BEVSegVAE64.md](Doc/BEVSegVAE64.md)），配备隐空间协方差、有效秩与高斯扰动测定工具。
 3. **驾驶学习**：
-   - **统一驾驶模型 (`UnifiedDrivingModel`)**：四帧单目前向时空 Token 主干，配备双 AdaLN-Zero 流匹配（Flow-Matching）解码器，联合预测连续 BEV 场与零连续 Signed-Log 度量空间的多模态轨迹，基于 3 秒驾驶切片缓存训练。
-   - **双帧多模态基线 (`DrivingModel`)**：经典双帧三相机 (`front/front_left/front_right`) 驾驶模型，复用感知 Token，通过视锥与纯 BEV xyz 几何将图像特征投射至前向 BEV 并与刚性对齐的上一帧 BEV 融合，预测连续 BEV 场、车道矢量、8 模态未来轨迹与行为标签。
+   - **统一驾驶模型 (`UnifiedDrivingModel`)**：四帧十二层块因果视觉主干、512 词局部二维加速度解码器和 BEV 流解码器；词选择与标准化加速度残差终点联合训练，详见 [模型规范](Doc/UnifiedDrivingModel.md)。
+   - **模型入口**：`DrivingModel` 是上述 `UnifiedDrivingModel` 的别名；此前的双帧三相机接口并非当前入口的数据契约。
 4. **轨迹词表与 3D 场景重建**：流式空间轨迹与连续速度词表无监督聚类；离线语义 LiDAR 多帧融合、静态/动态分离、截断无符号距离场 (TUDF) 与可选 Poisson 表面重建。
-5. **闭环仿真与评测**：接入 CARLA 0.9.15 同步仿真，形成“观测 → 多帧推理 → 候选轨迹安全重排 → 纯追踪/PID 控制 → 下一观测”的执行闭环，按路线记录终态、进度与诊断录像。
+5. **闭环仿真与评测**：现有 `clone_loop/` 仍使用此前的双帧模型输入输出契约；评测统一驾驶模型前需要适配观测、输出和检查点。
 
 项目核心特点如下：
 
@@ -1180,6 +1180,8 @@ ByteDrive-Toy 提供统一训练入口 (`python -m train.run --task <task>`)，�
 python -m train.run --task perception
 
 # 2. 统一四帧单目前向 BEV 场与轨迹流匹配驾驶模型
+python -m data.trajectory_vocabulary.run --actions
+# 用 data.driving_cache.prepare_driving_cache(samples, cfg) 生成 v10 驾驶切片缓存。
 python -m train.run --task driving
 
 # 3. BEVSeg 64 表分组离散码本压缩器（支持预热并固化栅格缓存）
@@ -1198,7 +1200,7 @@ python -m train.run --task bevseg_vae64
 | 任务名 (`--task`) | 模型与架构 | 损失函数 / 优化目标 | 输入数据与缓存 |
 | --- | --- | --- | --- |
 | `perception` | `PerceptionModel`: 冻结 DINOv3 + 3 层 Trunk + PixelShuffle 输出头 | 29 类交叉熵、Symlog 米制深度、空间深度梯度、深度量程二分类 | 单帧前视 RGB |
-| `driving` | `UnifiedDrivingModel`: 4 帧单目前向时空 Token 主干 + 双 AdaLN-Zero 流匹配解码器 | Signed-Log 轨迹速度匹配 + 多帧连续 BEV 场流匹配 | 4 帧单目前向 RGB；3 秒 Signed-Log 连续切片缓存 (`data/driving_cache`) |
+| `driving` | `UnifiedDrivingModel`: 12 层块因果视觉主干 + 512 词二维加速度解码器 + BEV 流解码器 | 单热词选择、标准化加速度残差终点与 BEV 流匹配 | 4 帧前视 RGB；3 秒动作及风险切片缓存 (`data/driving_cache`) |
 | `bevseg` | `BEVSegCompressor`: 384 维残差编码器 + 64 表分组离散码本 + ICNR PixelShuffle 解码器 | 语义重建加权交叉熵、道路线余弦损失、码本熵正则化 | 单帧 64m×64m BEVSeg 栅格；无损 NumPy 缓存 (`data/bevseg_cache`) |
 | `privileged_bev_vae` | `PrivilegedBEVVAE`: 4 阶段连续高斯隐空间编码-解码器 | 语义与车道重建损失 + KL 散度正则化，周期性隐空间噪声/秩测定 | 单帧 64m×64m BEVSeg 栅格 |
 | `bevseg_vae64` | `BEVSegVAE64`: 64 通道 4×4 连续隐空间 VAE (64倍空间压缩) | 共享 BEVSeg 重建损失 + KL 散度正则化 | 单帧 64m×64m BEVSeg 栅格 |
@@ -1810,8 +1812,13 @@ python -m tools.privileged_bev_vae_noise.run --checkpoint train/ckpt/privileged_
 # 从数据集流式抽取航点轨迹并聚类离散速度与空间词表
 python -m data.trajectory_vocabulary.run --dataset-dir data/carla_data_collector/dataset
 
-# 渲染轨迹与速度词表静态图及交互 HTML
-python -m vis.trajectory_vocab_vis.run --vocab-dir data/trajectory_vocabulary/output
+# 默认读取配置目录；同时有两类词表时优先显示耦合动作词表
+# 耦合表的轨迹图使用各词的源初速与源轨迹，不假设车辆从静止起步
+python -m vis.trajectory_vocab_vis.run
+
+# 指定词表文件可选择耦合表或分解表；也可用 --vocab-dir 指定目录
+python -m vis.trajectory_vocab_vis.run --vocab-path data/carla_data_collector/dataset/vocabulary/trajectory_action_vocab.npz
+python -m vis.trajectory_vocab_vis.run --vocab-path data/carla_data_collector/dataset/vocabulary/trajectory_geometry_vocab.npy
 ```
 
 ### 重建结果可视化

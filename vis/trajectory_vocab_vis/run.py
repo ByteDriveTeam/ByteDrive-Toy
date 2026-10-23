@@ -1,4 +1,4 @@
-"""轨迹词表 PNG 可视化命令行入口。
+"""按指定路径自动可视化耦合或分解轨迹词表。
 
 模块: vis/trajectory_vocab_vis/run.py
 依赖: argparse, config, vis.trajectory_vocab_vis
@@ -9,16 +9,24 @@
 import argparse
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from config import load_config
 from vis.trajectory_vocab_vis.trajectory_vocab_vis import render_vocabulary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="可视化轨迹与速度词表")
-    parser.add_argument("--config", default=None); parser.add_argument("--env", default=None)
-    args = parser.parse_args(); cfg = load_config(args.config, args.env).trajectory_vocabulary
-    for path in render_vocabulary(cfg): print("[vis]", path)
+    """解析词表位置并打印生成的图像路径。"""
+    parser = argparse.ArgumentParser(description="自动可视化耦合动作或分解轨迹词表")
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--env", default=None)
+    parser.add_argument("--vocab-path", "--vocab-dir", dest="vocab_path", default=None,
+                        help="词表 NPZ/NPY 文件或目录；默认读取配置中的 output_dir")
+    args = parser.parse_args()
+    cfg = load_config(args.config, args.env).trajectory_vocabulary
+    for path in render_vocabulary(cfg, args.vocab_path):
+        print("[vis]", path)
 
 
 if __name__ == "__main__":

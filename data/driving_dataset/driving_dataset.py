@@ -82,7 +82,7 @@ class DrivingDataset(SingleFrameSceneBase):
         drv_data = cfg.data.driving
         super().__init__(drv_data.scene_root, drv_data.cameras[0],
                          cfg.data.dataset.dino_mean, cfg.data.dataset.dino_std,
-                         cfg.data.scene_cache_size)
+                         cfg.data.scene_cache_size, successful_only=True)
         self._cfg_data = drv_data
         self._cameras = tuple(drv_data.cameras)
         bev = cfg.model.driving.bev

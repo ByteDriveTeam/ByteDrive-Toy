@@ -80,11 +80,18 @@ class BehaviorAgentCfg:
     comfort_decel_mps2: float
     max_accel_mps2: float
     max_jerk_mps3: float
+    longitudinal_horizon_s: float
+    longitudinal_step_s: float
+    longitudinal_preview_s: float
     route_plan_horizon_m: float
+    risk_lateral_margin_m: float
+    front_min_gap_m: float
+    front_confidence_z: float
+    front_lookahead_s: float
+    front_emergency_decel_mps2: float
     risk_slow_threshold: float
     risk_yield_threshold: float
     risk_stop_threshold: float
-    lane_change_cooldown_s: float
     creep_speed_mps: float
     stop_line_margin_m: float
     corner_lateral_accel_mps2: float
@@ -726,6 +733,16 @@ class FeatureTrunkCfg:
 class UnifiedDrivingCfg:
     """新四帧单目时空模型的结构参数。"""
     dim: int
+    visual_layers: int
+    action_vocab_size: int
+    action_fourier_bands: int
+    action_attention_rank: int
+    residual_ffn_blocks: int
+    trajectory_sample_steps: int
+    nearest_weight_floor: float
+    nearest_decay_s: float
+    risk_negative_weight: float
+    risk_jerk_limit_mps3: float
     ffn_hidden: int
     condition_hidden: int
     geometry_hidden: int
@@ -1112,6 +1129,12 @@ class TrajectoryVocabularyCfg:
     output_dir: str
     geometry_size: object
     speed_size: object
+    action_size: int
+    action_horizon_s: float
+    action_hz: float
+    action_output: str
+    action_candidate_max_accel_mps2: float
+    action_candidate_max_jerk_mps3: float
     geometry_horizon_m: float
     geometry_interval_m: float
     speed_horizon_s: float
@@ -1255,7 +1278,14 @@ def validate_config(cfg):
     assert ba.prediction_max_stale_s > 0 and ba.reaction_time_s >= 0
     assert ba.prediction_max_actors > 0
     assert ba.comfort_decel_mps2 > 0 and ba.max_accel_mps2 > 0 and ba.max_jerk_mps3 > 0
-    assert ba.route_plan_horizon_m > 0 and ba.lane_change_cooldown_s >= 0
+    assert ba.route_plan_horizon_m > 0
+    assert ba.risk_lateral_margin_m >= 0
+    assert ba.front_min_gap_m >= 0 and ba.front_confidence_z >= 0
+    assert 0 < ba.front_lookahead_s <= ba.prediction_horizon_s
+    assert ba.front_emergency_decel_mps2 >= ba.comfort_decel_mps2
+    assert ba.longitudinal_horizon_s >= 1.0
+    assert 0 < ba.longitudinal_step_s <= ba.longitudinal_preview_s
+    assert ba.longitudinal_preview_s <= ba.longitudinal_horizon_s
     assert ba.creep_speed_mps > 0 and ba.stop_line_margin_m > 0
     assert ba.corner_lateral_accel_mps2 > 0 and ba.corner_preview_m > 0
     assert ba.turn_alignment_speed_mps > 0 and ba.lane_centering_speed_mps > 0
@@ -1340,12 +1370,24 @@ def validate_config(cfg):
         cfg.clone_loop, cfg.model, cfg.data, cc.cameras, cc.lidar,
         cc.simulation, cc.collection)
     _validate_trajectory_vocabulary(cfg.trajectory_vocabulary)
+    assert cfg.trajectory_vocabulary.action_size == cfg.model.unified_driving.action_vocab_size, \
+        "动作词表大小必须与驾驶模型一致"
+    assert round(cfg.trajectory_vocabulary.action_horizon_s * cfg.trajectory_vocabulary.action_hz) \
+        == cfg.model.unified_driving.num_waypoints, "动作词表时间窗必须与轨迹航点数一致"
+    assert abs(cfg.trajectory_vocabulary.action_hz * cfg.model.unified_driving.waypoint_dt_s - 1) < 1e-6, \
+        "动作词表采样率必须与轨迹采样间隔一致"
 
 
 def _validate_trajectory_vocabulary(v):
     """校验对象: cfg.trajectory_vocabulary —— 词表窗口、算法与规模。"""
     assert v.geometry_horizon_m > 0 and v.geometry_interval_m > 0
     assert v.speed_horizon_s > 0 and v.speed_hz > 0
+    assert v.action_size > 0 and v.action_horizon_s > 0 and v.action_hz > 0
+    assert v.action_output, "trajectory_vocabulary.action_output 不能为空"
+    assert v.action_candidate_max_accel_mps2 > 0 and v.action_candidate_max_jerk_mps3 > 0, \
+        "动作词候选最大加速度与加加速度必须为正"
+    assert v.action_candidate_max_accel_mps2 > 0 and v.action_candidate_max_jerk_mps3 > 0, \
+        "动作词候选最大加速度与加加速度必须为正"
     assert v.motion_resample_s > 0 and v.window_stride_s > 0
     assert v.max_motion_step_m > 0 and 0 < v.max_geometry_heading_change_deg <= 180
     assert v.spline_smoothing >= 0 and v.spline_dense_step_m > 0 and v.spline_fit_extra_m >= 0
@@ -1796,6 +1838,13 @@ def _validate_model(model):
 def _validate_unified_driving(spec):
     """校验对象: cfg.model.unified_driving —— 新模型的固定结构约束。"""
     assert spec.dim == 384, "model.unified_driving.dim 必须为 384"
+    assert spec.visual_layers == 12, "视觉主干必须为 12 层"
+    assert spec.action_vocab_size > 0 and spec.action_fourier_bands > 0
+    assert 0 < spec.action_attention_rank <= spec.action_vocab_size
+    assert 2 <= spec.residual_ffn_blocks <= 4
+    assert spec.trajectory_sample_steps > 0
+    assert 0 < spec.nearest_weight_floor < 1 and spec.nearest_decay_s > 0
+    assert spec.risk_negative_weight >= 1 and spec.risk_jerk_limit_mps3 > 0
     assert spec.ffn_hidden == 1536, "model.unified_driving.ffn_hidden 必须为 1536"
     assert spec.self_heads_2d == 6 and spec.dim % spec.self_heads_2d == 0, \
         "2D RoPE 注意力必须使用 6 头"

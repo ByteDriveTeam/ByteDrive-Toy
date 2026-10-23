@@ -143,6 +143,18 @@ data/carla_data_collector/
 
 BehaviorAgent 的 `expert` 快照记录状态、决策原因、目标速度和加速度、风险预测、规划路线及实际控制。v8 驾驶缓存只提取用于辅助训练的标注，不恢复旧场景数据。
 
+风险走廊使用主车包围盒半宽和 `risk_lateral_margin_m`（默认 0.35 米）。预测中心始终在走廊外的侧方车辆会降低路径风险，避免相邻车道稳定并行时仅因预测不确定性而减速；预测驶入走廊的车辆仍保留完整风险。行人风险不变。
+
+对于主车路线内的前车，智能体依据当前车身净距、短时贝叶斯位置分布、反应时间和配置的减速度计算纵向安全速度上限。对于预测横穿路线的车辆，还会比较其预测占用时间与主车通过交叉点的时间，并将速度限制在可提前停车的范围内。物理前后位置校验会排除预测轨迹靠近弯曲路线的后车；横穿预测还要求车辆均值向路线靠近，避免并行车辆触发紧急制动。这使减速能早于三秒重叠风险阈值。`front_min_gap_m`、`front_confidence_z`、`front_lookahead_s` 和 `front_emergency_decel_mps2` 控制安全范围，复用现有的状态和原因标注。
+
+正常纵向控制规划三秒速度轨迹，同时考虑当前交通速度上限，以及沿原导航路线的红灯、静止前车、横穿车辆和弯道约束。规划器比较受加加速度约束的加速度意图，再限制发送给局部控制器的预瞄目标速度变化率；即时碰撞检查仍有最高优先级。`longitudinal_horizon_s`、`longitudinal_step_s`、`longitudinal_preview_s` 分别配置规划时域、最大时间网格和控制预瞄。`expert.longitudinal_plan` 保存选中轨迹的速度、加速度、路线进度、速度上限采样、距离/速度约束、预瞄速度和实际下发目标；它是原始决策记录，不是新增行为标签或辅助训练目标。
+
+附近没有行人时，行人避让检查直接返回，避免基础障碍物检测器把空行人列表解释为“检查所有车辆”。
+
+原始导航路线始终是唯一的驾驶路线。后车不会触发自动换道或追加路线；只有原始导航明确给出换道指令时，才使用 `LANE_CHANGE` 状态和 `lane_change_safe` 原因。原有 `lane_change.cooldown_s` 原始字段保留并写为零，以维持读取兼容性。
+
+主车速度低于 0.5 m/s、在前车后保持停车时，状态仍为 `STOPPING`，原因记为现有的 `follow_vehicle`。仍在行驶并需要立即制动时使用 `emergency_stop`；制动控制不受这项标签调整影响。
+
 该快照还记录弯道限速、车道居中和行人横穿风险。专家风险属于策略推断，`ego` 与 `bboxes` 才是仿真真值。
 
 有效状态编号为 0 `CRUISE`、1 `FOLLOW`、2 `YIELD`、3 `STOPPING`、4 `LANE_CHANGE`、5 `APPROACH_STOP`、6 `CREEP`。有效原因编号为 0 `cruise`、1 `follow_vehicle`、2 `predicted_conflict`、3 `pedestrian_risk`、4 `red_light`、5 `yellow_light`、6 `comfortable_braking`、7 `lane_change_safe`、8 `emergency_stop`、9 `red_light_approach`、10 `yellow_light_approach`、11 `red_light_creep`、12 `curve_speed`、13 `lane_centering`。

@@ -55,13 +55,12 @@ ByteDrive-Toy organizes the vision-centric driving research pipeline into multip
    - **BEVSeg compressor.** Renders 64 m × 64 m (256 × 256) HDMap, dynamic bounding boxes, and traffic-control states into driving-relevant semantic rasters. A 384-dimensional residual encoder, 64-table grouped discrete codebook, and ICNR PixelShuffle decoder achieve 16x spatial compression with bounded caching ([Doc/BEVSeg.md](Doc/BEVSeg.md)).
    - **Continuous latent VAEs.** A 4-stage continuous Gaussian latent privileged BEV VAE ([Doc/PrivilegedBEVVAE.md](Doc/PrivilegedBEVVAE.md)) and a full-BEV 64x continuous-latent VAE compressing 256 × 256 rasters into a compact 4 × 4 latent ([Doc/BEVSegVAE64.md](Doc/BEVSegVAE64.md)), with latent noise, covariance, and effective-rank measurement tools.
 3. **Driving learning.**
-   - **Unified driving model (`UnifiedDrivingModel`).** Four-frame monocular forward spatio-temporal token backbone with dual AdaLN-Zero flow-matching decoders for continuous BEV fields and multimodal trajectories in zero-continuous Signed-Log metric space, trained using 3-second driving slice caches.
-   - **Two-frame multimodal baseline (`DrivingModel`).** Reuses the perception visual trunk to aggregate three camera frustums, LiDAR voxel statistics, and a rigidly aligned previous-frame BEV into forward spatial fields, lane geometry, traffic control, eight trajectory modes, and behavior labels.
+   - **Unified driving model (`DrivingModel` / `UnifiedDrivingModel`).** Four-frame monocular input, 12-layer block-causal visual processing, 512 local planar acceleration words, standardized residual endpoint matching, and a separate continuous BEV flow decoder ([model contract](Doc/UnifiedDrivingModel.md)).
 4. **Trajectory vocabulary and 3D reconstruction.**
    - Streaming CARLA ego kinematics extraction, 0.5 s resampled feature computation, and K-Means clustering into geometric and velocity vocabularies with static visualization.
    - Multi-frame semantic LiDAR fusion, static/dynamic object separation, and sparse TUDF / optional watertight Poisson mesh generation.
 5. **Closed-loop simulation evaluation.**
-   - Synchronous CARLA 0.9.15 closed-loop runner (`clone_loop/`) connecting `DrivingModel` to online simulation with dual-frame inference, safety reranking, pure-pursuit / speed PID control, episode metrics, and composite diagnostic video recording.
+   - The existing synchronous CARLA 0.9.15 runner (`clone_loop/`) retains its earlier two-frame model input contract; it needs an input/output adapter and a compatible checkpoint before it can evaluate the unified model.
 
 | Capability | Current implementation |
 | --- | --- |
@@ -286,6 +285,8 @@ ByteDrive-Toy provides a unified training CLI (`python -m train.run --task <task
 python -m train.run --task perception
 
 # 2. Unified 4-frame monocular BEV & trajectory flow-matching driving
+python -m data.trajectory_vocabulary.run --actions
+# Prepare the v10 driving slice cache with data.driving_cache.prepare_driving_cache(samples, cfg).
 python -m train.run --task driving
 
 # 3. BEVSeg 64-table grouped discrete codebook compressor (with optional cache warmup)
@@ -304,7 +305,7 @@ python -m train.run --task bevseg_vae64
 | Task (`--task`) | Model & Architecture | Loss / Objective | Input Data & Cache |
 | --- | --- | --- | --- |
 | `perception` | `PerceptionModel`: frozen DINOv3 + 3-layer trunk + PixelShuffle heads | 29-class CE, symlog metric depth, spatial depth gradient, depth-range BCE | Single-frame RGB (front camera) |
-| `driving` | `UnifiedDrivingModel`: 4-frame spatio-temporal trunk + dual AdaLN-Zero flow matching | Signed-Log trajectory velocity matching & multi-frame continuous BEV flow matching | 4-frame forward monocular RGB; 3-second Signed-Log slice cache (`data/driving_cache`) |
+| `driving` | `UnifiedDrivingModel`: 12-layer block-causal visual trunk, 512-word planar acceleration decoder, and BEV flow decoder | One-hot word selection, standardized planar acceleration residual endpoint matching, and BEV flow matching | 4-frame forward monocular RGB; 3-second action/risk slice cache (`data/driving_cache`) |
 | `bevseg` | `BEVSegCompressor`: 384-dim residual encoder, 64-codebook tables, ICNR decoder | Weighted semantic reconstruction, lane direction cosine loss, codebook entropy regularization | Single-frame 64m×64m BEVSeg rasters; lossless NumPy cache (`data/bevseg_cache`) |
 | `privileged_bev_vae` | `PrivilegedBEVVAE`: 4-stage continuous Gaussian latent encoder-decoder | Semantic reconstruction loss + KL divergence with periodic noise/rank measurement | Single-frame 64m×64m BEVSeg rasters |
 | `bevseg_vae64` | `BEVSegVAE64`: 64-channel 4×4 continuous latent VAE (64x spatial compression) | Shared BEVSeg reconstruction loss + KL divergence regularization | Single-frame 64m×64m BEVSeg rasters |
@@ -552,14 +553,22 @@ python -m vis.privileged_bev_vae_vis.run --checkpoint train/ckpt/privileged_bev_
 python -m tools.privileged_bev_vae_noise.run --checkpoint train/ckpt/privileged_bev_vae/epoch_050.pt
 ```
 
-### Trajectory and velocity vocabulary
+### Trajectory, velocity, and driving action vocabulary
 
 ```powershell
 # Streaming extraction and K-Means clustering of CARLA ego kinematics
 python -m data.trajectory_vocabulary.run
 
-# Render static PNG plots of geometric trajectories and velocity profiles
+# Select 3-second local planar acceleration words by farthest trajectory sampling
+python -m data.trajectory_vocabulary.run --actions
+
+# Render the configured vocabulary (coupled action vocabulary takes priority when both exist)
+# Coupled trajectory plots use each word's source initial velocity and source trajectory.
 python -m vis.trajectory_vocab_vis.run
+
+# Select a specific coupled action artifact or a decomposed geometry/speed artifact
+python -m vis.trajectory_vocab_vis.run --vocab-path data/carla_data_collector/dataset/vocabulary/trajectory_action_vocab.npz
+python -m vis.trajectory_vocab_vis.run --vocab-path data/carla_data_collector/dataset/vocabulary/trajectory_geometry_vocab.npy
 ```
 
 ## Repository layout

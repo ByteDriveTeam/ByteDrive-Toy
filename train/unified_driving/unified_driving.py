@@ -1,4 +1,4 @@
-"""新 DrivingModel 的标准化控制量流匹配损失与训练循环。
+"""新 DrivingModel 的二维加速度词选择、残差流匹配与训练循环。
 
 模块: train/unified_driving/unified_driving.py
 依赖: torch, config.schema.Config, model.driving_model.UnifiedDrivingModel
@@ -6,7 +6,7 @@
 对外接口:
     - compute_flow_matching_losses(model, batch, cfg) -> (Tensor, dict)
     - train_unified_driving_epoch(model, loader, optimizer, cfg, device) -> dict
-说明: 轨迹噪声插值、速度场监督和损失始终处在加速度/曲率的 Z-Score 空间。
+说明: 残差噪声插值和终点监督处在二维加速度残差的 Z-Score 空间。
 """
 
 from __future__ import annotations
@@ -21,20 +21,17 @@ import torch.nn.functional as F
 __all__ = ["compute_flow_matching_losses", "train_unified_driving_epoch"]
 
 
-_TRAJECTORY_LAYER_WEIGHTS = (0.05, 0.10, 0.15, 0.15, 0.50, 1.00)
-
-
 def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
-    """计算 BEV 与轨迹联合流匹配损失。"""
+    """用缓存的 Top1 词及其标准化物理残差计算联合损失。"""
     device = batch["rgb"].device
     batch_size = int(batch["rgb"].shape[0])
     time_step = torch.rand(batch_size, device=device)
-    # trajectory 已是缓存阶段按训练集统计标准化的 [加速度, 曲率] 序列。
-    action_target = batch["trajectory"].float()
-    action_noise = torch.randn_like(action_target)
+    residual_target = batch["trajectory_residual"].float()
+    decoder = model.trajectory_decoder
+    nearest = batch["trajectory_word_index"].long()
+    action_noise = torch.randn_like(residual_target)
     action_state = (1.0 - time_step[:, None, None]) * action_noise \
-        + time_step[:, None, None] * action_target
-    action_flow = action_target - action_noise
+        + time_step[:, None, None] * residual_target
     if "bev_latent" not in batch and "bev_grid" in batch:
         batch = dict(batch)
         batch["bev_latent"] = model.encode_bev_targets(batch["bev_grid"])
@@ -50,26 +47,30 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
     outputs = model(
         batch["rgb"], batch["intrinsics"], batch["navigation_command"], batch["ego_state"],
         batch["motion_matrices"], time_step=time_step, traj_state=action_state,
-        bev_state=bev_state)
+        traj_anchor_index=nearest, bev_state=bev_state)
     components = {}
-    trajectory_losses = [
-        ((prediction.float() - action_flow).square()).mean()
-        for prediction in outputs["traj_flows"]
-    ]
-    components["trajectory"] = sum(weight * loss for weight, loss in zip(
-        _TRAJECTORY_LAYER_WEIGHTS, trajectory_losses))
+    # 终点 MSE 等价于对端点参数化条件流匹配施加 (1-t)^2 权重。
+    components["trajectory"] = (outputs["traj_residual"] - residual_target).square().mean()
+    targets = F.one_hot(nearest, decoder.actions.shape[0]).float()
+    if not all(name in batch for name in ("word_risks", "gt_risks")):
+        raise KeyError("新版驾驶缓存必须提供 word_risks 和 gt_risks")
+    extra_risk = (batch["word_risks"].bool()
+                  & ~batch["gt_risks"].bool()[:, None, :]).any(dim=-1)
+    weight = torch.where(extra_risk & (targets == 0),
+                         torch.full_like(targets, cfg.model.unified_driving.risk_negative_weight),
+                         torch.ones_like(targets))
+    components["selection"] = (F.binary_cross_entropy_with_logits(
+        outputs["traj_logits"].float(), targets, reduction="none") * weight).mean()
     annotation_losses = []
     if "annotation_valid" in batch:
         annotation_losses.append(_annotation_loss(outputs["visual_annotation"], batch))
-        if "traj_annotation" in outputs:
-            annotation_losses.append(_annotation_loss(outputs["traj_annotation"], batch))
     components["annotation"] = (sum(annotation_losses) / len(annotation_losses)
-                                 if annotation_losses else action_target.new_zeros(()))
+                                 if annotation_losses else residual_target.new_zeros(()))
     if "bev_latent" in batch:
         components["bev"] = (outputs["bev_flow"].float() - bev_velocity).square().mean()
     else:
-        components["bev"] = action_target.new_zeros(())
-    total = components["trajectory"] + components["bev"] \
+        components["bev"] = residual_target.new_zeros(())
+    total = components["trajectory"] + components["selection"] + components["bev"] \
         + cfg.model.unified_driving.annotation_loss_weight * components["annotation"]
     components["total"] = total
     return total, components

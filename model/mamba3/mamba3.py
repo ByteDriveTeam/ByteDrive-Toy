@@ -196,9 +196,20 @@ class Mamba3(nn.Module):
     def step(self, x: torch.Tensor, state: Mamba3State):
         """执行一个 token 的递推，返回输出和下一状态。"""
         check_mamba3_step_inputs(x, state, self)
-        valid = torch.ones(x.shape[0], 1, device=x.device, dtype=torch.bool)
-        output, next_state = self._scan(x.unsqueeze(1), valid, state)
-        return output[:, 0], next_state
+        z, value, b, c, dt, a, trap, angle = self._project(x.unsqueeze(1))
+        alpha = torch.exp(a * dt).float()
+        beta = (1.0 - trap) * dt * alpha
+        gamma = trap * dt
+        phase = state.angle.unsqueeze(1) + angle * dt.unsqueeze(-1)
+        b = self._rotate(b, phase)
+        c = self._rotate(c, phase)
+        current = self._outer_sum(value, b)
+        previous = self._outer_sum(state.prev_x.unsqueeze(1), state.prev_b.unsqueeze(1))
+        source = beta.unsqueeze(-1).unsqueeze(-1) * previous
+        source = source + gamma.unsqueeze(-1).unsqueeze(-1) * current
+        ssm = alpha[:, 0, :, None, None] * state.ssm.float() + source[:, 0]
+        output = self._decode(ssm.unsqueeze(1), c, value, z)[:, 0]
+        return output, Mamba3State(phase[:, 0], ssm, b[:, 0], value[:, 0])
 
     def _project(self, x: torch.Tensor):
         z, value, b_raw, c_raw, raw_dt, raw_a, raw_trap, angle = torch.split(
@@ -255,8 +266,19 @@ class Mamba3(nn.Module):
             b = self._rotate(b, phase)
             c = self._rotate(c, phase)
             current_x = value
-            previous_x_seq = torch.cat((previous_x.unsqueeze(1), value[:, :-1]), dim=1)
-            previous_b_seq = torch.cat((previous_b.unsqueeze(1), b[:, :-1]), dim=1)
+            # 空洞 mask 不能把无效 token 当成下一有效 token 的前驱。
+            valid_positions = torch.where(
+                chunk_valid, torch.arange(1, end - start + 1, device=x.device).unsqueeze(0), 0)
+            predecessor = torch.cummax(
+                torch.cat((torch.zeros(batch_size, 1, device=x.device, dtype=torch.long),
+                           valid_positions[:, :-1]), dim=1), dim=1).values
+            x_history = torch.cat((previous_x.unsqueeze(1), value), dim=1)
+            b_history = torch.cat((previous_b.unsqueeze(1), b), dim=1)
+            previous_x_seq = x_history.gather(
+                1, predecessor[:, :, None, None].expand(-1, -1, self.nheads, self.headdim))
+            previous_b_seq = b_history.gather(
+                1, predecessor[:, :, None, None, None].expand(
+                    -1, -1, self.mimo_rank, self.nheads, self.d_state))
             current_source = self._outer_sum(current_x, b)
             previous_source = self._outer_sum(previous_x_seq, previous_b_seq)
             source = beta.unsqueeze(-1).unsqueeze(-1) * previous_source
@@ -265,10 +287,12 @@ class Mamba3(nn.Module):
             chunk = self._decode(states, c, current_x, z)
             chunk = chunk * chunk_valid.unsqueeze(-1).to(chunk.dtype)
             outputs.append(chunk)
-            last_valid = chunk_valid[:, -1].view(batch_size, 1, 1, 1)
-            previous_b = torch.where(last_valid, b[:, -1], previous_b)
-            previous_x = torch.where(
-                chunk_valid[:, -1].view(batch_size, 1, 1), value[:, -1], previous_x)
+            latest = torch.cummax(valid_positions, dim=1).values[:, -1]
+            previous_b = b_history.gather(
+                1, latest[:, None, None, None, None].expand(
+                    -1, 1, self.mimo_rank, self.nheads, self.d_state))[:, 0]
+            previous_x = x_history.gather(
+                1, latest[:, None, None, None].expand(-1, 1, self.nheads, self.headdim))[:, 0]
             phase_start = phase[:, -1]
         result = torch.cat(outputs, dim=1)
         final_state = Mamba3State(phase_start, h, previous_b, previous_x)

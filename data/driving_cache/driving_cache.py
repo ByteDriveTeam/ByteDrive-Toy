@@ -1,7 +1,7 @@
 """驾驶训练切片缓存。
 模块: data/driving_cache/driving_cache.py
-读取配置: data.driving_cache.*、model.unified_driving.annotation_*、model.unified_driving.navigation_commands
-说明: 每个三秒切片保存四帧输入、标准化单轮车动作、导航指令和带掩码的专家辅助标注；BEV latent 在线生成。
+读取配置: data.driving_cache.*、trajectory_vocabulary.output_dir/action_output、model.unified_driving.waypoint_dt_s/nearest_weight_floor/nearest_decay_s/annotation_*/navigation_commands
+说明: 每个三秒切片只保存 Top1 词索引及其标准化二维加速度残差目标；BEV latent 在线生成。
 对外接口: DrivingSliceCache、DrivingSliceDataset、pack_driving_sample、prepare_driving_cache。
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import tempfile
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -20,17 +21,15 @@ from data.carla_data_collector.common.navigation_command import (
     navigation_command_from_route as _route_command,
 )
 from data.driving_cache.checks.driving_cache_checks import check_navigation_route
-from data.single_frame_base import resolve_repo_path
+from data.driving_cache.trajectory_risk import SceneTrajectoryRisk
+from data.single_frame_base import resolve_repo_path, successful_scene_meta
+from model.driving_model import nearest_planar_action_words
 from model.driving_model.unified_driving_model import signed_log
 
 
-__all__ = ["DrivingSliceCache", "DrivingSliceDataset", "trajectory_to_unicycle_actions",
+__all__ = ["DrivingSliceCache", "DrivingSliceDataset", "trajectory_to_planar_accelerations",
            "standardize_actions", "unstandardize_actions", "pack_driving_sample",
            "navigation_command_from_route", "slice_driving_samples", "prepare_driving_cache"]
-
-
-_ACTION_DT_S = 0.1
-_ACTION_EPS = 1e-3
 
 
 class DrivingSliceCache:
@@ -45,15 +44,21 @@ class DrivingSliceCache:
 
     @staticmethod
     def _namespace(version, cfg):
+        artifact = resolve_repo_path(
+            str(Path(cfg.trajectory_vocabulary.output_dir) / cfg.trajectory_vocabulary.action_output))
+        artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()[:16] if artifact.is_file() else None
         payload = {"version": version, "slice_duration_s": float(cfg.data.driving_cache.slice_duration_s),
-                   "trajectory_target": "standardized_unicycle_accel_curvature_v1",
+                   "trajectory_target": "top1_cartesian_word_and_standardized_physical_residual_v1",
+                   "action_vocabulary": cfg.trajectory_vocabulary.action_output,
+                   "action_vocabulary_hash": artifact_hash,
+                   "action_vocabulary_size": cfg.model.unified_driving.action_vocab_size,
                    "navigation_commands": cfg.model.unified_driving.navigation_commands,
                    "navigation_lookahead_m": cfg.data.driving_cache.navigation_lookahead_m,
                    "navigation_turn_threshold_deg": cfg.data.driving_cache.navigation_turn_threshold_deg,
                    "navigation_lane_match_radius_m": cfg.data.driving_cache.navigation_lane_match_radius_m,
                    "navigation_heading_tolerance_deg": cfg.data.driving_cache.navigation_heading_tolerance_deg,
                    "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
-                   "annotation_schema_version": 5,
+                   "annotation_schema_version": 6,
                    "risk_targets": "masked_conflict_and_lane_availability",
                    "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -73,9 +78,9 @@ class DrivingSliceCache:
             return None
         return value if isinstance(value, dict) else None
 
-    def store(self, key, sample, action_mean=None, action_std=None):
+    def store(self, key, sample, words, residual_mean, residual_std):
         path = self._file(key)
-        packed = pack_driving_sample(sample, action_mean, action_std, self.cfg)
+        packed = pack_driving_sample(sample, words, residual_mean, residual_std, self.cfg)
         fd, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".pt", dir=str(self.path))
         os.close(fd)
         try:
@@ -96,11 +101,7 @@ class DrivingSliceDataset(Dataset):
 
     def __init__(self, cfg):
         self.cache = DrivingSliceCache(cfg)
-        stats_path = self.cache.path / "action_stats.pt"
-        self.action_stats = torch.load(stats_path, map_location="cpu", weights_only=True) \
-            if stats_path.is_file() else None
         self.files = sorted(self.cache.path.glob("*.pt"))
-        self.files = [path for path in self.files if path.name != "action_stats.pt"]
         if not self.files:
             raise FileNotFoundError("驾驶训练缓存为空: {}".format(self.cache.path))
 
@@ -114,8 +115,8 @@ class DrivingSliceDataset(Dataset):
         return sample
 
 
-def trajectory_to_unicycle_actions(trajectory, ego_state=None, dt_s: float = _ACTION_DT_S):
-    """从局部航点计算 [加速度, 曲率] 控制序列。"""
+def trajectory_to_planar_accelerations(trajectory, ego_state, dt_s: float):
+    """由局部航点和局部初始二维速度计算可精确重建航点的加速度。"""
     trajectory = torch.as_tensor(trajectory).float()
     if trajectory.ndim < 2 or trajectory.shape[-1] != 2:
         raise ValueError("trajectory 必须为 [...,30,2]")
@@ -123,19 +124,9 @@ def trajectory_to_unicycle_actions(trajectory, ego_state=None, dt_s: float = _AC
         raise ValueError("trajectory 必须包含 30 个航点")
     displacement = torch.cat((trajectory[..., :1, :], trajectory[..., 1:, :] - trajectory[..., :-1, :]), dim=-2)
     velocity = displacement / dt_s
-    speed = velocity.norm(dim=-1)
-    if ego_state is None:
-        initial_speed = speed[..., :1].detach().zero_()
-    else:
-        state = torch.as_tensor(ego_state).float()
-        initial_speed = state[..., :2].norm(dim=-1, keepdim=True)
-    acceleration = (speed - torch.cat((initial_speed, speed[..., :-1]), dim=-1)) / dt_s
-    heading = torch.atan2(velocity[..., 1], velocity[..., 0])
-    heading_delta = torch.atan2(
-        torch.sin(heading - torch.cat((heading[..., :1].detach().zero_(), heading[..., :-1]), dim=-1)),
-        torch.cos(heading - torch.cat((heading[..., :1].detach().zero_(), heading[..., :-1]), dim=-1)))
-    curvature = heading_delta / (speed.clamp_min(_ACTION_EPS) * dt_s)
-    return torch.stack((acceleration, curvature), dim=-1)
+    state = torch.as_tensor(ego_state).to(velocity)
+    first = state[..., None, :2]
+    return (velocity - torch.cat((first, velocity[..., :-1, :]), dim=-2)) / dt_s
 
 
 def standardize_actions(actions, mean, std):
@@ -146,7 +137,7 @@ def standardize_actions(actions, mean, std):
 
 
 def unstandardize_actions(actions, mean, std):
-    """恢复物理加速度和曲率，仅供推理后处理使用。"""
+    """恢复物理二维加速度，仅供推理后处理使用。"""
     mean = torch.as_tensor(mean, dtype=actions.dtype, device=actions.device)
     std = torch.as_tensor(std, dtype=actions.dtype, device=actions.device)
     return actions * std + mean
@@ -200,25 +191,23 @@ def _annotation_tensors(expert, spec):
     }
 
 
-def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
-    """打包训练必需字段，并把路线转成指令、航点转成标准化控制量。"""
+def pack_driving_sample(sample, words, residual_mean, residual_std, cfg):
+    """按当前物理速度选笛卡尔最近词，仅缓存该词的标准化物理加速度残差。"""
     required = ("rgb", "intrinsics", "ego_state", "motion_matrices",
-                "trajectory", "bev_grid", "timestamp", "scene", "index")
+                "trajectory", "bev_grid", "timestamp", "scene", "index",
+                "word_risks", "gt_risks")
     missing = [name for name in required if name not in sample]
     if missing:
         raise KeyError("驾驶缓存缺少字段: {}".format(", ".join(missing)))
     packed = {name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
               for name, value in sample.items() if name in required}
-    if cfg is not None:
-        packed.update(_annotation_tensors(_sample_expert(sample), cfg.model.unified_driving))
+    packed.update(_annotation_tensors(_sample_expert(sample), cfg.model.unified_driving))
     command = sample.get("navigation_command")
     if command is None:
         command = (sample.get("frame_meta") or {}).get("navigation_command")
     if command is None:
         raise KeyError("新驾驶缓存必须提供 navigation_command")
     if isinstance(command, str):
-        if cfg is None:
-            raise ValueError("字符串导航指令需要 cfg.model.unified_driving.navigation_commands")
         command = cfg.model.unified_driving.navigation_commands.index(command)
     command = int(command)
     if not 0 <= command < 5:
@@ -226,14 +215,20 @@ def pack_driving_sample(sample, action_mean=None, action_std=None, cfg=None):
     packed["navigation_command"] = torch.tensor(command, dtype=torch.long)
     raw_actions = sample.get("trajectory_actions")
     if raw_actions is None:
-        raw_actions = trajectory_to_unicycle_actions(
-            packed["trajectory"], packed["ego_state"], _ACTION_DT_S)
-    raw_actions = torch.as_tensor(raw_actions).float()
-    if action_mean is None:
-        action_mean = (0.0, 0.0)
-    if action_std is None:
-        action_std = (1.0, 1.0)
-    packed["trajectory"] = standardize_actions(raw_actions, action_mean, action_std)
+        raw_actions = trajectory_to_planar_accelerations(
+            packed["trajectory"], packed["ego_state"], cfg.model.unified_driving.waypoint_dt_s)
+    raw_actions = torch.as_tensor(raw_actions).float().cpu()
+    words = torch.as_tensor(words, dtype=torch.float32)
+    spec = cfg.model.unified_driving
+    nearest = nearest_planar_action_words(
+        torch.as_tensor(packed.pop("trajectory")).float()[None],
+        torch.as_tensor(packed["ego_state"]).float()[None, :2], words,
+        spec.waypoint_dt_s, spec.nearest_weight_floor, spec.nearest_decay_s)[0]
+    packed["trajectory_word_index"] = nearest.long()
+    packed["trajectory_residual"] = standardize_actions(
+        raw_actions - words[nearest], residual_mean, residual_std)
+    packed["word_risks"] = torch.as_tensor(packed["word_risks"], dtype=torch.bool)
+    packed["gt_risks"] = torch.as_tensor(packed["gt_risks"], dtype=torch.bool)
     packed["bev_grid"] = packed["bev_grid"].float()
     # 速度和加速度只在缓存阶段做 Signed-Log，训练及模型内不做逆变换。
     packed["ego_state"] = signed_log(packed["ego_state"].float())
@@ -260,31 +255,61 @@ def slice_driving_samples(samples, slice_duration_s: float = 3.0):
     return selected
 
 
-def _fit_action_stats(samples):
-    actions = [trajectory_to_unicycle_actions(sample["trajectory"], sample.get("ego_state"))
-               for sample in samples]
-    values = torch.cat([action.reshape(-1, 2) for action in actions], dim=0)
-    mean = values.mean(dim=0)
-    std = values.std(dim=0, unbiased=False).clamp_min(1e-3)
-    return mean, std
-
-
 def prepare_driving_cache(samples, cfg):
     """? 3 ???????????????"""
     cache = DrivingSliceCache(cfg)
     sliced = slice_driving_samples(samples, cfg.data.driving_cache.slice_duration_s)
     if not sliced:
         return {"namespace": cache.namespace, "path": str(cache.path), "samples": 0}
-    action_mean, action_std = _fit_action_stats(sliced)
-    stats_path = cache.path / "action_stats.pt"
-    torch.save({"mean": action_mean, "std": action_std}, stats_path)
-    written = 0
+    vocab_path = resolve_repo_path(
+        str(Path(cfg.trajectory_vocabulary.output_dir) / cfg.trajectory_vocabulary.action_output))
+    if not vocab_path.is_file():
+        raise FileNotFoundError("生成驾驶缓存前必须先生成动作词表: {}".format(vocab_path))
+    with np.load(vocab_path, allow_pickle=False) as artifact:
+        words = artifact["actions"].copy()
+        residual_mean = torch.from_numpy(artifact["residual_mean"].copy())
+        residual_std = torch.from_numpy(artifact["residual_std"].copy())
+    written, skipped = 0, 0
+    active_scene, active_reader = None, None
     try:
         for sample in sliced:
+            sample = dict(sample)
+            scene = Path(sample["scene"])
+            if not scene.is_dir():
+                scene = resolve_repo_path(str(Path(cfg.trajectory_vocabulary.scene_root) / scene))
+            try:
+                if scene != active_scene:
+                    if active_reader is not None:
+                        active_reader.close()
+                    active_reader = SceneTrajectoryRisk(scene, cfg)
+                    active_scene = scene
+                if not successful_scene_meta(active_reader.reader.meta):
+                    skipped += 1
+                    continue
+                frame = active_reader.frames[int(sample["index"])]
+                sample["trajectory"] = torch.from_numpy(active_reader.gt_trajectory(
+                    int(sample["index"]), cfg.model.unified_driving.num_waypoints))
+                yaw = math.radians(float(frame["ego"]["transform"][5]))
+                cosine, sine = math.cos(yaw), math.sin(yaw)
+                frame_ego = frame["ego"]
+                motion = torch.tensor((frame_ego["velocity"][:2],
+                                       frame_ego["acceleration"][:2]), dtype=torch.float32)
+                local_motion = torch.stack((cosine * motion[:, 0] + sine * motion[:, 1],
+                                            -sine * motion[:, 0] + cosine * motion[:, 1]), dim=-1)
+                sample["ego_state"] = local_motion.flatten()
+                sample["trajectory_actions"] = trajectory_to_planar_accelerations(
+                    sample["trajectory"], sample["ego_state"], cfg.model.unified_driving.waypoint_dt_s)
+                sample["word_risks"], sample["gt_risks"] = active_reader.evaluate(sample, words)
+            except (FileNotFoundError, KeyError, OSError, ValueError, IndexError):
+                skipped += 1
+                continue
             key = "{}:{}".format(sample["scene"], sample["index"])
-            cache.store(key, sample, action_mean, action_std)
+            cache.store(key, sample, words, residual_mean, residual_std)
             written += 1
     finally:
+        if active_reader is not None:
+            active_reader.close()
         cache.close()
     return {"namespace": cache.namespace, "path": str(cache.path), "samples": written,
-            "action_mean": action_mean.tolist(), "action_std": action_std.tolist()}
+            "skipped_missing_risk_gt": skipped,
+            "residual_mean": residual_mean.tolist(), "residual_std": residual_std.tolist()}
