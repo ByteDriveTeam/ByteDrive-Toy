@@ -166,11 +166,25 @@ class SceneReader:
         expert = self.expert_decision(i)
         return expert.get("route_plan") if expert else None
 
+    def recovery_command(self, i):
+        """Independent 0 none / 1 right / 2 left recovery instruction."""
+        frame = self.frame_meta(i)
+        if "recovery_command" in frame:
+            return int(frame["recovery_command"])
+        command = int(frame.get("navigation_command", 0))
+        if command in (5, 6):
+            return command - 4
+        return int(((frame.get("expert") or {}).get("navigation") or {}).get(
+            "recovery_command", 0))
+
     def navigation_command(self, i, cfg):
         """读取五类指令；旧场景先用 HDMap 识别变道，再由轨迹转角识别转弯。"""
         frame = self.frame_meta(i)
         if "navigation_command" in frame:
-            return int(frame["navigation_command"])
+            command = int(frame["navigation_command"])
+            if command in (5, 6):
+                return int(frame["raw_navigation_command"])
+            return command
         if self._navigation_track is None:
             states = self.kinematics()
             if not states:

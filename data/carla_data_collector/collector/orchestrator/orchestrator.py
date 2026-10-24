@@ -112,6 +112,9 @@ def _frame_payloads(arena, frames, cam_names, mods, lidar_on):
             metadata["relevant_traffic_control"] = fr["relevant_traffic_control"]
         if "navigation_command" in fr:
             metadata["navigation_command"] = int(fr["navigation_command"])
+        if "raw_navigation_command" in fr:
+            metadata["raw_navigation_command"] = int(fr["raw_navigation_command"])
+        metadata["recovery_command"] = int(fr.get("recovery_command", 0))
         if "expert" in fr:
             metadata["expert"] = fr["expert"]
         yield {"meta": metadata, "arrays": arrays}

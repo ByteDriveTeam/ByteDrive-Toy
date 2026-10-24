@@ -76,6 +76,18 @@ class BehaviorAgentCfg:
     prediction_measurement_noise: float
     prediction_max_stale_s: float
     prediction_max_actors: int
+    prediction_multi_intent_enabled: bool
+    prediction_intent_map_radius_m: float
+    prediction_intent_brake_mps2: float
+    prediction_intent_accelerate_mps2: float
+    prediction_intent_lane_change_s: float
+    obstacle_bypass_enabled: bool
+    obstacle_min_distance_m: float
+    obstacle_max_distance_m: float
+    obstacle_approach_m: float
+    obstacle_clear_m: float
+    route_recovery_m: float
+    route_recovery_trigger_m: float
     reaction_time_s: float
     comfort_decel_mps2: float
     max_accel_mps2: float
@@ -98,6 +110,8 @@ class BehaviorAgentCfg:
     corner_preview_m: float
     turn_alignment_speed_mps: float
     lane_centering_speed_mps: float
+    turn_alignment_threshold_deg: float
+    continuous_route_tracking: bool
     planner_base_min_distance_m: float
     planner_distance_ratio: float
 
@@ -756,6 +770,7 @@ class UnifiedDrivingCfg:
     rope_theta: float
     cache_slice_s: float
     navigation_commands: List[str]
+    recovery_commands: List[str]
     annotation_query_count: int
     annotation_state_classes: int
     annotation_reason_classes: int
@@ -1277,6 +1292,15 @@ def validate_config(cfg):
     assert ba.prediction_process_noise > 0 and ba.prediction_measurement_noise > 0
     assert ba.prediction_max_stale_s > 0 and ba.reaction_time_s >= 0
     assert ba.prediction_max_actors > 0
+    assert isinstance(ba.prediction_multi_intent_enabled, bool)
+    assert ba.prediction_intent_map_radius_m > 0
+    assert ba.prediction_intent_brake_mps2 > 0
+    assert ba.prediction_intent_accelerate_mps2 > 0
+    assert ba.prediction_intent_lane_change_s > 0
+    assert isinstance(ba.obstacle_bypass_enabled, bool)
+    assert 0 < ba.obstacle_min_distance_m < ba.obstacle_max_distance_m
+    assert ba.obstacle_approach_m > 0 and ba.obstacle_clear_m > 0
+    assert ba.route_recovery_m > 0 and ba.route_recovery_trigger_m > 0
     assert ba.comfort_decel_mps2 > 0 and ba.max_accel_mps2 > 0 and ba.max_jerk_mps3 > 0
     assert ba.route_plan_horizon_m > 0
     assert ba.risk_lateral_margin_m >= 0
@@ -1289,6 +1313,8 @@ def validate_config(cfg):
     assert ba.creep_speed_mps > 0 and ba.stop_line_margin_m > 0
     assert ba.corner_lateral_accel_mps2 > 0 and ba.corner_preview_m > 0
     assert ba.turn_alignment_speed_mps > 0 and ba.lane_centering_speed_mps > 0
+    assert 0 < ba.turn_alignment_threshold_deg < 90
+    assert isinstance(ba.continuous_route_tracking, bool)
     assert ba.planner_base_min_distance_m > 0 and ba.planner_distance_ratio >= 0
     assert 0 <= ba.risk_slow_threshold < ba.risk_yield_threshold < ba.risk_stop_threshold <= 1
     assert cc.ego.behavior in ("cautious", "normal", "aggressive"), \
@@ -1860,10 +1886,12 @@ def _validate_unified_driving(spec):
     assert spec.navigation_commands == ["straight", "left_turn", "right_turn",
                                         "right_lane_change", "left_lane_change"], \
         "model.unified_driving.navigation_commands 必须按固定五类顺序定义"
+    assert spec.recovery_commands == ["none", "recover_right", "recover_left"], \
+        "recovery_commands 必须按无恢复、向右恢复、向左恢复定义"
     assert spec.annotation_query_count == 3, \
         "model.unified_driving.annotation_query_count 必须为 3"
-    assert spec.annotation_state_classes == 7 and spec.annotation_reason_classes == 14, \
-        "model.unified_driving 的状态和原因类别数必须匹配采集器的 7/14 类"
+    assert spec.annotation_state_classes == 11 and spec.annotation_reason_classes == 18, \
+        "model.unified_driving 的状态和原因类别数必须匹配采集器的 11/18 类"
     assert spec.annotation_probability_dim == 3, \
         "model.unified_driving.annotation_probability_dim 必须为 3"
     assert math.isfinite(spec.annotation_loss_weight) and spec.annotation_loss_weight >= 0, \

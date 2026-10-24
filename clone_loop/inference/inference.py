@@ -39,6 +39,7 @@ from clone_loop.inference.checks.inference_checks import (
 )
 from data.lidar_voxelization import lidar_xyz_to_voxels
 from model.driving_model import DrivingModel
+from model.driving_model.checkpoint_compat import compatible_driving_state
 from vis.data_vis.geometry import transform_matrix
 
 
@@ -89,10 +90,7 @@ class ClosedLoopPolicy:
         saved = payload.get("model", payload)
         current = self._model.state_dict()
         expected = {name for name in current if "backbone." not in name}
-        compatible = {
-            name: value for name, value in saved.items()
-            if name in current and tuple(value.shape) == tuple(current[name].shape)
-        }
+        compatible, _ = compatible_driving_state(current, saved)
         coverage = len(expected.intersection(compatible)) / max(len(expected), 1)
         if coverage < self._inference_cfg.min_weight_coverage:
             raise RuntimeError(

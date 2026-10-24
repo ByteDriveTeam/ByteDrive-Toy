@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
+from agents.navigation.intent_prediction import (
+    infer_intent_probabilities, predict_intent_modes)
 
 
 @dataclass
@@ -21,6 +23,15 @@ class ActorPrediction:
     covariances: np.ndarray
     speed_mps: float
     extent_xy: tuple
+    modes: tuple = ()
+
+    def for_mode(self, mode):
+        """Return a legacy-shaped single hypothesis for risk calculations."""
+        return ActorPrediction(
+            actor_id=self.actor_id, actor_type=self.actor_type,
+            times=self.times, means=mode.means,
+            covariances=mode.covariances,
+            speed_mps=mode.speed_mps, extent_xy=self.extent_xy)
 
 
 class _Track:
@@ -36,6 +47,13 @@ class _Track:
         self.timestamp = None
         self.last_seen = None
         self.last_observed_position = None
+        self.last_observed_velocity = None
+        self.lane_context = None
+        self.intent_active = False
+        self.intent_probabilities = {}
+        self.motion_acceleration_mps2 = 0.0
+        self.lateral_speed_mps = 0.0
+        self.observation_count = 0
         self.initialized = False
 
     @staticmethod
@@ -66,7 +84,7 @@ class _Track:
         out[np.ix_([1, 3, 5], [1, 3, 5])] = block
         return out
 
-    def update(self, position, velocity, timestamp):
+    def update(self, position, velocity, timestamp, lane_context=None):
         position = np.asarray(position, dtype=np.float64)[:2]
         velocity = np.asarray(velocity, dtype=np.float64)[:2]
         timestamp = float(timestamp)
@@ -81,6 +99,12 @@ class _Track:
             self.timestamp = timestamp
             self.last_seen = timestamp
             self.last_observed_position = position.copy()
+            self.last_observed_velocity = velocity.copy()
+            self.lane_context = lane_context
+            self.intent_probabilities = {}
+            self.motion_acceleration_mps2 = 0.0
+            self.lateral_speed_mps = 0.0
+            self.observation_count = 1
             self.initialized = True
             return
 
@@ -93,6 +117,28 @@ class _Track:
             walk_speed = float(np.linalg.norm(velocity))
             if walk_speed > 4.5:
                 velocity *= 4.5 / walk_speed
+        if self.actor_type == "vehicle":
+            old_speed = float(np.linalg.norm(self.last_observed_velocity))
+            new_speed = float(np.linalg.norm(velocity))
+            acceleration = float(np.clip((new_speed - old_speed) / dt,
+                                         -5.0, 4.0))
+            self.motion_acceleration_mps2 = (
+                0.6 * self.motion_acceleration_mps2 + 0.4 * acceleration)
+            if lane_context is not None:
+                direction = np.asarray(lane_context["direction"], dtype=np.float64)
+                normal = np.asarray([-direction[1], direction[0]])
+                observed_lateral = float(np.clip(np.dot(
+                    position - self.last_observed_position, normal) / dt,
+                    -2.5, 2.5))
+                self.lateral_speed_mps = (
+                    0.5 * self.lateral_speed_mps + 0.5 * observed_lateral)
+            else:
+                self.lateral_speed_mps = 0.0
+            self.observation_count += 1
+            self.intent_probabilities = infer_intent_probabilities(
+                self.intent_probabilities, new_speed,
+                self.motion_acceleration_mps2, self.lateral_speed_mps,
+                lane_context, self.observation_count)
         z = np.concatenate((position, velocity))
         F = self._transition(dt)
         self.x = F.dot(self.x)
@@ -119,8 +165,12 @@ class _Track:
         self.timestamp = timestamp
         self.last_seen = timestamp
         self.last_observed_position = position.copy()
+        self.last_observed_velocity = velocity.copy()
+        self.lane_context = lane_context
 
-    def predict(self, horizon_s, step_s):
+    def predict(self, horizon_s, step_s, multi_intent_enabled=True,
+                brake_mps2=2.0, accelerate_mps2=1.2,
+                lane_change_s=3.0):
         horizon_s = float(max(horizon_s, 0.0))
         step_s = float(max(step_s, 1e-3))
         count = max(1, int(math.ceil(horizon_s / step_s)))
@@ -133,14 +183,29 @@ class _Track:
             cov = 0.5 * (cov + cov.T)
             cov[np.diag_indices(2)] = np.maximum(cov[np.diag_indices(2)], 1e-4)
             covariances.append(cov)
+        means = np.asarray(means, dtype=np.float32)
+        covariances = np.asarray(covariances, dtype=np.float32)
+        modes = ()
+        if multi_intent_enabled and self.actor_type == "vehicle":
+            probabilities = self.intent_probabilities or \
+                infer_intent_probabilities(
+                    {}, float(np.linalg.norm(self.x[2:4])), 0.0, 0.0,
+                    self.lane_context, self.observation_count)
+            modes = predict_intent_modes(
+                self.x[:2], self.x[2:4], times, covariances,
+                probabilities, self.lane_context, self.lateral_speed_mps,
+                brake_mps2=brake_mps2,
+                accelerate_mps2=accelerate_mps2,
+                lane_change_s=lane_change_s)
         return ActorPrediction(
             actor_id=self.actor_id,
             actor_type=self.actor_type,
             times=times,
-            means=np.asarray(means, dtype=np.float32),
-            covariances=np.asarray(covariances, dtype=np.float32),
+            means=means,
+            covariances=covariances,
             speed_mps=float(np.linalg.norm(self.x[2:4])),
             extent_xy=self.extent_xy,
+            modes=modes,
         )
 
 
@@ -148,12 +213,20 @@ class BayesianActorTracker:
     """Maintains bounded per-actor posteriors and produces future predictions."""
 
     def __init__(self, horizon_s=3.0, step_s=0.25, process_noise=1.5,
-                 measurement_noise=0.25, max_stale_s=1.0):
+                 measurement_noise=0.25, max_stale_s=1.0,
+                 multi_intent_enabled=True, intent_map_radius_m=60.0,
+                 intent_brake_mps2=2.0, intent_accelerate_mps2=1.2,
+                 intent_lane_change_s=3.0):
         self.horizon_s = float(horizon_s)
         self.step_s = float(step_s)
         self.process_noise = float(process_noise)
         self.measurement_noise = float(measurement_noise)
         self.max_stale_s = float(max_stale_s)
+        self.multi_intent_enabled = bool(multi_intent_enabled)
+        self.intent_map_radius_m = float(intent_map_radius_m)
+        self.intent_brake_mps2 = float(intent_brake_mps2)
+        self.intent_accelerate_mps2 = float(intent_accelerate_mps2)
+        self.intent_lane_change_s = float(intent_lane_change_s)
         self._tracks = {}
 
     @staticmethod
@@ -169,10 +242,40 @@ class BayesianActorTracker:
     def _xy(value):
         return [float(value.x), float(value.y)]
 
-    def update(self, actors, timestamp, ego_id=None):
+    @staticmethod
+    def _lane_context(road_map, location):
+        waypoint = road_map.get_waypoint(location)
+        if waypoint is None or waypoint.is_junction:
+            return None
+        forward = waypoint.transform.get_forward_vector()
+        direction = np.asarray([forward.x, forward.y], dtype=np.float64)
+        direction /= max(float(np.linalg.norm(direction)), 1e-6)
+        normal = np.asarray([-direction[1], direction[0]])
+        center = waypoint.transform.location
+        offset = float(np.dot(
+            np.asarray([location.x - center.x, location.y - center.y]),
+            normal))
+
+        def accessible(adjacent):
+            return bool(adjacent is not None and
+                        adjacent.lane_type == waypoint.lane_type and
+                        adjacent.lane_id * waypoint.lane_id > 0)
+
+        return {
+            "direction": direction,
+            "offset_m": offset,
+            "lane_width_m": max(float(waypoint.lane_width), 2.0),
+            "left": accessible(waypoint.get_left_lane()),
+            "right": accessible(waypoint.get_right_lane()),
+        }
+
+    def update(self, actors, timestamp, ego_id=None, road_map=None,
+               ego_position=None):
         timestamp = float(timestamp)
         seen = set()
-        for actor in actors:
+        ego_xy = (np.asarray(self._xy(ego_position), dtype=np.float64)
+                  if ego_position is not None else None)
+        for actor in sorted(actors, key=lambda item: int(item.id)):
             actor_id = int(actor.id)
             if ego_id is not None and actor_id == int(ego_id):
                 continue
@@ -185,16 +288,32 @@ class BayesianActorTracker:
                 track = _Track(actor_id, actor_type, self.process_noise,
                                self.measurement_noise, extent)
                 self._tracks[actor_id] = track
+            location = actor.get_location()
+            position = self._xy(location)
+            lane_context = None
+            nearby = (ego_xy is None or np.linalg.norm(
+                np.asarray(position) - ego_xy) <= self.intent_map_radius_m)
+            if (self.multi_intent_enabled and road_map is not None and
+                    actor_type == "vehicle" and nearby):
+                lane_context = self._lane_context(road_map, location)
             track.extent_xy = extent
-            track.update(self._xy(actor.get_location()), self._xy(actor.get_velocity()), timestamp)
+            track.intent_active = bool(nearby)
+            track.update(position, self._xy(actor.get_velocity()),
+                         timestamp, lane_context=lane_context)
             seen.add(actor_id)
         for actor_id in list(self._tracks):
             track = self._tracks[actor_id]
             if actor_id not in seen and track.last_seen is not None \
                     and timestamp - track.last_seen > self.max_stale_s:
                 del self._tracks[actor_id]
-        return [track.predict(self.horizon_s, self.step_s)
-                for actor_id, track in self._tracks.items()
+        return [track.predict(
+                    self.horizon_s, self.step_s,
+                    multi_intent_enabled=(self.multi_intent_enabled and
+                                          track.intent_active),
+                    brake_mps2=self.intent_brake_mps2,
+                    accelerate_mps2=self.intent_accelerate_mps2,
+                    lane_change_s=self.intent_lane_change_s)
+                for actor_id, track in sorted(self._tracks.items())
                 if actor_id in seen and track.initialized]
 
     @property

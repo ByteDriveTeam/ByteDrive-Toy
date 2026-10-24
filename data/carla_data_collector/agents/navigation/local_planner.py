@@ -7,10 +7,12 @@
 
 from enum import IntEnum
 from collections import deque
+from types import SimpleNamespace
 import random
 
 import carla
 from agents.navigation.controller import VehiclePIDController
+from agents.navigation.route_tracking import RouteTracker
 from agents.tools.misc import draw_waypoints, get_speed
 
 
@@ -71,6 +73,8 @@ class LocalPlanner(object):
         self.target_road_option = None
 
         self._waypoints_queue = deque(maxlen=10000)
+        self._route_tracker = None
+        self._continuous_route_tracking = bool(opt_dict.get("continuous_route_tracking", False))
         self._min_waypoint_queue_length = 100
         self._stop_waypoint_creation = False
 
@@ -213,6 +217,11 @@ class LocalPlanner(object):
 
         for elem in current_plan:
             self._waypoints_queue.append(elem)
+        if self._continuous_route_tracking and self._waypoints_queue:
+            points = [
+                [waypoint.transform.location.x, waypoint.transform.location.y]
+                for waypoint, _ in self._waypoints_queue]
+            self._route_tracker = RouteTracker(points)
 
         self._stop_waypoint_creation = stop_waypoint_creation
 
@@ -220,7 +229,7 @@ class LocalPlanner(object):
         """Sets an offset for the vehicle"""
         self._vehicle_controller.set_offset(offset)
 
-    def run_step(self, debug=False):
+    def run_step(self, debug=False, target_location_override=None):
         """
         Execute one step of local planning which involves running the longitudinal and lateral PID controllers to
         follow the waypoints trajectory.
@@ -239,6 +248,10 @@ class LocalPlanner(object):
         veh_location = self._vehicle.get_location()
         vehicle_speed = get_speed(self._vehicle) / 3.6
         self._min_distance = self._base_min_distance + self._distance_ratio * vehicle_speed
+        tracking_target = None
+        if self._route_tracker is not None:
+            tracking_target = self._route_tracker.target(
+                [veh_location.x, veh_location.y], self._min_distance)
 
         num_waypoint_removed = 0
         for waypoint, _ in self._waypoints_queue:
@@ -257,6 +270,20 @@ class LocalPlanner(object):
             for _ in range(num_waypoint_removed):
                 self._waypoints_queue.popleft()
 
+        # A temporary bypass may run parallel to the assigned lane.  Advance
+        # passed route waypoints by longitudinal progress while preserving the
+        # original queue and its remaining destination.
+        if target_location_override is not None:
+            while len(self._waypoints_queue) > 1:
+                waypoint = self._waypoints_queue[0][0]
+                location = waypoint.transform.location
+                forward = waypoint.transform.get_forward_vector()
+                along = ((location.x - veh_location.x) * forward.x +
+                         (location.y - veh_location.y) * forward.y)
+                if along >= -0.5 or veh_location.distance(location) > 9.0:
+                    break
+                self._waypoints_queue.popleft()
+
         # Get the target waypoint and move using the PID controllers. Stop if no target waypoint
         if len(self._waypoints_queue) == 0:
             control = carla.VehicleControl()
@@ -267,7 +294,22 @@ class LocalPlanner(object):
             control.manual_gear_shift = False
         else:
             self.target_waypoint, self.target_road_option = self._waypoints_queue[0]
-            control = self._vehicle_controller.run_step(self._target_speed, self.target_waypoint)
+            control_waypoint = self.target_waypoint
+            if target_location_override is not None:
+                location = target_location_override
+                control_waypoint = SimpleNamespace(transform=carla.Transform(
+                    carla.Location(
+                        x=float(location[0]), y=float(location[1]),
+                        z=self.target_waypoint.transform.location.z),
+                    self.target_waypoint.transform.rotation))
+            elif tracking_target is not None:
+                target = self.target_waypoint.transform
+                location = carla.Location(x=tracking_target[0], y=tracking_target[1],
+                                          z=target.location.z)
+                control_waypoint = SimpleNamespace(transform=carla.Transform(
+                    location, target.rotation))
+            control = self._vehicle_controller.run_step(
+                self._target_speed, control_waypoint)
 
         if debug:
             draw_waypoints(self._vehicle.get_world(), [self.target_waypoint], 1.0)

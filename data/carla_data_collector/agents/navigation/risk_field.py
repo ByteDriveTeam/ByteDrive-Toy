@@ -1,6 +1,7 @@
 """Route-aligned dynamic risk field built from Bayesian actor predictions."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -99,6 +100,65 @@ def plan_front_vehicle_speed(route_points, predictions, ego_position,
     that is slowing or whose future position is uncertain. Stable vehicles in
     adjacent lanes are excluded by their lateral occupancy probability.
     """
+    predictions = tuple(predictions or ())
+    if any(getattr(item, "modes", ()) for item in predictions):
+        unbounded = max(float(ego_speed_mps), 0.0) + 5.0
+
+        def single(item):
+            return plan_front_vehicle_speed(
+                route_points, [item], ego_position, ego_speed_mps,
+                ego_half_length_m, ego_half_width_m, lateral_margin_m,
+                reaction_time_s, comfort_decel_mps2,
+                minimum_gap_m=minimum_gap_m, confidence_z=confidence_z,
+                lookahead_s=lookahead_s,
+                emergency_decel_mps2=emergency_decel_mps2)
+
+        result = plan_front_vehicle_speed(
+            route_points, [replace(item, modes=()) for item in predictions],
+            ego_position, ego_speed_mps, ego_half_length_m,
+            ego_half_width_m, lateral_margin_m, reaction_time_s,
+            comfort_decel_mps2, minimum_gap_m=minimum_gap_m,
+            confidence_z=confidence_z, lookahead_s=lookahead_s,
+            emergency_decel_mps2=emergency_decel_mps2)
+        for prediction in predictions:
+            modes = getattr(prediction, "modes", ())
+            if not modes:
+                continue
+            weighted_cap = 0.0
+            total_probability = 0.0
+            crossing_probability = 0.0
+            representative = None
+            for mode in modes:
+                probability = max(float(mode.probability), 0.0)
+                mode_plan = single(prediction.for_mode(mode))
+                weighted_cap += probability * min(
+                    mode_plan["speed_cap_mps"], unbounded)
+                total_probability += probability
+                if (mode_plan["kind"] == "crossing" and
+                        math.isfinite(mode_plan["speed_cap_mps"])):
+                    crossing_probability += probability
+                if (representative is None or
+                        mode_plan["speed_cap_mps"] <
+                        representative["speed_cap_mps"]):
+                    representative = mode_plan
+                if probability >= 0.5 and mode_plan["emergency"]:
+                    result["emergency"] = True
+            if total_probability <= 0.0:
+                continue
+            mixed_cap = weighted_cap / total_probability
+            if (mixed_cap < result["speed_cap_mps"] and
+                    mixed_cap < unbounded - 1e-6 and
+                    representative["actor_id"] is not None):
+                emergency = result["emergency"]
+                existing_crossing_constraint = result.get(
+                    "crossing_constraint", result["kind"] == "crossing")
+                result = dict(representative)
+                result["speed_cap_mps"] = mixed_cap
+                result["emergency"] = bool(emergency)
+                result["crossing_constraint"] = bool(
+                    existing_crossing_constraint or
+                    crossing_probability / total_probability >= 0.5)
+        return result
     result = {"speed_cap_mps": float("inf"), "emergency": False,
               "actor_id": None, "gap_m": float("inf"), "kind": None}
     geometry = _route_geometry(route_points)
@@ -256,6 +316,60 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
     ``predictions`` are :class:`ActorPrediction` objects.  The returned values
     are plain Python types so they can be written directly by msgpack.
     """
+    predictions = tuple(predictions or ())
+    if any(getattr(item, "modes", ()) for item in predictions):
+        best = evaluate_route_risk(
+            route_points, [replace(item, modes=()) for item in predictions],
+            ego_position, ego_speed_mps, route_width_m=route_width_m,
+            risk_decay_m=risk_decay_m,
+            pedestrian_route_width_m=pedestrian_route_width_m)
+        max_probability = best["predicted_conflict_probability"]
+        expected_ttc = best["expected_ttc_s"]
+
+        def single(item):
+            return evaluate_route_risk(
+                route_points, [item], ego_position, ego_speed_mps,
+                route_width_m=route_width_m, risk_decay_m=risk_decay_m,
+                pedestrian_route_width_m=pedestrian_route_width_m)
+
+        for prediction in predictions:
+            modes = getattr(prediction, "modes", ())
+            if not modes:
+                continue
+            weighted_risk = 0.0
+            weighted_probability = 0.0
+            weighted_ttc = float("inf")
+            representative = None
+            strongest = 0.0
+            total_probability = 0.0
+            for mode in modes:
+                probability = max(float(mode.probability), 0.0)
+                mode_risk = single(prediction.for_mode(mode))
+                weighted_risk += probability * mode_risk["max_risk"]
+                weighted_probability += probability * mode_risk[
+                    "predicted_conflict_probability"]
+                total_probability += probability
+                contribution = probability * mode_risk["max_risk"]
+                if contribution > strongest:
+                    strongest = contribution
+                    representative = mode_risk
+                if probability * mode_risk[
+                        "predicted_conflict_probability"] >= 0.25:
+                    weighted_ttc = min(
+                        weighted_ttc, mode_risk["expected_ttc_s"])
+            if total_probability <= 0.0:
+                continue
+            weighted_risk /= total_probability
+            weighted_probability /= total_probability
+            max_probability = max(max_probability, weighted_probability)
+            expected_ttc = min(expected_ttc, weighted_ttc)
+            if weighted_risk > best["max_risk"] and representative is not None:
+                best = dict(representative)
+                best["max_risk"] = weighted_risk
+        best["predicted_conflict_probability"] = max_probability
+        best["expected_ttc_s"] = expected_ttc
+        best["active"] = bool(best["max_risk"] > 0.05)
+        return best
     geometry = _route_geometry(route_points)
     if geometry is None:
         return {

@@ -248,6 +248,7 @@ class _VisualProcessor(nn.Module):
         self.fusion = nn.Linear(bb.hidden_dim * len(bb.feature_layers), spec.dim)
         self.downsample = nn.Conv2d(spec.dim, spec.dim, 2, stride=2)
         self.navigation_token = nn.Embedding(len(spec.navigation_commands), spec.dim)
+        self.recovery_token = nn.Embedding(len(spec.recovery_commands), spec.dim, padding_idx=0)
         self.motion_token = nn.Linear(4, spec.dim)
         self.register_tokens = nn.Parameter(torch.randn(self.num_register_tokens, spec.dim) * 0.02)
         self.annotation_queries = nn.Parameter(
@@ -271,7 +272,8 @@ class _VisualProcessor(nn.Module):
         self.annotation_reason_head = nn.Linear(spec.dim, spec.annotation_reason_classes)
         self.annotation_probability_head = nn.Linear(spec.dim, spec.annotation_probability_dim)
 
-    def forward(self, rgb, navigation_command, ego_state, intrinsics, motion_matrices):
+    def forward(self, rgb, navigation_command, ego_state, intrinsics, motion_matrices,
+                recovery_command=None):
         batch, frames, channels, height, width = rgb.shape
         with torch.no_grad():
             selected = self.backbone(rgb.reshape(batch * frames, channels, height, width))
@@ -289,7 +291,10 @@ class _VisualProcessor(nn.Module):
         small_h, small_w = fused.shape[-2:]
         patches = fused.flatten(2).transpose(1, 2).reshape(batch, frames * small_h * small_w, self.dim)
         motion_token = self.motion_token(ego_state)
-        condition = torch.stack((self.navigation_token(navigation_command).to(motion_token.dtype),
+        navigation = self.navigation_token(navigation_command)
+        if recovery_command is not None:
+            navigation = navigation + self.recovery_token(recovery_command)
+        condition = torch.stack((navigation.to(motion_token.dtype),
                                  motion_token), dim=1)
         registers = self.register_tokens.unsqueeze(0).expand(batch, -1, -1)
         annotation_queries = self.annotation_queries.unsqueeze(0).expand(batch, -1, -1)
@@ -494,6 +499,7 @@ class _TrajectoryDecoder(nn.Module):
         self.fourier_bands = spec.action_fourier_bands
         self.fourier_project = nn.Linear(self.points * 2 * self.fourier_bands * 2, self.dim)
         self.navigation = nn.Embedding(len(spec.navigation_commands), self.dim)
+        self.recovery = nn.Embedding(len(spec.recovery_commands), self.dim, padding_idx=0)
         self.motion = _ConditionMLP(4, self.dim, spec.condition_hidden)
         self.cross = nn.ModuleList([
             _VocabularyCrossBlock(self.dim, spec.cross_heads, spec.ffn_hidden)
@@ -520,11 +526,13 @@ class _TrajectoryDecoder(nn.Module):
         features = torch.stack((angles.sin(), angles.cos()), dim=-1).flatten(1)
         return self.fourier_project(features)
 
-    def classify(self, visual_tokens, navigation_command, ego_state):
+    def classify(self, visual_tokens, navigation_command, ego_state, recovery_command=None):
         """只执行一次全词表交叉注意力，供流采样复用。"""
         batch = visual_tokens.shape[0]
         standardized_motion = (ego_state - self.motion_mean) / self.motion_std
         condition = self.navigation(navigation_command) + self.motion(standardized_motion)
+        if recovery_command is not None:
+            condition = condition + self.recovery(recovery_command)
         words = self._word_features().unsqueeze(0).expand(batch, -1, -1)
         words = words + condition.unsqueeze(1)
         for block in self.cross:
@@ -548,8 +556,8 @@ class _TrajectoryDecoder(nn.Module):
         return self.residual_output(self.residual_norm(hidden)).reshape(batch, self.points, 2)
 
     def forward(self, visual_tokens, navigation_command, ego_state,
-                state=None, time_step=None, anchor_index=None):
-        result = self.classify(visual_tokens, navigation_command, ego_state)
+                state=None, time_step=None, anchor_index=None, recovery_command=None):
+        result = self.classify(visual_tokens, navigation_command, ego_state, recovery_command)
         if state is not None:
             if time_step is None:
                 raise ValueError("残差状态需要流时间")
@@ -591,23 +599,24 @@ class UnifiedDrivingModel(nn.Module):
 
     @torch.no_grad()
     def sample_trajectory_actions(self, rgb, intrinsics, navigation_command, ego_state,
-                                  motion_matrices, steps: Optional[int] = None):
+                                  motion_matrices, steps: Optional[int] = None,
+                                  recovery_command=None):
         """以终点参数化流采样，并返回物理单位的局部二维加速度。"""
         steps = self.cfg.model.unified_driving.trajectory_sample_steps if steps is None else steps
         if steps <= 0:
             raise ValueError("steps 必须为正整数")
         check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
-                                     len(self.cfg.model.unified_driving.navigation_commands))
+                                     len(self.cfg.model.unified_driving.navigation_commands), recovery_command)
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
             tokens, geometry, _, _ = self.visual(
-                rgb, navigation_command, ego_state, intrinsics, motion_matrices)
+                rgb, navigation_command, ego_state, intrinsics, motion_matrices, recovery_command)
         state = torch.randn(
             rgb.shape[0], self.trajectory_decoder.points, 2,
             device=rgb.device, dtype=torch.float32)
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=False):
             encoded = self.trajectory_decoder.classify(
-                tokens.float(), navigation_command, ego_state.float())
+                tokens.float(), navigation_command, ego_state.float(), recovery_command)
             for index in range(steps):
                 time_step = torch.full(
                     (rgb.shape[0],), index / float(steps), device=rgb.device, dtype=torch.float32)
@@ -620,10 +629,12 @@ class UnifiedDrivingModel(nn.Module):
 
     @torch.no_grad()
     def sample_trajectory(self, rgb, intrinsics, navigation_command, ego_state,
-                          motion_matrices, steps: Optional[int] = None):
+                          motion_matrices, steps: Optional[int] = None,
+                          recovery_command=None):
         """返回物理加速度及其从局部初始二维速度积分得到的轨迹。"""
         actions = self.sample_trajectory_actions(
-            rgb, intrinsics, navigation_command, ego_state, motion_matrices, steps)
+            rgb, intrinsics, navigation_command, ego_state, motion_matrices, steps,
+            recovery_command=recovery_command)
         waypoints = integrate_planar_accelerations(
             actions, ego_state, dt_s=self.cfg.model.unified_driving.waypoint_dt_s)
         return {"actions": actions, "trajectory": waypoints}
@@ -664,14 +675,15 @@ class UnifiedDrivingModel(nn.Module):
                 motion_matrices: torch.Tensor, time_step: Optional[torch.Tensor] = None,
                 bev_state: Optional[torch.Tensor] = None,
                 traj_state: Optional[torch.Tensor] = None,
-                traj_anchor_index: Optional[torch.Tensor] = None):
+                traj_anchor_index: Optional[torch.Tensor] = None,
+                recovery_command: Optional[torch.Tensor] = None):
         """处理四帧图像，并在给定流状态时预测动作残差终点。"""
         check_unified_driving_inputs(rgb, intrinsics, navigation_command, ego_state, motion_matrices,
-                                     len(self.cfg.model.unified_driving.navigation_commands))
+                                     len(self.cfg.model.unified_driving.navigation_commands), recovery_command)
         enabled = self.precision == "bf16" and rgb.device.type != "cpu"
         with torch.autocast(device_type=rgb.device.type, dtype=torch.bfloat16, enabled=enabled):
             tokens, geometry, feature_maps, visual_annotation = self.visual(
-                rgb, navigation_command, ego_state, intrinsics, motion_matrices)
+                rgb, navigation_command, ego_state, intrinsics, motion_matrices, recovery_command)
         outputs = {"visual_tokens": tokens, "image_geometry": geometry,
                    "visual_features": feature_maps,
                    "visual_annotation": visual_annotation}
@@ -684,7 +696,7 @@ class UnifiedDrivingModel(nn.Module):
                 tokens_fp32, navigation_command, ego_state.float(),
                 traj_state.float() if traj_state is not None else None,
                 time_step.float() if time_step is not None else None,
-                traj_anchor_index)
+                traj_anchor_index, recovery_command=recovery_command)
             outputs["traj_logits"] = trajectory_output["logits"]
             outputs["traj_probabilities"] = trajectory_output["probabilities"]
             outputs["traj_top_index"] = trajectory_output["top_index"]

@@ -47,7 +47,8 @@ def compute_flow_matching_losses(model, batch: Dict[str, torch.Tensor], cfg):
     outputs = model(
         batch["rgb"], batch["intrinsics"], batch["navigation_command"], batch["ego_state"],
         batch["motion_matrices"], time_step=time_step, traj_state=action_state,
-        traj_anchor_index=nearest, bev_state=bev_state)
+        traj_anchor_index=nearest, bev_state=bev_state,
+        recovery_command=batch["recovery_command"])
     components = {}
     # 终点 MSE 等价于对端点参数化条件流匹配施加 (1-t)^2 权重。
     components["trajectory"] = (outputs["traj_residual"] - residual_target).square().mean()

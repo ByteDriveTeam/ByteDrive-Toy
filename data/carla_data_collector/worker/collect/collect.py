@@ -225,6 +225,11 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
             return P.STATUS_PARTIAL, frames, kinematics
 
         traffic_states = traffic_control.traffic_light_states(traffic_lights)
+        raw_navigation_command = navigation_command_from_plan(
+            ego.get_location(), agent.get_local_planner().get_plan(),
+            navigation_cfg.navigation_lookahead_m,
+            navigation_cfg.navigation_turn_threshold_deg)
+        recovery_command = int((expert.get("navigation") or {}).get("recovery_command", 0))
         frames.append({
             "frame_id": frame_id,
             "sim_time": snapshot_time,
@@ -235,10 +240,9 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
             "expert": copy.deepcopy(expert),
             "relevant_traffic_control": traffic_control.relevant_traffic_control(
                 ego, agent, traffic_light_metadata, traffic_states),
-            "navigation_command": navigation_command_from_plan(
-                ego.get_location(), agent.get_local_planner().get_plan(),
-                navigation_cfg.navigation_lookahead_m,
-                navigation_cfg.navigation_turn_threshold_deg),
+            "navigation_command": raw_navigation_command,
+            "recovery_command": recovery_command,
+            "raw_navigation_command": raw_navigation_command,
         })
         counters["total"] += 1
 

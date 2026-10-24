@@ -66,7 +66,8 @@ def render_frame(frame, meta, vcfg, state):
                                                                           vcfg.optical_flow)))
     left = _stack_rows(rows) if rows else _state_bev(
         boxes, ego_pose, state.get("trajectory", []), state.get("actor_trajectories", {}),
-        frame["meta"].get("relevant_traffic_control"), vcfg)
+        frame["meta"].get("relevant_traffic_control"), vcfg,
+        expert=frame["meta"].get("expert"))
 
     canvas = left
     if avail["lidar"] and state["show_bev"]:
@@ -120,13 +121,25 @@ def _placeholder(meta, cams):
     return _titled(np.full((h, w, 3), _BG, np.uint8), "(camera layers off)")
 
 
-def _state_bev(boxes, ego_pose, trajectory, actor_trajectories, relevant_control, vcfg):
+def _state_bev(boxes, ego_pose, trajectory, actor_trajectories, relevant_control, vcfg,
+               expert=None):
     """无视觉传感器时用 Agent 轨迹与 Box 生成可读的状态鸟瞰图。"""
     bev = vcfg.bev
     size, rng = bev.size_px, bev.range_m
     canvas = np.full((size, size, 3), bev.bg, dtype=np.uint8)
     scale, center = size / (2.0 * rng), size * 0.5
     w2e = g.world_to_ego(ego_pose)
+    expert = expert or {}
+    route = [point["location_world"] for point in
+             (expert.get("route_plan") or {}).get("points", [])]
+    if route:
+        points = g.transform_points(np.asarray(route), w2e)
+        _draw_track(canvas, points, center, scale, rng, (80, 230, 80), 2)
+    maneuver = (expert.get("maneuver_plan") or {}).get("points", [])
+    if maneuver:
+        points = g.transform_points(np.asarray([[p[0], p[1], ego_pose[2]]
+                                                for p in maneuver]), w2e)
+        _draw_track(canvas, points, center, scale, rng, (220, 100, 220), 2)
     if trajectory:
         points = g.transform_points(np.asarray([[pose[0], pose[1], 0.0] for pose in trajectory]), w2e)
         _draw_track(canvas, points, center, scale, rng, (80, 220, 255), 2)
@@ -140,7 +153,7 @@ def _state_bev(boxes, ego_pose, trajectory, actor_trajectories, relevant_control
         _draw_box_bev(canvas, box, w2e, center, scale, rng, vcfg.bbox)
     _draw_relevant_control(canvas, relevant_control, w2e, center, scale, rng, vcfg.traffic_lights)
     _draw_ego_marker(canvas, center)
-    return _titled(canvas, "agent trajectory / state BEV")
+    return canvas
 
 
 def _draw_track(canvas, points, center, scale, rng, color, thickness):
@@ -377,6 +390,20 @@ def _put_hud(canvas, fmeta, state, traffic_light_lines, avail):
             speed, ctrl["throttle"], ctrl["steer"], ctrl["brake"]),
         _toggle_line(state, avail),
     ] + traffic_light_lines
+    expert = fmeta.get("expert") or {}
+    if expert:
+        lines.append("state {} | reason {}".format(expert.get("state", "?"),
+                                                   expert.get("reason", "?")))
+        routes = ("straight", "left", "right", "change right", "change left")
+        recoveries = ("none", "right", "left")
+        command = int(fmeta.get("raw_navigation_command", fmeta.get("navigation_command", 0)))
+        recovery = int(fmeta.get("recovery_command", (expert.get("navigation") or {}).get(
+            "recovery_command", 0)))
+        lines.append("route {} | recovery {} (parallel)".format(
+            routes[command] if 0 <= command < len(routes) else command,
+            recoveries[recovery] if 0 <= recovery < len(recoveries) else recovery))
+        if not avail.get("rgb"):
+            lines.append("route green | maneuver purple | trace yellow")
     if state.get("failed"):
         lines.insert(0, "FAILED: {}".format(state.get("failure_status") or "unknown"))
 

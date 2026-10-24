@@ -1,4 +1,4 @@
-"""从 CARLA 路线或专家规划生成五类导航指令。
+"""从 CARLA 路线生成五类导航指令；恢复使用独立并行通道。
 
 模块: common/navigation_command.py
 依赖: math
@@ -7,13 +7,16 @@
     - navigation_command_from_route(route, index, lookahead_m, turn_threshold_deg) -> int
     - navigation_command_from_plan(location, plan, lookahead_m, turn_threshold_deg) -> int
     - lane_change_from_sequence(lane_keys, stable_points) -> int | None
-说明: 类别固定为直行、左转、右转、右变道、左变道；优先使用 CARLA RoadOption。
+说明: 导航为直行、左转、右转、右变道、左变道；恢复为无、向右、向左。
 """
 
 import math
 
 
 _OPTION_TO_COMMAND = {1: 1, 2: 2, 5: 4, 6: 3}
+# Independent of the five mutually exclusive route commands.
+RECOVER_RIGHT = 1
+RECOVER_LEFT = 2
 
 
 def lane_change_from_sequence(lane_keys, stable_points):
@@ -72,7 +75,17 @@ def navigation_command_from_route(route, index, lookahead_m, turn_threshold_deg)
 
 def navigation_command_from_plan(location, plan, lookahead_m, turn_threshold_deg):
     """把专家 LocalPlanner 剩余队列转为路线，再取前方导航指令。"""
-    points = [[float(location.x), float(location.y)]]
+    plan = list(plan)
+    if not plan:
+        return 0
+    # A displaced ego must not turn a straight assigned route into a turn
+    # command. Anchor the geometric fallback on the route's own tangent.
+    first = plan[0][0].transform
+    forward = first.get_forward_vector()
+    along = min(0.0, (location.x - first.location.x) * forward.x +
+                (location.y - first.location.y) * forward.y)
+    points = [[float(first.location.x + along * forward.x),
+               float(first.location.y + along * forward.y)]]
     arc = [0.0]
     options = [4]
     lane_keys = [None]

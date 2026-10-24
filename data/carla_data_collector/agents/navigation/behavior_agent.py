@@ -12,12 +12,14 @@ import copy
 import math
 import numpy as np
 import carla
+from common.navigation_command import RECOVER_LEFT, RECOVER_RIGHT
 from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.local_planner import RoadOption
 from agents.navigation.behavior_types import Cautious, Aggressive, Normal
 from agents.navigation.behavior_prediction import BayesianActorTracker
 from agents.navigation.risk_field import evaluate_route_risk, plan_front_vehicle_speed
 from agents.navigation.longitudinal_planner import plan_longitudinal_speed
+from agents.navigation.route_recovery import project_route, temporary_route
 
 from agents.tools.misc import get_speed, positive, compute_distance
 
@@ -37,6 +39,8 @@ class BehaviorAgent(BasicAgent):
     _STATE_IDS = {
         "CRUISE": 0, "FOLLOW": 1, "YIELD": 2, "STOPPING": 3,
         "LANE_CHANGE": 4, "APPROACH_STOP": 5, "CREEP": 6,
+        "AVOID_LEFT": 7, "AVOID_RIGHT": 8,
+        "RECOVER_LEFT": 9, "RECOVER_RIGHT": 10,
     }
     _REASON_IDS = {
         "cruise": 0, "follow_vehicle": 1, "predicted_conflict": 2,
@@ -45,6 +49,8 @@ class BehaviorAgent(BasicAgent):
         "emergency_stop": 8, "red_light_approach": 9,
         "yellow_light_approach": 10, "red_light_creep": 11,
         "curve_speed": 12, "lane_centering": 13,
+        "obstacle_avoid_left": 14, "obstacle_avoid_right": 15,
+        "route_recover_left": 16, "route_recover_right": 17,
     }
 
     def __init__(self, vehicle, behavior='normal', opt_dict=None, map_inst=None,
@@ -62,6 +68,8 @@ class BehaviorAgent(BasicAgent):
                                    float(config.get("planner_base_min_distance_m", 1.5)))
         planner_options.setdefault("distance_ratio",
                                    float(config.get("planner_distance_ratio", 0.25)))
+        planner_options.setdefault("continuous_route_tracking",
+                                   bool(config.get("continuous_route_tracking", True)))
         super().__init__(vehicle, opt_dict=planner_options, map_inst=map_inst, grp_inst=grp_inst)
         self._look_ahead_steps = 0
 
@@ -118,14 +126,32 @@ class BehaviorAgent(BasicAgent):
         self._corner_preview_m = float(config.get("corner_preview_m", 30.0))
         self._turn_alignment_speed_mps = float(
             config.get("turn_alignment_speed_mps", 4.0))
+        self._turn_alignment_threshold_deg = float(config.get("turn_alignment_threshold_deg", 5.0))
         self._lane_centering_speed_mps = float(
             config.get("lane_centering_speed_mps", 5.0))
+        self._obstacle_bypass_enabled = bool(config.get("obstacle_bypass_enabled", True))
+        self._obstacle_min_distance_m = float(config.get("obstacle_min_distance_m", 14.0))
+        self._obstacle_max_distance_m = float(config.get("obstacle_max_distance_m", 32.0))
+        self._obstacle_approach_m = float(config.get("obstacle_approach_m", 18.0))
+        self._obstacle_clear_m = float(config.get("obstacle_clear_m", 7.0))
+        self._route_recovery_m = float(config.get("route_recovery_m", 14.0))
+        self._route_recovery_trigger_m = float(config.get("route_recovery_trigger_m", 0.9))
         self._tracker = BayesianActorTracker(
             horizon_s=self._prediction_horizon_s,
             step_s=self._prediction_step_s,
             process_noise=float(config.get("prediction_process_noise", 1.5)),
             measurement_noise=float(config.get("prediction_measurement_noise", 0.25)),
             max_stale_s=float(config.get("prediction_max_stale_s", 1.0)),
+            multi_intent_enabled=bool(config.get(
+                "prediction_multi_intent_enabled", True)),
+            intent_map_radius_m=float(config.get(
+                "prediction_intent_map_radius_m", 60.0)),
+            intent_brake_mps2=float(config.get(
+                "prediction_intent_brake_mps2", 2.0)),
+            intent_accelerate_mps2=float(config.get(
+                "prediction_intent_accelerate_mps2", 1.2)),
+            intent_lane_change_s=float(config.get(
+                "prediction_intent_lane_change_s", 3.0)),
         )
         self._state = "CRUISE"
         self._state_since = 0.0
@@ -140,6 +166,12 @@ class BehaviorAgent(BasicAgent):
         self._last_risk = {}
         self._last_predictions = []
         self._last_longitudinal_plan = None
+        self._maneuver_obstacle_id = None
+        self._maneuver_obstacle_world = None
+        self._maneuver_side = 0
+        self._recovery_side = 0
+        self._active_maneuver = None
+        self._active_route_points = None
         self._last_snapshot = self._empty_snapshot("cruise")
 
     @staticmethod
@@ -184,6 +216,7 @@ class BehaviorAgent(BasicAgent):
             "lane_change": {"available_left": False, "available_right": False,
                             "cooldown_s": 0.0},
             "longitudinal_plan": None,
+            "maneuver_plan": None,
         }
 
     def _route_plan_snapshot(self, ego_transform):
@@ -253,10 +286,13 @@ class BehaviorAgent(BasicAgent):
         actors = list(self._world.get_actors().filter("*vehicle*"))
         actors.extend(list(self._world.get_actors().filter("*walker.pedestrian*")))
         self._last_predictions = self._tracker.update(
-            actors, timestamp, ego_id=self._vehicle.id)
+            actors, timestamp, ego_id=self._vehicle.id,
+            road_map=self._map, ego_position=self._vehicle.get_location())
         return self._last_predictions
 
     def _route_points(self):
+        if self._active_route_points is not None:
+            return self._active_route_points
         points = [self._vehicle.get_location()]
         travelled = 0.0
         for waypoint, _ in list(self._local_planner.get_plan()):
@@ -267,8 +303,179 @@ class BehaviorAgent(BasicAgent):
                 break
         return [[float(point.x), float(point.y)] for point in points]
 
-    def _risk_assessment(self, timestamp):
-        predictions = self._actor_predictions(timestamp)
+    def _assigned_centerline(self):
+        tracker = self._local_planner._route_tracker
+        if tracker is not None:
+            return tracker.local_points()
+        plan = list(self._local_planner.get_plan())
+        if len(plan) < 2:
+            return None
+        first = plan[0][0].transform
+        forward = first.get_forward_vector()
+        location = first.location
+        points = [[location.x - 8.0 * forward.x,
+                   location.y - 8.0 * forward.y]]
+        points.extend([[waypoint.transform.location.x,
+                        waypoint.transform.location.y]
+                       for waypoint, _ in plan])
+        return points
+
+    def _side_clear(self, centerline, ego_arc, obstacle_arc, side,
+                    lane_width_m, obstacle_id):
+        """Reject a detour lane occupied beside or shortly ahead of ego."""
+        for prediction in self._last_predictions:
+            if prediction.actor_id == obstacle_id or \
+                    prediction.actor_type != "vehicle" or len(prediction.means) == 0:
+                continue
+            projected = project_route(centerline, prediction.means[0])
+            if projected is None:
+                continue
+            arc, lateral, _ = projected
+            if (-12.0 <= arc - ego_arc <= obstacle_arc - ego_arc + 16.0 and
+                    abs(lateral - side * lane_width_m) <
+                    1.3 + float(prediction.extent_xy[1])):
+                return False
+        return True
+
+    @staticmethod
+    def _physical_adjacent_lane(waypoint, side):
+        """Map world-space left/right to an adjacent same-direction lane."""
+        forward = waypoint.transform.get_forward_vector()
+        normal = np.asarray([forward.y, -forward.x])
+        center = waypoint.transform.location
+        for adjacent, marking, allowed in (
+                (waypoint.get_left_lane(), waypoint.left_lane_marking,
+                 (carla.LaneChange.Left, carla.LaneChange.Both)),
+                (waypoint.get_right_lane(), waypoint.right_lane_marking,
+                 (carla.LaneChange.Right, carla.LaneChange.Both))):
+            if (adjacent is None or marking is None or
+                    marking.lane_change not in allowed or
+                    adjacent.lane_type != carla.LaneType.Driving or
+                    adjacent.lane_id * waypoint.lane_id <= 0):
+                continue
+            location = adjacent.transform.location
+            offset = np.dot([location.x - center.x, location.y - center.y],
+                            normal)
+            if side * offset > 1.0:
+                return adjacent
+        return None
+
+    def _update_maneuver(self):
+        """Plan a temporary bypass or return path without changing navigation."""
+        self._active_maneuver = None
+        self._active_route_points = None
+        if not self._obstacle_bypass_enabled:
+            return
+        centerline = self._assigned_centerline()
+        if centerline is None:
+            return
+        ego = self._vehicle.get_location()
+        ego_xy = [float(ego.x), float(ego.y)]
+        projected_ego = project_route(centerline, ego_xy)
+        if projected_ego is None:
+            return
+        ego_arc, lateral, tangent = projected_ego
+        transform = self._vehicle.get_transform()
+        forward = transform.get_forward_vector()
+        bounds = self._vehicle.bounding_box
+        # Project the whole body onto the route normal; heading errors make
+        # the footprint wider than extent.y even before the centre drifts.
+        body_half_width = (
+            bounds.extent.y * abs(forward.x * tangent[0] + forward.y * tangent[1]) +
+            bounds.extent.x * abs(forward.x * tangent[1] - forward.y * tangent[0]))
+        route_waypoint = list(self._local_planner.get_plan())[0][0]
+        lane_width = max(float(route_waypoint.lane_width), 2.5)
+        if self._maneuver_obstacle_world is not None:
+            projected_obstacle = project_route(
+                centerline, self._maneuver_obstacle_world)
+            if projected_obstacle is None or projected_obstacle[0] - ego_arc < -5.0:
+                self._maneuver_obstacle_id = None
+                self._maneuver_obstacle_world = None
+        if self._maneuver_obstacle_world is None and not route_waypoint.is_junction:
+            candidates = []
+            for prediction in self._last_predictions:
+                if prediction.actor_type != "vehicle" or \
+                        prediction.speed_mps > 0.45 or not len(prediction.means):
+                    continue
+                projected = project_route(centerline, prediction.means[0])
+                if projected is None:
+                    continue
+                arc, actor_lateral, _ = projected
+                distance = arc - ego_arc
+                if (self._obstacle_min_distance_m <= distance <=
+                        self._obstacle_max_distance_m and
+                        abs(actor_lateral) <=
+                        max(float(self._vehicle.bounding_box.extent.y), 0.5) +
+                        float(prediction.extent_xy[1]) + 0.25):
+                    candidates.append((distance, prediction))
+            # Waiting traffic at a route signal remains a normal stop, not a
+            # parked obstacle to pass.
+            if candidates and self._traffic_light_target(route_waypoint)[0] is not None:
+                candidates = []
+            if candidates:
+                _, obstacle = min(candidates, key=lambda item: item[0])
+                obstacle_xy = obstacle.means[0].tolist()
+                obstacle_arc = project_route(centerline, obstacle_xy)[0]
+                queued = False
+                for other in self._last_predictions:
+                    if (other.actor_id == obstacle.actor_id or
+                            other.actor_type != "vehicle" or not len(other.means)):
+                        continue
+                    projected_other = project_route(centerline, other.means[0])
+                    if (projected_other is not None and
+                            2.0 < projected_other[0] - obstacle_arc < 14.0 and
+                            abs(projected_other[1]) < lane_width * 0.6):
+                        queued = True
+                        break
+                if not queued:
+                    for side in (1, -1):
+                        if (self._physical_adjacent_lane(route_waypoint, side)
+                                is not None and
+                                self._side_clear(centerline, ego_arc, obstacle_arc,
+                                                 side, lane_width, obstacle.actor_id)):
+                            self._maneuver_side = side
+                            self._maneuver_obstacle_id = obstacle.actor_id
+                            self._maneuver_obstacle_world = obstacle_xy
+                            break
+        obstacle = self._maneuver_obstacle_world
+        if obstacle is None:
+            ego_waypoint = self._map.get_waypoint(ego)
+            if self._recovery_side:
+                if abs(lateral) < 0.2 or lateral * self._recovery_side >= 0.0:
+                    self._recovery_side = 0
+                    self._maneuver_side = 0
+                    return
+            else:
+                if (ego_waypoint is None or ego_waypoint.is_junction or
+                        route_waypoint.is_junction or
+                        self._direction in (RoadOption.CHANGELANELEFT,
+                                            RoadOption.CHANGELANERIGHT) or
+                        abs(lateral) < min(self._route_recovery_trigger_m,
+                            max(0.15, lane_width * 0.5 -
+                                body_half_width - 0.2))):
+                    self._maneuver_side = 0
+                    return
+                self._recovery_side = -1 if lateral > 0.0 else 1
+            side = self._recovery_side
+        else:
+            self._recovery_side = 0
+            side = self._maneuver_side
+        path = temporary_route(
+            centerline, ego_xy, side, lane_width,
+            obstacle_position=obstacle,
+            lookahead_m=max(5.0, self._speed / 3.6 * 0.8 + 4.0),
+            approach_m=self._obstacle_approach_m,
+            clear_m=self._obstacle_clear_m,
+            recovery_m=self._route_recovery_m)
+        if path is None:
+            return
+        path["obstacle_actor_id"] = self._maneuver_obstacle_id
+        self._active_maneuver = path
+        self._active_route_points = path["points"]
+
+    def _risk_assessment(self, timestamp, update_predictions=True):
+        predictions = (self._actor_predictions(timestamp) if update_predictions
+                       else self._last_predictions)
         risk = evaluate_route_risk(
             self._route_points(), predictions,
             self._vehicle.get_location(), self._speed / 3.6,
@@ -405,6 +612,12 @@ class BehaviorAgent(BasicAgent):
                     "times_s": item.times.tolist(),
                     "mean_world_xy": item.means.tolist(),
                     "covariance_world_xy": item.covariances.tolist(),
+                    "intent_modes": [{
+                        "intent": mode.name,
+                        "probability": mode.probability,
+                        "mean_world_xy": mode.means.tolist(),
+                        "covariance_world_xy": mode.covariances.tolist(),
+                    } for mode in item.modes],
                 } for item in nearest],
             },
             "lane_change": {
@@ -413,6 +626,7 @@ class BehaviorAgent(BasicAgent):
                 "cooldown_s": 0.0,
             },
             "longitudinal_plan": self._last_longitudinal_plan,
+            "maneuver_plan": copy.deepcopy(self._active_maneuver),
         })
         if option is not None:
             snapshot["navigation"] = {
@@ -422,7 +636,13 @@ class BehaviorAgent(BasicAgent):
                 "target_waypoint": self._transform_payload(target_waypoint.transform)
                 if target_waypoint is not None else None,
                 "source": "local_planner",
+                "recovery_command": 0,
             }
+            if (self._active_maneuver is not None and
+                    self._active_maneuver["phase"] == "recover"):
+                snapshot["navigation"]["recovery_command"] = (
+                    RECOVER_RIGHT if self._active_maneuver["side"] < 0
+                    else RECOVER_LEFT)
         if control is not None:
             snapshot["applied_control"] = {
                 "throttle": float(control.throttle), "steer": float(control.steer),
@@ -615,7 +835,7 @@ class BehaviorAgent(BasicAgent):
         transform = self._vehicle.get_transform()
         target_yaw = points[0]["rotation_world"][2]
         yaw_error = abs((transform.rotation.yaw - target_yaw + 180.0) % 360.0 - 180.0)
-        if yaw_error > 12.0:
+        if yaw_error > self._turn_alignment_threshold_deg:
             return self._turn_alignment_speed_mps * 3.6, "curve_speed"
         center = ego_waypoint.transform.location
         offset = math.hypot(transform.location.x - center.x,
@@ -724,11 +944,13 @@ class BehaviorAgent(BasicAgent):
         dt = float(getattr(world_snapshot.timestamp, "delta_seconds", 0.1) or 0.1)
         self._update_information()
         self._last_longitudinal_plan = None
+        self._actor_predictions(timestamp)
+        self._update_maneuver()
         self._decision_route_plan = self._route_plan_snapshot(self._vehicle.get_transform())
         self._decision_navigation_option = self._direction
         self._decision_target_waypoint = self._local_planner.target_waypoint
         ego_waypoint = self._map.get_waypoint(self._vehicle.get_location())
-        risk = self._risk_assessment(timestamp)
+        risk = self._risk_assessment(timestamp, update_predictions=False)
         front_plan = self._front_vehicle_plan()
         target, reason = self._predictive_target_speed(risk)
         light_target, light_reason = self._traffic_light_target(ego_waypoint)
@@ -810,6 +1032,10 @@ class BehaviorAgent(BasicAgent):
             self._set_state("YIELD", timestamp)
 
         vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_waypoint)
+        if (vehicle_state and self._active_maneuver is not None and
+                self._active_maneuver["phase"] == "avoid" and
+                vehicle.id == self._maneuver_obstacle_id):
+            vehicle_state = False
         if vehicle_state:
             gap = distance - max(vehicle.bounding_box.extent.x,
                                  vehicle.bounding_box.extent.y) - max(
@@ -850,6 +1076,20 @@ class BehaviorAgent(BasicAgent):
             self._last_target_accel_mps2 = 0.0
             return self._finish_control(self.emergency_stop(), "emergency_stop",
                                         timestamp, 0.0)
+        if light_target is None and self._active_maneuver is not None:
+            if self._active_maneuver["phase"] == "avoid":
+                if self._active_maneuver["side"] > 0:
+                    self._set_state("AVOID_LEFT", timestamp)
+                    reason = "obstacle_avoid_left"
+                else:
+                    self._set_state("AVOID_RIGHT", timestamp)
+                    reason = "obstacle_avoid_right"
+            elif self._active_maneuver["side"] > 0:
+                self._set_state("RECOVER_LEFT", timestamp)
+                reason = "route_recover_left"
+            else:
+                self._set_state("RECOVER_RIGHT", timestamp)
+                reason = "route_recover_right"
         front_target_kmh = front_plan["speed_cap_mps"] * 3.6
         if front_target_kmh < target:
             target = front_target_kmh
@@ -869,7 +1109,8 @@ class BehaviorAgent(BasicAgent):
         if light_target is not None and reason != "red_light_creep":
             speed_constraints.append((
                 max(self._last_light_distance_m - 2.0, 0.0), 0.0))
-        if front_plan["kind"] == "crossing":
+        if (front_plan["kind"] == "crossing" and
+                front_plan.get("crossing_constraint", True)):
             speed_constraints.append((
                 max(float(front_plan["gap_m"]) - self._front_min_gap_m,
                     0.0), 0.0))
@@ -899,7 +1140,11 @@ class BehaviorAgent(BasicAgent):
         stop_for_conflict = reason == "predicted_conflict" and target <= 0.0
         target = self._plan_target_speed(target, speed_constraints, dt)
         self._local_planner.set_speed(target)
-        control = self._local_planner.run_step(debug=debug)
+        control = self._local_planner.run_step(
+            debug=debug,
+            target_location_override=(
+                self._active_maneuver["target_world_xy"]
+                if self._active_maneuver is not None else None))
         if self._state == "STOPPING" or stop_for_conflict:
             control.throttle = 0.0
         return self._finish_control(control, reason, timestamp)

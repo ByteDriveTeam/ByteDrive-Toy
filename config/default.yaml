@@ -116,6 +116,18 @@ carla_collector:
       prediction_measurement_noise: 0.25
       prediction_max_stale_s: 1.0
       prediction_max_actors: 16
+      prediction_multi_intent_enabled: true
+      prediction_intent_map_radius_m: 60.0
+      prediction_intent_brake_mps2: 2.0
+      prediction_intent_accelerate_mps2: 1.2
+      prediction_intent_lane_change_s: 3.0
+      obstacle_bypass_enabled: true
+      obstacle_min_distance_m: 14.0
+      obstacle_max_distance_m: 32.0
+      obstacle_approach_m: 18.0
+      obstacle_clear_m: 7.0
+      route_recovery_m: 14.0
+      route_recovery_trigger_m: 0.9  # 触发偏移上限；按车身宽度提前至距车道边界 0.2m，持续回正到 0.2m 内
       reaction_time_s: 0.7
       comfort_decel_mps2: 3.0
       max_accel_mps2: 2.2
@@ -138,6 +150,8 @@ carla_collector:
       corner_preview_m: 30.0
       turn_alignment_speed_mps: 4.0
       lane_centering_speed_mps: 5.0
+      turn_alignment_threshold_deg: 5.0
+      continuous_route_tracking: true
       planner_base_min_distance_m: 1.5
       planner_distance_ratio: 0.25
 
@@ -494,9 +508,10 @@ model:
     rope_theta: 10000.0
     cache_slice_s: 3.0
     navigation_commands: [straight, left_turn, right_turn, right_lane_change, left_lane_change]
+    recovery_commands: [none, recover_right, recover_left]
     annotation_query_count: 3
-    annotation_state_classes: 7
-    annotation_reason_classes: 14
+    annotation_state_classes: 11
+    annotation_reason_classes: 18
     annotation_probability_dim: 3
     annotation_loss_weight: 0.15
 
@@ -712,7 +727,7 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v13-top1-standardized-residual
+    version: v15-parallel-recovery
     slice_duration_s: 3.0
     navigation_lookahead_m: 40.0
     navigation_turn_threshold_deg: 30.0

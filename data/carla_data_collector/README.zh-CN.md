@@ -141,9 +141,11 @@ data/carla_data_collector/
 | `num_kinematics` | 独立运动学时间轴的记录数 |
 | `kinematics/{k}` | 第 k 个运动学采样：frame_id、sim_time、位姿、线速度、线加速度、角速度、完整车辆控制量，以及可选 `expert` 决策 |
 
-BehaviorAgent 的 `expert` 快照记录状态、决策原因、目标速度和加速度、风险预测、规划路线及实际控制。v8 驾驶缓存只提取用于辅助训练的标注，不恢复旧场景数据。
+BehaviorAgent 的 `expert` 快照记录状态、决策原因、目标速度和加速度、风险预测、规划路线及实际控制。驾驶缓存只提取用于辅助训练的标注，不恢复旧场景数据。
 
 风险走廊使用主车包围盒半宽和 `risk_lateral_margin_m`（默认 0.35 米）。预测中心始终在走廊外的侧方车辆会降低路径风险，避免相邻车道稳定并行时仅因预测不确定性而减速；预测驶入走廊的车辆仍保留完整风险。行人风险不变。
+
+附近车辆还会生成确定性的贝叶斯多意图假设：保持行驶、减速、加速，以及在同向可行驶车道存在时向左或向右变道。近期加速度和相对车道的横向运动更新各意图概率，每个意图保存独立的未来位置均值和协方差。路线风险和前车速度上限按概率融合这些意图，同时保留原单轨迹安全估计；仅由意图假设产生的横穿风险，合计概率至少为 0.5 才会加入必须停车的硬约束；低概率的假设变道不会单独触发紧急制动。`prediction_multi_intent_enabled`、`prediction_intent_map_radius_m`、`prediction_intent_brake_mps2`、`prediction_intent_accelerate_mps2`、`prediction_intent_lane_change_s` 控制该预测。`expert.prediction.actors[*].intent_modes` 保存原始概率与轨迹，不增加行为标签或训练目标。
 
 对于主车路线内的前车，智能体依据当前车身净距、短时贝叶斯位置分布、反应时间和配置的减速度计算纵向安全速度上限。对于预测横穿路线的车辆，还会比较其预测占用时间与主车通过交叉点的时间，并将速度限制在可提前停车的范围内。物理前后位置校验会排除预测轨迹靠近弯曲路线的后车；横穿预测还要求车辆均值向路线靠近，避免并行车辆触发紧急制动。这使减速能早于三秒重叠风险阈值。`front_min_gap_m`、`front_confidence_z`、`front_lookahead_s` 和 `front_emergency_decel_mps2` 控制安全范围，复用现有的状态和原因标注。
 
@@ -151,17 +153,17 @@ BehaviorAgent 的 `expert` 快照记录状态、决策原因、目标速度和�
 
 附近没有行人时，行人避让检查直接返回，避免基础障碍物检测器把空行人列表解释为“检查所有车辆”。
 
-原始导航路线始终是唯一的驾驶路线。后车不会触发自动换道或追加路线；只有原始导航明确给出换道指令时，才使用 `LANE_CHANGE` 状态和 `lane_change_safe` 原因。原有 `lane_change.cooldown_s` 原始字段保留并写为零，以维持读取兼容性。
+原始导航路线始终是唯一的目标路线。后车不会触发自动换道或追加路线；只有原始导航明确给出换道指令时，才使用 `LANE_CHANGE` 状态和 `lane_change_safe` 原因。当前路线被静止车辆阻挡时，可以在确认同向相邻车道有间隙后临时向左或向右绕行，越过障碍后沿平滑轨迹回到原路线。主车被人为放置到相邻车道时，也可单独触发路径恢复。独立恢复在路口外按车身包围盒触发：侧向偏移达到 min(route_recovery_trigger_m, 车道半宽 − 车身半宽 − 0.2m) 时启动，持续到中心偏移小于 0.2m；左右按 CARLA 坐标系定义。`expert.maneuver_plan` 保存临时路径、目标点、侧向偏差和障碍物 ID；`expert.route_plan` 仍是原始导航队列。原有 `lane_change.cooldown_s` 原始字段保留并写为零，以维持读取兼容性。
 
 主车速度低于 0.5 m/s、在前车后保持停车时，状态仍为 `STOPPING`，原因记为现有的 `follow_vehicle`。仍在行驶并需要立即制动时使用 `emergency_stop`；制动控制不受这项标签调整影响。
 
 该快照还记录弯道限速、车道居中和行人横穿风险。专家风险属于策略推断，`ego` 与 `bboxes` 才是仿真真值。
 
-有效状态编号为 0 `CRUISE`、1 `FOLLOW`、2 `YIELD`、3 `STOPPING`、4 `LANE_CHANGE`、5 `APPROACH_STOP`、6 `CREEP`。有效原因编号为 0 `cruise`、1 `follow_vehicle`、2 `predicted_conflict`、3 `pedestrian_risk`、4 `red_light`、5 `yellow_light`、6 `comfortable_braking`、7 `lane_change_safe`、8 `emergency_stop`、9 `red_light_approach`、10 `yellow_light_approach`、11 `red_light_creep`、12 `curve_speed`、13 `lane_centering`。
+有效状态编号为 0 `CRUISE`、1 `FOLLOW`、2 `YIELD`、3 `STOPPING`、4 `LANE_CHANGE`、5 `APPROACH_STOP`、6 `CREEP`、7 `AVOID_LEFT`、8 `AVOID_RIGHT`、9 `RECOVER_LEFT`、10 `RECOVER_RIGHT`。原有原因编号 0–13 不变，新增 14 `obstacle_avoid_left`、15 `obstacle_avoid_right`、16 `route_recover_left`、17 `route_recover_right`。
 
 驾驶缓存提供 `annotation_valid`、`annotation_state`、`annotation_reason`、`annotation_probabilities[3]`（预测冲突概率、左侧车道可用性、右侧车道可用性）及逐维有效掩码。车道可用性只检查车道线与相邻驾驶车道，不保证动态交通间隙安全。风险间距、TTC 与专家规划航点仍保留在场景元数据中，但不作为模型辅助预测目标。
 
-`navigation_command` 固定为 0 直行、1 左转、2 右转、3 右变道、4 左变道。采集器根据 HDMap 路线保存指令，v8 驾驶缓存要求直接读取该指令。
+`navigation_command` 始终保留原导航五类：0 直行、1 左转、2 右转、3 右变道、4 左变道；`raw_navigation_command` 保存同一原始指令。独立的 `recovery_command` 为 0 无恢复、1 向右恢复、2 向左恢复，可与任意导航指令同时存在。绕障仅作为状态和原因。v15-parallel-recovery 缓存同时保存两路输入，模型使用独立恢复嵌入；旧场景缺恢复信息时为 0，过渡版 5/6 指令在存在原始指令时拆回两路。旧缓存命名空间保留，原五类导航权重可直接加载，新恢复嵌入需要训练。
 
 模型模式额外包含：
 
@@ -279,3 +281,7 @@ carla_collector:
         - {num_vehicles: 20, num_walkers: 5, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.0, walker_arrival_radius_m: 2.0, tm_port: 8000}
         - {num_vehicles: 80, num_walkers: 30, vehicle_filter: vehicle.*, walker_filter: walker.pedestrian.*, walker_running_pct: 0.2, walker_arrival_radius_m: 2.0, tm_port: 8000}
 ```
+
+连续路径跟踪由 `continuous_route_tracking` 控制，前瞻点沿原导航折线连续移动，减少离散路点切换造成的转向跳变。`turn_alignment_threshold_deg` 在车头尚未对齐时维持弯道限速。
+
+构造场景脚本为 `evaluation/route_recovery_scenarios.py`（采集器 Python 3.7）；用 `evaluation/pack_review_scenes.py`（仓库 Python）将生成的 JSON 封装为标准 scene_*/lmdb。场景保存人工静止障碍物、真值包围盒、原始路线、并行恢复指令、状态和原因，可用 `vis/data_vis/run.py --scene <目录>` 查看；无渲染模式不包含 RGB。

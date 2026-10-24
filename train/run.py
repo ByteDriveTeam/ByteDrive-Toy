@@ -37,6 +37,7 @@ from data.driving_cache import DrivingSliceDataset
 from data.perception_dataset import PerceptionDataset
 from data.scene_batch_sampler import SceneBatchSampler
 from model.driving_model import DrivingModel
+from model.driving_model.checkpoint_compat import compatible_driving_state
 from model.perception_model import PerceptionModel
 from model.bevseg_compressor import BEVSegCompressor
 from model.privileged_bev_vae import PrivilegedBEVVAE
@@ -159,10 +160,8 @@ def _optimizer_param_names(model, optimizer):
 def _load_compatible_model(model, saved_state):
     """载入键名与形状均兼容的模型权重；新增或改形状参数保留构造期初始化。"""
     current = model.state_dict()
-    compatible = {name: value for name, value in saved_state.items()
-                  if name in current and tuple(value.shape) == tuple(current[name].shape)}
-    skipped = [name for name, value in saved_state.items()
-               if name not in current or tuple(value.shape) != tuple(current[name].shape)]
+    compatible, exact_names = compatible_driving_state(current, saved_state)
+    skipped = [name for name in saved_state if name not in compatible]
     missing, unexpected = model.load_state_dict(compatible, strict=False)
     initialized = [name for name in missing if "backbone." not in name]
     print("[train] 模型兼容恢复：载入 {} 项，新增初始化 {} 项，跳过 {} 项".format(
@@ -171,7 +170,7 @@ def _load_compatible_model(model, saved_state):
         print("[train]   新增/未覆盖参数保留自动初始化：{}".format(initialized[:8]))
     if skipped or unexpected:
         print("[train]   ⚠ 不兼容或多余参数：{}".format((skipped + list(unexpected))[:8]))
-    return set(compatible)
+    return exact_names
 
 
 def _load_compatible_optimizer(model, optimizer, saved, saved_name_groups, loaded_names):

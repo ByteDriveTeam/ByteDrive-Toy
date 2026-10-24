@@ -53,12 +53,13 @@ class DrivingSliceCache:
                    "action_vocabulary_hash": artifact_hash,
                    "action_vocabulary_size": cfg.model.unified_driving.action_vocab_size,
                    "navigation_commands": cfg.model.unified_driving.navigation_commands,
+                   "recovery_commands": cfg.model.unified_driving.recovery_commands,
                    "navigation_lookahead_m": cfg.data.driving_cache.navigation_lookahead_m,
                    "navigation_turn_threshold_deg": cfg.data.driving_cache.navigation_turn_threshold_deg,
                    "navigation_lane_match_radius_m": cfg.data.driving_cache.navigation_lane_match_radius_m,
                    "navigation_heading_tolerance_deg": cfg.data.driving_cache.navigation_heading_tolerance_deg,
                    "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
-                   "annotation_schema_version": 6,
+                   "annotation_schema_version": 8,
                    "risk_targets": "masked_conflict_and_lane_availability",
                    "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -210,9 +211,25 @@ def pack_driving_sample(sample, words, residual_mean, residual_std, cfg):
     if isinstance(command, str):
         command = cfg.model.unified_driving.navigation_commands.index(command)
     command = int(command)
-    if not 0 <= command < 5:
-        raise ValueError("navigation_command 必须是 0..4 的类别 ID")
+    frame = sample.get("frame_meta") or {}
+    recovery = sample.get("recovery_command", frame.get("recovery_command"))
+    if recovery is None:
+        recovery = (_sample_expert(sample).get("navigation") or {}).get("recovery_command", 0)
+    # Read interim scenes that encoded recovery in the route command only
+    # when the preserved original command is available.
+    if command in (5, 6):
+        recovery = command - 4
+        command = sample.get("raw_navigation_command", frame.get("raw_navigation_command"))
+        if command is None:
+            raise ValueError("Legacy recovery requires raw_navigation_command")
+        command = int(command)
+    if not 0 <= command < len(cfg.model.unified_driving.navigation_commands):
+        raise ValueError("navigation_command 超出配置的导航类别范围")
     packed["navigation_command"] = torch.tensor(command, dtype=torch.long)
+    recovery = int(recovery)
+    if not 0 <= recovery < len(cfg.model.unified_driving.recovery_commands):
+        raise ValueError("recovery_command must be none/right/left (0/1/2)")
+    packed["recovery_command"] = torch.tensor(recovery, dtype=torch.long)
     raw_actions = sample.get("trajectory_actions")
     if raw_actions is None:
         raw_actions = trajectory_to_planar_accelerations(
@@ -287,6 +304,13 @@ def prepare_driving_cache(samples, cfg):
                     skipped += 1
                     continue
                 frame = active_reader.frames[int(sample["index"])]
+                # Both independent commands come from the saved frame.
+                sample["frame_meta"] = frame
+                if "navigation_command" in frame:
+                    sample["navigation_command"] = active_reader.reader.navigation_command(
+                        int(sample["index"]), cfg)
+                sample["recovery_command"] = active_reader.reader.recovery_command(
+                    int(sample["index"]))
                 sample["trajectory"] = torch.from_numpy(active_reader.gt_trajectory(
                     int(sample["index"]), cfg.model.unified_driving.num_waypoints))
                 yaw = math.radians(float(frame["ego"]["transform"][5]))
