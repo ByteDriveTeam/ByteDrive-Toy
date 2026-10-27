@@ -5,8 +5,9 @@
 读取配置: —（全部参数由第三方调用方传入）
 对外接口:
     - Mamba3(...) -> nn.Module
-    - Mamba3State(angle, ssm, prev_b, prev_x) -> state
-    - mamba3_forward(x, layer, mask=None, state=None, return_state=False)
+    - Mamba3State(angle, ssm, prev_b, prev_x) -> state  # clone/detach/reset 管理缓存
+    - mamba3_forward(x, layer, mask=None, state=None, return_state=False, reset=None,
+                     checkpoint_chunks=False)
         -> Tensor 或 (Tensor, Mamba3State)
 说明: 只提供单层算子；堆叠、残差和任务头由外部模型决定。
 """

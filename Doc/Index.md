@@ -128,6 +128,8 @@ Python 3.12 collector:
 - [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — Twelve-layer block-causal visual processor and planar acceleration vocabulary residual decoder
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — Public single-layer PyTorch Mamba-3 API with explicit incremental state
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — Single-layer Mamba-3 with parallel training scan and step inference
+- [model/mamba3/checks/test_mamba3.py](../model/mamba3/checks/test_mamba3.py) — Mamba-3 官方计算定义与混合精度状态的回归测试
+- [Doc/Mamba3.md](Mamba3.md) — Mamba-3 的精度、状态、分段扫描与训练接入约定
 - [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — Public API for the grouped discrete BEVSeg compressor
 - [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — 384-dimensional residual BEVSeg encoder, grouped discrete codebook sampling, and ICNR-initialized PixelShuffle decoder
 - [model/bevseg_vae64/__init__.py](../model/bevseg_vae64/__init__.py) — Public API for full-BEV 64x continuous-latent VAE
@@ -147,6 +149,7 @@ Python 3.12 collector:
 - [train/__init__.py](../train/__init__.py) — Training/optimization/evaluation package marker
 - [train/losses/losses.py](../train/losses/losses.py) — Multitask perception, field, lane, traffic-control, trajectory, behavior, and safety losses
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — Optimizer construction for trainable parameters actually used by the task forward path
+- [train/optimizer/checks/test_optimizer.py](../train/optimizer/checks/test_optimizer.py) — 优化器参数范围与免衰减分组的回归测试
 - [train/loop/loop.py](../train/loop/loop.py) — Perception/driving forward and loss paths, backward pass, gradient clipping, optimizer step, and logging
 - [train/run.py](../train/run.py) — Unified training CLI for perception, driving, BEVSeg, and continuous-latent VAE tasks, with cache warmup and checkpoint resume
 - [train/bevseg/__init__.py](../train/bevseg/__init__.py) — Public API for BEVSeg loss and training loop

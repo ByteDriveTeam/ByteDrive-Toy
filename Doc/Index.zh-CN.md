@@ -129,6 +129,8 @@ Py312 编排处理端 collector/（根 .venv 运行）
 - [model/driving_model/unified_driving_model.py](../model/driving_model/unified_driving_model.py) — 四帧十二层块因果视觉主干及二维加速度词表残差解码器
 - [model/mamba3/__init__.py](../model/mamba3/__init__.py) — 单层纯 PyTorch Mamba-3 的公开 API 重导出入口
 - [model/mamba3/mamba3.py](../model/mamba3/mamba3.py) — 单层纯 PyTorch Mamba-3：并行训练扫描与显式增量状态
+- [model/mamba3/checks/test_mamba3.py](../model/mamba3/checks/test_mamba3.py) — Mamba-3 官方计算定义与混合精度状态的回归测试
+- [Doc/Mamba3.md](Mamba3.md) — Mamba-3 的精度、状态、分段扫描与训练接入约定
 - [model/bevseg_compressor/__init__.py](../model/bevseg_compressor/__init__.py) — BEVSeg 分层离散压缩器公共 API
 - [model/bevseg_compressor/bevseg_compressor.py](../model/bevseg_compressor/bevseg_compressor.py) — BEVSeg 编码、分层离散采样与 PixelShuffle 解码网络
 - [model/bevseg_vae64/__init__.py](../model/bevseg_vae64/__init__.py) — 整幅 BEV 64 倍空间压缩 VAE 的公开 API
@@ -148,6 +150,7 @@ Py312 编排处理端 collector/（根 .venv 运行）
 - [train/__init__.py](../train/__init__.py) — 训练 / 优化 / 评估循环包标识：只读消费 config
 - [train/losses/losses.py](../train/losses/losses.py) — 多任务监督损失：感知、驾驶场、道路线、交通控制、轨迹行为及安全约束
 - [train/optimizer/optimizer.py](../train/optimizer/optimizer.py) — 优化器构造：仅优化任务前向实际使用的可训练参数，冻结或未参与前向的模块不纳入
+- [train/optimizer/checks/test_optimizer.py](../train/optimizer/checks/test_optimizer.py) — 优化器参数范围与免衰减分组的回归测试
 - [train/loop/loop.py](../train/loop/loop.py) — 训练与评估循环：前向 → 多任务损失 → 反向 → 梯度裁剪 → 步进，并聚合日志
 - [train/run.py](../train/run.py) — 统一训练入口 CLI：按任务加载配置，构建模型与数据，逐 epoch 训练并保存检查点
 - [train/bevseg/__init__.py](../train/bevseg/__init__.py) — BEVSeg 训练损失与 epoch 循环公共 API

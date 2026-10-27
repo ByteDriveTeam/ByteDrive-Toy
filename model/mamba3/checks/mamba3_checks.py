@@ -1,26 +1,39 @@
 # 本文件为 model/mamba3/mamba3.py 的校验伴随文件（规范 §7.1，免文件头）。
 
+import math
+from numbers import Integral, Real
+
 import torch
 
 
 def check_mamba3_inputs(d_model, d_state, expand, headdim, ngroups, rope_fraction,
                         dt_min, dt_max, dt_init_floor, a_floor, is_mimo,
-                        mimo_rank, chunk_size, norm_eps):
+                        mimo_rank, chunk_size, norm_eps, is_outproj_norm,
+                        fuse_pregate_headwise_norm):
     """校验对象: Mamba3 构造参数 —— 单层投影、状态和稳定性参数必须可实现。"""
-    if d_model <= 0 or d_state <= 0 or expand <= 0 or headdim <= 0:
-        raise ValueError("d_model/d_state/expand/headdim 必须为正整数。")
+    integers = {"d_model": d_model, "d_state": d_state, "expand": expand, "headdim": headdim,
+                "ngroups": ngroups, "mimo_rank": mimo_rank, "chunk_size": chunk_size}
+    if any(isinstance(v, bool) or not isinstance(v, Integral) or v <= 0 for v in integers.values()):
+        raise ValueError("d_model/d_state/expand/headdim/ngroups/mimo_rank/chunk_size 必须为正整数类型。")
+    scalars = (rope_fraction, dt_min, dt_max, dt_init_floor, a_floor, norm_eps)
+    limit = torch.finfo(torch.float32)
+    if any(isinstance(v, bool) or not isinstance(v, Real) or not math.isfinite(v)
+           or not limit.tiny * limit.eps <= v <= limit.max for v in scalars):
+        raise ValueError("rope_fraction/dt_min/dt_max/dt_init_floor/A_floor/norm_eps 必须为 FP32 可表示的有限正数。")
+    if any(not isinstance(v, bool) for v in (is_mimo, is_outproj_norm, fuse_pregate_headwise_norm)):
+        raise ValueError("is_mimo/is_outproj_norm/fuse_pregate_headwise_norm 必须为 bool。")
     if d_model * expand % headdim != 0:
         raise ValueError("d_model*expand 必须被 headdim 整除。")
-    if ngroups <= 0 or (d_model * expand // headdim) % ngroups != 0:
+    if (d_model * expand // headdim) % ngroups != 0:
         raise ValueError("ngroups 必须为正数且整除 heads。")
     if rope_fraction not in (0.5, 1.0):
         raise ValueError("rope_fraction 仅支持 0.5 或 1.0。")
     if int(d_state * rope_fraction) < 2 or int(d_state * rope_fraction) % 2:
         raise ValueError("rope_fraction*d_state 必须产生至少一对偶数旋转维。")
-    if not (0 < dt_min <= dt_max) or dt_init_floor <= 0 or a_floor <= 0:
+    if is_mimo and d_state % 2:
+        raise ValueError("MIMO 的 d_state 必须为偶数，以支持完整状态维的分半旋转。")
+    if dt_min > dt_max:
         raise ValueError("dt_min/dt_max/dt_init_floor/A_floor 参数非法。")
-    if mimo_rank <= 0 or chunk_size <= 0 or norm_eps <= 0:
-        raise ValueError("mimo_rank/chunk_size/norm_eps 必须为正数。")
     if not is_mimo and mimo_rank != 1:
         raise ValueError("SISO 模式的 mimo_rank 必须为 1。")
 
@@ -38,22 +51,34 @@ def _check_mamba3_state(state, layer, batch_size, device):
         raise ValueError("Mamba3State 形状非法，期望 {}，实际 {}。".format(expected, actual))
     if any(t.device != device for t in (state.angle, state.ssm, state.prev_b, state.prev_x)):
         raise ValueError("Mamba3State 必须与输入位于同一 device。")
+    if state.angle.dtype != torch.float32 or state.ssm.dtype != torch.float32:
+        raise ValueError("Mamba3State 的 angle/ssm 必须为 FP32。")
+    if not state.prev_b.is_floating_point() or state.prev_b.dtype != state.prev_x.dtype:
+        raise ValueError("Mamba3State 的 prev_b/prev_x 必须使用相同的浮点 dtype。")
 
 
-def check_mamba3_forward_inputs(x, mask, state, layer):
+def check_mamba3_reset_inputs(mask, shape, device):
+    """校验对象: mask/reset —— 必须为与输入布局、设备匹配的 bool 张量。"""
+    if mask is not None and (mask.shape != shape or mask.dtype != torch.bool or mask.device != device):
+        raise ValueError("mask/reset 期望形状 {}、bool 且与输入位于同一 device。".format(tuple(shape)))
+
+
+def check_mamba3_forward_inputs(x, mask, state, layer, reset=None, checkpoint_chunks=False):
     """校验对象: Mamba3.forward 的全部入参。"""
     if x.ndim != 3 or int(x.shape[-1]) != layer.d_model:
         raise ValueError("x 期望 [B,L,d_model={}], 实际 {}。".format(layer.d_model, tuple(x.shape)))
-    if mask is not None and (mask.ndim != 2 or mask.shape[:2] != x.shape[:2]
-                             or mask.dtype != torch.bool
-                             or mask.device != x.device):
-        raise ValueError("mask 期望 [B,L] bool，实际 {} / {}。".format(tuple(mask.shape), mask.dtype))
+    if not isinstance(checkpoint_chunks, bool):
+        raise ValueError("checkpoint_chunks 必须为 bool。")
+    check_mamba3_reset_inputs(mask, x.shape[:2], x.device)
+    check_mamba3_reset_inputs(reset, x.shape[:2], x.device)
     if state is not None:
         _check_mamba3_state(state, layer, int(x.shape[0]), x.device)
 
 
-def check_mamba3_step_inputs(x, state, layer):
+def check_mamba3_step_inputs(x, state, layer, mask=None, reset=None):
     """校验对象: Mamba3.step 的 token 与 state 入参。"""
     if x.ndim != 2 or int(x.shape[-1]) != layer.d_model:
         raise ValueError("step 输入 x 期望 [B,d_model={}], 实际 {}。".format(layer.d_model, tuple(x.shape)))
+    check_mamba3_reset_inputs(mask, x.shape[:1], x.device)
+    check_mamba3_reset_inputs(reset, x.shape[:1], x.device)
     _check_mamba3_state(state, layer, int(x.shape[0]), x.device)
