@@ -176,6 +176,9 @@ def _handle_start_scene(state, args):
         "static_bboxes": drive["static_bboxes"], "intrinsics": drive["intrinsics"],
         "extrinsics": drive["extrinsics"], "lidar_extrinsic": drive["lidar_extrinsic"],
         "traffic_lights": drive["traffic_light_metadata"],
+        "initial_navigation": drive['agent'].get_local_planner().get_initial_navigation(
+            state['cfg'].data.driving_cache.navigation_lookahead_m,
+            state['cfg'].data.driving_cache.navigation_turn_threshold_deg),
     }
     status, frames, kinematics = _run_chunk(state)  # 可能就地清除 state["drive"]（非 partial）
     return dict(status=status, num_frames=len(frames), frames=frames,

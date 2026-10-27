@@ -20,6 +20,7 @@ from data.hd_map import HdMap
 from model.driving_model.unified_driving_model import integrate_planar_accelerations, signed_log
 from vis.data_vis.geometry import bbox_corners, transform_points, world_to_ego
 from vis.data_vis.reader import SceneReader
+from data.carla_data_collector.common.obstacle_geometry import SOLID_SEMANTICS, vertical_overlap
 
 
 __all__ = ["SceneTrajectoryRisk"]
@@ -211,8 +212,11 @@ class SceneTrajectoryRisk:
             position = world[:, step]
             angle = world_headings[:, step]
             corners = _box_corners(position, angle, front, side)
-            for actor in metadata.get("bboxes", []):
-                if actor.get("semantic") not in ("vehicle", "pedestrian"):
+            future_ego = next((box for box in metadata.get('bboxes', [])
+                               if box.get('semantic') == 'ego'), ego_boxes[0])
+            actors = list(metadata.get('bboxes', [])) + self._near_static_boxes(corners, future_ego)
+            for actor in actors:
+                if actor.get("semantic") not in SOLID_SEMANTICS or not vertical_overlap(actor, future_ego):
                     continue
                 actor_corners = bbox_corners(actor)[:4, :2]
                 flags[:, 0] |= _overlap_polygons(corners, actor_corners)
@@ -245,6 +249,25 @@ class SceneTrajectoryRisk:
         flags[:, 2] = (np.linalg.norm(actions[:, 0] - history, axis=-1) / dt
                        > self.cfg.model.unified_driving.risk_jerk_limit_mps3)
         return flags
+
+    def _near_static_boxes(self, corners, ego):
+        """Reuse scene-level solids and reject distant/other-level boxes in bulk."""
+        if not hasattr(self, '_solid_static_boxes'):
+            self._solid_static_boxes = [box for box in self.meta.get('static_bboxes', [])
+                                        if box.get('semantic') in ('static', 'pole')]
+            self._solid_static_bounds = np.asarray([
+                [*bbox_corners(box)[:, :2].min(0), *bbox_corners(box)[:, :2].max(0),
+                 box['location'][2] - box['extent'][2], box['location'][2] + box['extent'][2]]
+                for box in self._solid_static_boxes], dtype=float).reshape(-1, 6)
+        bounds = self._solid_static_bounds
+        if not len(bounds):
+            return []
+        lower, upper = corners.min((0, 1)), corners.max((0, 1))
+        selected = ((bounds[:, 0] <= upper[0]) & (bounds[:, 1] <= upper[1]) &
+                    (bounds[:, 2] >= lower[0]) & (bounds[:, 3] >= lower[1]) &
+                    (bounds[:, 4] <= ego['location'][2] + ego['extent'][2]) &
+                    (bounds[:, 5] >= ego['location'][2] - ego['extent'][2]))
+        return [box for box, keep in zip(self._solid_static_boxes, selected) if keep]
 
     def evaluate(self, sample, physical_words):
         """输出 [词数,5] 和 [5] 风险；缺失真值则明确拒绝该切片。"""

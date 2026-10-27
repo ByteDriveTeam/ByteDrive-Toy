@@ -28,7 +28,6 @@ import numpy as np
 import copy
 
 from common import protocol as P
-from common.navigation_command import navigation_command_from_plan
 from common.shm import ArenaFull
 from worker import annotations, traffic_control
 from worker.collect.checks.collect_checks import check_destination
@@ -225,8 +224,7 @@ def collect_chunk(world, ego, agent, rig, crowd, traffic_lights, traffic_light_m
             return P.STATUS_PARTIAL, frames, kinematics
 
         traffic_states = traffic_control.traffic_light_states(traffic_lights)
-        raw_navigation_command = navigation_command_from_plan(
-            ego.get_location(), agent.get_local_planner().get_plan(),
+        raw_navigation_command = agent.get_local_planner().get_navigation_command(
             navigation_cfg.navigation_lookahead_m,
             navigation_cfg.navigation_turn_threshold_deg)
         recovery_command = int((expert.get("navigation") or {}).get("recovery_command", 0))

@@ -178,6 +178,7 @@ def _persist(scene_id, map_name, route, seed, weather, frames, kinematics, statu
         "intrinsics": static_meta["intrinsics"], "extrinsics": static_meta["extrinsics"],
         "lidar_extrinsic": static_meta["lidar_extrinsic"], "static_bboxes": static_meta["static_bboxes"],
         "traffic_lights": static_meta["traffic_lights"],
+        "initial_navigation": static_meta.get("initial_navigation"),
         "camera_names": cam_names, "video_files": video_files,
     }
     est = _estimate_lmdb_bytes(
@@ -228,7 +229,7 @@ def _collect_route(worker, map_name, route, route_index, saved, cc, arena, outpu
         # 内外参/静态框整次行驶不变，仅首段回传，供本次行驶所有段复用
         static_meta = {k: r[k] for k in
                        ("intrinsics", "extrinsics", "lidar_extrinsic", "static_bboxes",
-                        "traffic_lights")}
+                        "traffic_lights", "initial_navigation")}
         drive_id = "scene_{:06d}".format(saved + segs_total)
         seg_idx = 0
         segs_drive = 0  # 本次行驶（本 attempt）已落段数

@@ -70,6 +70,28 @@ def _travel(speed, acceleration, time_s):
     return max(speed * time_s + 0.5 * acceleration * time_s * time_s, 0.0)
 
 
+def motion_lane_context(lane_context, velocity):
+    """Orient lane intent evidence with observed motion, including wrong-way cars."""
+    if lane_context is None:
+        return None
+    velocity = np.asarray(velocity, dtype=np.float64)[:2]
+    speed = float(np.linalg.norm(velocity))
+    if speed < .5:
+        return lane_context
+    direction = np.asarray(lane_context["direction"], dtype=np.float64)
+    alignment = float(np.dot(velocity / speed, direction))
+    if abs(alignment) < .6:
+        # A crossing car is not following this lane; retain measured motion.
+        return None
+    if alignment >= 0.:
+        return lane_context
+    result = dict(lane_context)
+    result.update(direction=-direction, offset_m=-lane_context.get("offset_m", 0.),
+                  left=lane_context.get("right", False),
+                  right=lane_context.get("left", False), wrong_way=True)
+    return result
+
+
 def predict_intent_modes(position, velocity, times, base_covariances,
                          probabilities, lane_context, lateral_speed_mps,
                          brake_mps2=2.0, accelerate_mps2=1.2,
@@ -78,6 +100,10 @@ def predict_intent_modes(position, velocity, times, base_covariances,
     position = np.asarray(position, dtype=np.float64)[:2]
     velocity = np.asarray(velocity, dtype=np.float64)[:2]
     speed = float(np.linalg.norm(velocity))
+    original_context = lane_context
+    lane_context = motion_lane_context(lane_context, velocity)
+    if lane_context is not original_context and lane_context is not None:
+        lateral_speed_mps = -lateral_speed_mps
     if lane_context is not None:
         heading = np.asarray(lane_context["direction"], dtype=np.float64)
         heading /= max(float(np.linalg.norm(heading)), 1e-6)

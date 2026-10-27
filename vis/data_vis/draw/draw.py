@@ -404,6 +404,17 @@ def _put_hud(canvas, fmeta, state, traffic_light_lines, avail):
             recoveries[recovery] if 0 <= recovery < len(recoveries) else recovery))
         if not avail.get("rgb"):
             lines.append("route green | maneuver purple | trace yellow")
+        safety = expert.get("maneuver_safety") or {}
+        if safety:
+            candidates = [safety] if 'safe' in safety else safety.get("candidates", [safety])
+            blockers = sorted({item["actor_id"] for candidate in candidates
+                               for item in candidate.get("blocking_actors", [])})
+            probability = max((candidate.get("max_conflict_probability", 0.)
+                               for candidate in candidates), default=0.)
+            lines.append("gap {} | actors {} | p {:.2f}".format(
+                "CONFIRM" if safety.get('admission_status') == 'confirming' else
+                "WAIT" if safety.get("waiting_for_gap") else "CLEAR",
+                ",".join(str(value) for value in blockers[:5]) or "none", probability))
     if state.get("failed"):
         lines.insert(0, "FAILED: {}".format(state.get("failure_status") or "unknown"))
 

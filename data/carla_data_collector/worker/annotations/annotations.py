@@ -20,6 +20,9 @@ _ENV_LABELS = [
     ("traffic_light", carla.CityObjectLabel.TrafficLight),
     ("pole", carla.CityObjectLabel.Poles),
     ("static", carla.CityObjectLabel.Static),
+    ("static", carla.CityObjectLabel.GuardRail),
+    ("static", carla.CityObjectLabel.Fences),
+    ("static", carla.CityObjectLabel.Walls),
 ]
 
 
@@ -37,7 +40,10 @@ def _actor_bbox(actor, semantic):
     center = carla.Location(bb.location.x, bb.location.y, bb.location.z)
     tf.transform(center)  # 原地变换到世界坐标
     world_bb = carla.BoundingBox(center, bb.extent)
-    world_bb.rotation = tf.rotation
+    world_bb.rotation = carla.Rotation(
+        pitch=tf.rotation.pitch + bb.rotation.pitch,
+        yaw=tf.rotation.yaw + bb.rotation.yaw,
+        roll=tf.rotation.roll + bb.rotation.roll)
     payload = bbox_to_dict(world_bb, semantic, "actor", actor.id)
     velocity = actor.get_velocity()
     angular_velocity = actor.get_angular_velocity()
@@ -55,4 +61,6 @@ def dynamic_bboxes(world, ego_id):
     vehicles = [_actor_bbox(a, "ego" if a.id == ego_id else "vehicle")
                 for a in actors.filter("vehicle.*")]
     walkers = [_actor_bbox(a, "pedestrian") for a in actors.filter("walker.pedestrian.*")]
-    return vehicles + walkers
+    props = [_actor_bbox(a, 'static') for a in actors.filter('static.prop.*')
+             if hasattr(a, 'bounding_box')]
+    return vehicles + walkers + props

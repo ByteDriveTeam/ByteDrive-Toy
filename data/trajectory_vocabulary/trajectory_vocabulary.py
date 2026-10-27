@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from data.driving_cache import trajectory_to_planar_accelerations
+from data.navigation_goal_filter import navigation_training_prefix
 from data.single_frame_base import successful_scene_meta
 from model.driving_model.unified_driving_model import signed_log
 from vis.data_vis.reader import SceneReader, list_scenes
@@ -42,6 +43,7 @@ def _resample(kinematics, step):
 
 
 def _window_features(kin, cfg):
+    kin = navigation_training_prefix(kin)
     t, pos, speed = _resample(kin, cfg.motion_resample_s)
     if len(t) < 3:
         return np.empty((0, 50, 2), np.float32), np.empty((0, 8), np.float32)
@@ -97,7 +99,9 @@ def _collect(cfg):
             reader = SceneReader(scene, open_videos=False)
             if not successful_scene_meta(reader.meta):
                 reader.close(); continue
-            g, s = _window_features(reader.kinematics(), cfg)
+            kin = navigation_training_prefix(reader.kinematics(),
+                (reader.frame_meta(i) for i in range(reader.num_frames)))
+            g, s = _window_features(kin, cfg)
             reader.close()
         except Exception:
             continue
@@ -251,6 +255,7 @@ def generate_vocabulary(cfg):
 
 def _action_windows(kinematics, cfg):
     """按动作采样频率取得真实未来轨迹、物理动作与当前运动学状态。"""
+    kinematics = navigation_training_prefix(kinematics)
     if len(kinematics) < 3:
         return None
     raw_time = np.asarray([row["sim_time"] for row in kinematics], dtype=np.float64)
@@ -306,7 +311,9 @@ def _action_examples(cfg):
             if not successful_scene_meta(reader.meta):
                 reader.close()
                 continue
-            window = _action_windows(reader.kinematics(), cfg)
+            kin = navigation_training_prefix(reader.kinematics(),
+                (reader.frame_meta(i) for i in range(reader.num_frames)))
+            window = _action_windows(kin, cfg)
             reader.close()
         except (OSError, ValueError, KeyError):
             continue

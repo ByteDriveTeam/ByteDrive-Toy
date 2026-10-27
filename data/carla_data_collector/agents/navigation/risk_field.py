@@ -4,6 +4,7 @@ import math
 from dataclasses import replace
 
 import numpy as np
+from common.obstacle_geometry import path_hits_box, projected_extents
 
 
 def _interval_probability(mean, sigma, half_width):
@@ -19,6 +20,14 @@ def _route_geometry(route_points):
     if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] < 2:
         return None
     points = points[:, :2]
+    # The ego origin and the first queued waypoint can differ by submillimetre
+    # spawn/tracking jitter. Such a segment has an arbitrary tangent; projecting
+    # a distant rear actor onto it can turn that actor into a front obstacle.
+    kept = [points[0]]
+    for point in points[1:]:
+        if np.linalg.norm(point - kept[-1]) >= .05:
+            kept.append(point)
+    points = np.asarray(kept, dtype=np.float64)
     if len(points) == 1:
         return points, np.zeros((1,), dtype=np.float64), np.zeros((1, 2)), np.zeros((1,))
     delta = np.diff(points, axis=0)
@@ -67,6 +76,9 @@ def _project_route_segment(position, points, arc):
 
 def _vehicle_route_extents(prediction, route_direction):
     """Project an oriented vehicle box using its predicted travel direction."""
+    if getattr(prediction, 'static_box', None) is not None:
+        length, width = projected_extents(prediction.static_box, route_direction)
+        return length, width, 1.
     length = max(float(prediction.extent_xy[0]), 0.5)
     width = max(float(prediction.extent_xy[1]), 0.25)
     second = 1 if len(prediction.means) > 1 else 0
@@ -172,7 +184,11 @@ def plan_front_vehicle_speed(route_points, predictions, ego_position,
     ego_speed = max(float(ego_speed_mps), 0.0)
     decel = max(float(comfort_decel_mps2), 0.1)
     for prediction in predictions or ():
-        if prediction.actor_type != "vehicle" or len(prediction.means) == 0:
+        if prediction.actor_type not in ("vehicle", "static") or len(prediction.means) == 0:
+            continue
+        if prediction.actor_type == 'static' and not path_hits_box(
+                route_points, prediction.static_box,
+                (ego_half_length_m, ego_half_width_m), lateral_margin_m):
             continue
         first_arc, first_lateral, first_direction = _project_route_segment(
             prediction.means[0], points, arc)
@@ -266,9 +282,12 @@ def plan_front_vehicle_speed(route_points, predictions, ego_position,
                 second_time - first_time, 1e-3)
         else:
             lead_speed = float(prediction.speed_mps)
-        lead_speed = max(0.0, min(float(lead_speed),
+        signed_lead_speed = float(lead_speed)
+        lead_speed = max(0.0, min(signed_lead_speed,
                                   max(float(prediction.speed_mps), 0.0) + 1.5))
-        current_arc = first_arc - lead_speed * first_time
+        current_position = getattr(prediction, "current_position", None)
+        current_arc = (_project_route_segment(current_position, points, arc)[0]
+                       if current_position is not None else first_arc - signed_lead_speed * first_time)
         if current_arc <= ego_arc + 0.5:
             continue
         gap = current_arc - ego_arc - max(float(ego_half_length_m), 0.5) - extent_x
@@ -297,12 +316,16 @@ def plan_front_vehicle_speed(route_points, predictions, ego_position,
         hard_gap = (max(float(minimum_gap_m), 0.0) + 0.3 * ego_speed +
                     max(ego_speed ** 2 - lead_speed ** 2, 0.0) /
                     (2.0 * max(float(emergency_decel_mps2), decel)))
+        if signed_lead_speed < -.5:
+            hard_gap += -signed_lead_speed * (max(float(reaction_time_s), 0.) +
+                         ego_speed / max(float(emergency_decel_mps2), decel))
         emergency = gap < hard_gap and ego_speed > lead_speed + 0.8
         if speed_cap < result["speed_cap_mps"]:
             result = {"speed_cap_mps": float(speed_cap),
                       "emergency": bool(emergency),
                       "actor_id": int(prediction.actor_id),
-                      "gap_m": float(gap), "kind": "following"}
+                      "gap_m": float(gap),
+                      "kind": "static" if prediction.actor_type == 'static' else "following"}
         elif emergency:
             result["emergency"] = True
     return result
@@ -388,6 +411,10 @@ def evaluate_route_risk(route_points, predictions, ego_position, ego_speed_mps,
     closest_lateral = float("inf")
     for prediction in predictions or ():
         if len(prediction.means) == 0:
+            continue
+        if prediction.actor_type == 'static':
+            # Deterministic static footprints are handled by the front stop
+            # constraint and full swept-path check, not Bayesian motion tails.
             continue
         # Longitudinal braking cannot resolve a conflict caused by a vehicle
         # already following the ego.  Do not let an aggressive extrapolation

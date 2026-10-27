@@ -360,8 +360,13 @@ class ModelCollectionRuntime:
         origin = np.asarray(pose[:2], dtype=np.float64)
         yaw = math.radians(float(pose[5]))
         forward = np.array([math.cos(yaw), math.sin(yaw)], dtype=np.float64)
-        for box in state["bboxes"]:
-            if box.get("semantic") not in ("vehicle", "pedestrian"):
+        if getattr(self, '_stop_environment_boxes', None) is None:
+            self._stop_environment_boxes = [box for box in annotations.static_bboxes(self._world)
+                                            if box.get('semantic') in ('static', 'pole')]
+        for box in list(state["bboxes"]) + self._stop_environment_boxes:
+            if box.get("semantic") not in ("vehicle", "pedestrian", 'static', 'pole'):
+                continue
+            if abs(box['location'][2] - ego_box['location'][2]) > box['extent'][2] + ego_box['extent'][2]:
                 continue
             delta = np.asarray(box["location"][:2], dtype=np.float64) - origin
             distance = float(np.linalg.norm(delta))
@@ -376,6 +381,7 @@ class ModelCollectionRuntime:
         return False
 
     def _destroy_episode(self):
+        self._stop_environment_boxes = None
         if self._rig is not None:
             self._rig.destroy()
         if self._world is not None:

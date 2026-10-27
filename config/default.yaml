@@ -122,10 +122,44 @@ carla_collector:
       prediction_intent_accelerate_mps2: 1.2
       prediction_intent_lane_change_s: 3.0
       obstacle_bypass_enabled: true
+      moving_evasion_enabled: true
+      moving_evasion_horizon_s: 6.0
+      moving_evasion_margin_m: 0.6
+      moving_evasion_max_speed_mps: 5.0
+      moving_evasion_max_offset_m: 3.5
+      moving_evasion_entry_m: 14.0
+      moving_evasion_tracking_reserve_m: 0.4
+      moving_evasion_hard_mode_probability: 0.25
+      static_obstacles_enabled: true
+      static_obstacle_radius_m: 60.0
+      static_obstacle_min_height_m: 0.08
+      static_obstacle_margin_m: 0.6
+      static_obstacle_in_lane_enabled: true
+      static_obstacle_boundary_margin_m: 0.15
       obstacle_min_distance_m: 14.0
       obstacle_max_distance_m: 32.0
       obstacle_approach_m: 18.0
       obstacle_clear_m: 7.0
+      obstacle_stationary_time_s: 2.0
+      obstacle_entry_clear_m: 7.0
+      maneuver_prediction_s: 3.0
+      maneuver_min_gap_m: 3.0
+      maneuver_rear_ttc_s: 4.0
+      maneuver_conflict_probability: 0.2
+      maneuver_clear_time_s: 0.5
+      maneuver_speed_mps: 2.5
+      maneuver_allow_opposite: true
+      maneuver_oncoming_speed_mps: 15.0
+      maneuver_return_buffer_s: 4.0
+      maneuver_max_curvature: 0.18
+      control_longitudinal_kp: 0.12
+      control_longitudinal_ki: 0.02
+      control_coast_speed_mps: 3.0
+      control_coast_decel_mps2: 0.25
+      control_launch_throttle_rate: 0.6
+      control_launch_throttle_max: 0.15
+      navigation_goal_approach_s: 3.0
+      navigation_goal_stop_buffer_m: 0.5
       route_recovery_m: 14.0
       route_recovery_trigger_m: 0.9  # 触发偏移上限；按车身宽度提前至距车道边界 0.2m，持续回正到 0.2m 内
       reaction_time_s: 0.7
@@ -727,7 +761,7 @@ data:
   driving_cache:
     enabled: true
     dir: output/driving-cache
-    version: v15-parallel-recovery
+    version: v16-static-obstacles
     slice_duration_s: 3.0
     navigation_lookahead_m: 40.0
     navigation_turn_threshold_deg: 30.0

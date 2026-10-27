@@ -13,6 +13,20 @@ from agents.navigation.risk_field import (
 
 
 class RouteRiskDirectionalityChecks(unittest.TestCase):
+    def test_submillimetre_origin_jitter_does_not_create_a_forward_rear_actor(self):
+        route = [[0., 0.], [0., .000008], [0., -2.], [0., -40.]]
+        rear = ActorPrediction(77, 'vehicle', np.array([.25, .5, 1.]),
+            np.repeat(np.array([[-3.7, 27.]]), 3, axis=0),
+            np.repeat((np.eye(2) * .1)[None], 3, axis=0), 0., (2.4, .9),
+            current_position=(-3.7, 27.), current_velocity=(0., 0.))
+        result = plan_front_vehicle_speed(route, [rear], [0., 0.], 0.,
+                                          2.4, 1.08, .35, .7, 3.)
+        self.assertIsNone(result['kind'])
+        rear.current_position = (0., -15.)
+        rear.means[:] = [0., -15.]
+        self.assertEqual(plan_front_vehicle_speed(route, [rear], [0., 0.], 2.,
+            2.4, 1.08, .35, .7, 3.)['kind'], 'following')
+
     def setUp(self):
         self.route = [[0.0, 0.0], [5.0, 0.0], [10.0, 0.0], [15.0, 0.0]]
         self.times = np.asarray([0.25, 0.5, 1.0, 1.5, 2.0, 3.0])

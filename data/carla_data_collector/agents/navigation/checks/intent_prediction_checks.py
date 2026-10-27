@@ -8,12 +8,57 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 from agents.navigation.behavior_prediction import ActorPrediction, _Track
-from agents.navigation.intent_prediction import IntentMode
+from agents.navigation.intent_prediction import IntentMode, motion_lane_context, predict_intent_modes
 from agents.navigation.risk_field import (
     evaluate_route_risk, plan_front_vehicle_speed)
 
 
 class IntentPredictionChecks(unittest.TestCase):
+    def test_stopped_vehicle_is_not_extrapolated_backwards(self):
+        track = _Track(1, 'vehicle', 1.5, .25, (2.4, .9))
+        for index in range(7):
+            t = index * .1
+            move_t = min(t, .5)
+            track.update([2. * move_t - 2. * move_t**2, 0.],
+                         [max(2. - 4. * t, 0.), 0.], t)
+        forecast = track.predict(4., .25)
+        np.testing.assert_allclose(forecast.means, np.tile([[.5, 0.]], (16, 1)), atol=1e-6)
+
+    def test_finished_lateral_cut_does_not_predict_a_reverse_cut(self):
+        track = _Track(1, 'vehicle', 1.5, .25, (2.4, .9))
+        context = dict(direction=np.array([1., 0.]), left=True, right=True, offset_m=0.)
+        for index in range(9):
+            t = index * .1
+            track.update([2. * t, min(t, .6)], [2., 1. if t < .6 else 0.], t, context)
+        np.testing.assert_allclose(track.predict(3., .25).means[:, 1], .6, atol=1e-6)
+
+    def test_velocity_tick_oscillation_does_not_create_sustained_acceleration(self):
+        track = _Track(1, 'vehicle', 1.5, .25, (2.4, .9))
+        for index in range(60):
+            track.update([index * .4, 0.], [4. + (-1)**index * .17, 0.], index * .1)
+        self.assertLess(float(np.linalg.norm(track.x[4:6])), .01)
+        self.assertAlmostEqual(track.last_observed_velocity[0], 3.83)
+
+    def test_wrong_way_intents_keep_observed_direction(self):
+        context = {"direction": np.asarray([1., 0.]), "left": True,
+                   "right": False, "offset_m": .4}
+        oriented = motion_lane_context(context, [-8., 0.])
+        self.assertTrue(oriented["wrong_way"])
+        self.assertFalse(oriented["left"])
+        self.assertTrue(oriented["right"])
+        np.testing.assert_array_equal(context["direction"], [1., 0.])
+        times = np.arange(.25, 3.01, .25)
+        modes = predict_intent_modes([30., 0.], [-8., 0.], times,
+            np.tile(np.eye(2)[None], (len(times), 1, 1)),
+            {"keep": .8, "brake": .2}, context, 0.)
+        keep = next(mode for mode in modes if mode.name == "keep")
+        self.assertAlmostEqual(float(keep.means[-1, 0]), 6., places=4)
+        self.assertLess(float(modes[1].means[-1, 0]), 30.)
+
+    def test_crossing_motion_is_not_forced_to_map_heading(self):
+        context = {"direction": np.asarray([1., 0.])}
+        self.assertIsNone(motion_lane_context(context, [0., 6.]))
+
     def setUp(self):
         self.lane = {"direction": np.asarray([1.0, 0.0]),
                      "offset_m": 0.0, "lane_width_m": 3.5,
@@ -37,6 +82,12 @@ class IntentPredictionChecks(unittest.TestCase):
         self.assertGreater(probabilities["keep"], 0.75)
         self.assertLess(probabilities["change_left"], 0.05)
         self.assertLess(probabilities["change_right"], 0.05)
+
+    def test_observed_velocity_is_not_replaced_by_filtered_future_velocity(self):
+        track = self._track([(0., 0., 4., 0.), (.4, 0., 0., 0.)])
+        forecast = track.predict(3., .25)
+        np.testing.assert_array_equal(forecast.current_velocity, [0., 0.])
+        np.testing.assert_allclose(forecast.means[:, 0], .4, atol=1e-6)
 
     def test_history_shifts_brake_and_lane_change_probabilities(self):
         braking = self._track([

@@ -82,10 +82,44 @@ class BehaviorAgentCfg:
     prediction_intent_accelerate_mps2: float
     prediction_intent_lane_change_s: float
     obstacle_bypass_enabled: bool
+    moving_evasion_enabled: bool
+    moving_evasion_horizon_s: float
+    moving_evasion_margin_m: float
+    moving_evasion_max_speed_mps: float
+    moving_evasion_max_offset_m: float
+    moving_evasion_entry_m: float
+    moving_evasion_tracking_reserve_m: float
+    moving_evasion_hard_mode_probability: float
+    static_obstacles_enabled: bool
+    static_obstacle_radius_m: float
+    static_obstacle_min_height_m: float
+    static_obstacle_margin_m: float
+    static_obstacle_in_lane_enabled: bool
+    static_obstacle_boundary_margin_m: float
     obstacle_min_distance_m: float
     obstacle_max_distance_m: float
     obstacle_approach_m: float
     obstacle_clear_m: float
+    obstacle_stationary_time_s: float
+    obstacle_entry_clear_m: float
+    maneuver_prediction_s: float
+    maneuver_min_gap_m: float
+    maneuver_rear_ttc_s: float
+    maneuver_conflict_probability: float
+    maneuver_clear_time_s: float
+    maneuver_speed_mps: float
+    maneuver_allow_opposite: bool
+    maneuver_oncoming_speed_mps: float
+    maneuver_return_buffer_s: float
+    maneuver_max_curvature: float
+    control_longitudinal_kp: float
+    control_longitudinal_ki: float
+    control_coast_speed_mps: float
+    control_coast_decel_mps2: float
+    control_launch_throttle_rate: float
+    control_launch_throttle_max: float
+    navigation_goal_approach_s: float
+    navigation_goal_stop_buffer_m: float
     route_recovery_m: float
     route_recovery_trigger_m: float
     reaction_time_s: float
@@ -1298,8 +1332,38 @@ def validate_config(cfg):
     assert ba.prediction_intent_accelerate_mps2 > 0
     assert ba.prediction_intent_lane_change_s > 0
     assert isinstance(ba.obstacle_bypass_enabled, bool)
+    assert isinstance(ba.moving_evasion_enabled, bool)
+    assert 3. <= ba.moving_evasion_horizon_s <= 10.
+    assert ba.moving_evasion_margin_m >= ba.risk_lateral_margin_m
+    assert 0 < ba.moving_evasion_max_speed_mps <= 10.
+    assert 1.5 <= ba.moving_evasion_max_offset_m <= 4.
+    assert 6. <= ba.moving_evasion_entry_m <= 24.
+    assert .2 <= ba.moving_evasion_tracking_reserve_m <= 1.
+    assert ba.maneuver_conflict_probability <= ba.moving_evasion_hard_mode_probability < .5
+    assert isinstance(ba.static_obstacles_enabled, bool)
+    assert isinstance(ba.static_obstacle_in_lane_enabled, bool)
+    assert ba.static_obstacle_radius_m >= ba.obstacle_max_distance_m
+    assert 0 < ba.static_obstacle_min_height_m < 1.
+    assert ba.static_obstacle_margin_m >= ba.risk_lateral_margin_m
+    assert 0 <= ba.static_obstacle_boundary_margin_m < .5
     assert 0 < ba.obstacle_min_distance_m < ba.obstacle_max_distance_m
     assert ba.obstacle_approach_m > 0 and ba.obstacle_clear_m > 0
+    assert ba.obstacle_stationary_time_s >= 0 and ba.maneuver_clear_time_s >= 0
+    assert 0 < ba.maneuver_prediction_s <= ba.prediction_horizon_s
+    assert ba.maneuver_min_gap_m >= 0 and ba.maneuver_rear_ttc_s > 0
+    assert 0 < ba.maneuver_conflict_probability < 1
+    assert 4 <= ba.obstacle_entry_clear_m < ba.obstacle_approach_m
+    assert ba.maneuver_speed_mps > 0 and ba.maneuver_oncoming_speed_mps > 0
+    assert isinstance(ba.maneuver_allow_opposite, bool)
+    assert ba.maneuver_return_buffer_s >= 2
+    assert 0 < ba.maneuver_max_curvature <= .3
+    assert ba.control_longitudinal_kp > 0 and ba.control_longitudinal_ki >= 0
+    assert 0 < ba.control_coast_speed_mps <= 4.
+    assert 0 < ba.control_coast_decel_mps2 <= 1.
+    assert ba.control_launch_throttle_rate > 0
+    assert 0 < ba.control_launch_throttle_max <= 1.
+    assert ba.navigation_goal_approach_s > 0
+    assert 0 <= ba.navigation_goal_stop_buffer_m < 1.
     assert ba.route_recovery_m > 0 and ba.route_recovery_trigger_m > 0
     assert ba.comfort_decel_mps2 > 0 and ba.max_accel_mps2 > 0 and ba.max_jerk_mps3 > 0
     assert ba.route_plan_horizon_m > 0

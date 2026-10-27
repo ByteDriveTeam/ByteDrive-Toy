@@ -22,6 +22,10 @@ from data.carla_data_collector.common.navigation_command import (
 )
 from data.driving_cache.checks.driving_cache_checks import check_navigation_route
 from data.driving_cache.trajectory_risk import SceneTrajectoryRisk
+from data.navigation_goal_filter import (
+    TRAINING_SELECTION, is_navigation_goal_approach, navigation_goal_cutoff,
+    window_before_navigation_goal,
+)
 from data.single_frame_base import resolve_repo_path, successful_scene_meta
 from model.driving_model import nearest_planar_action_words
 from model.driving_model.unified_driving_model import signed_log
@@ -48,6 +52,7 @@ class DrivingSliceCache:
             str(Path(cfg.trajectory_vocabulary.output_dir) / cfg.trajectory_vocabulary.action_output))
         artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()[:16] if artifact.is_file() else None
         payload = {"version": version, "slice_duration_s": float(cfg.data.driving_cache.slice_duration_s),
+                   "training_selection": TRAINING_SELECTION,
                    "trajectory_target": "top1_cartesian_word_and_standardized_physical_residual_v1",
                    "action_vocabulary": cfg.trajectory_vocabulary.action_output,
                    "action_vocabulary_hash": artifact_hash,
@@ -61,6 +66,7 @@ class DrivingSliceCache:
                    "navigation_lane_stable_points": cfg.data.driving_cache.navigation_lane_stable_points,
                    "annotation_schema_version": 8,
                    "risk_targets": "masked_conflict_and_lane_availability",
+                   "collision_targets": "solid_static_and_dynamic_height_aware_v2",
                    "frames": 4, "waypoints": 30}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         return "{}-{}".format(version, digest)
@@ -194,6 +200,8 @@ def _annotation_tensors(expert, spec):
 
 def pack_driving_sample(sample, words, residual_mean, residual_std, cfg):
     """按当前物理速度选笛卡尔最近词，仅缓存该词的标准化物理加速度残差。"""
+    if is_navigation_goal_approach({"expert": _sample_expert(sample)}):
+        raise ValueError("Navigation goal approach is excluded from driving supervision")
     required = ("rgb", "intrinsics", "ego_state", "motion_matrices",
                 "trajectory", "bev_grid", "timestamp", "scene", "index",
                 "word_risks", "gt_risks")
@@ -286,8 +294,9 @@ def prepare_driving_cache(samples, cfg):
         words = artifact["actions"].copy()
         residual_mean = torch.from_numpy(artifact["residual_mean"].copy())
         residual_std = torch.from_numpy(artifact["residual_std"].copy())
-    written, skipped = 0, 0
+    written, skipped, skipped_goal = 0, 0, 0
     active_scene, active_reader = None, None
+    goal_cutoff = None
     try:
         for sample in sliced:
             sample = dict(sample)
@@ -300,10 +309,17 @@ def prepare_driving_cache(samples, cfg):
                         active_reader.close()
                     active_reader = SceneTrajectoryRisk(scene, cfg)
                     active_scene = scene
+                    goal_cutoff = navigation_goal_cutoff(
+                        active_reader.kinematics, active_reader.frames)
                 if not successful_scene_meta(active_reader.reader.meta):
                     skipped += 1
                     continue
                 frame = active_reader.frames[int(sample["index"])]
+                if not window_before_navigation_goal(
+                        frame["sim_time"], cfg.model.unified_driving.num_waypoints *
+                        cfg.model.unified_driving.waypoint_dt_s, goal_cutoff):
+                    skipped_goal += 1
+                    continue
                 # Both independent commands come from the saved frame.
                 sample["frame_meta"] = frame
                 if "navigation_command" in frame:
@@ -336,4 +352,5 @@ def prepare_driving_cache(samples, cfg):
         cache.close()
     return {"namespace": cache.namespace, "path": str(cache.path), "samples": written,
             "skipped_missing_risk_gt": skipped,
+            "skipped_navigation_goal": skipped_goal,
             "residual_mean": residual_mean.tolist(), "residual_std": residual_std.tolist()}

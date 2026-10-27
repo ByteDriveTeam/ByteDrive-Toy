@@ -9,11 +9,14 @@ from enum import IntEnum
 from collections import deque
 from types import SimpleNamespace
 import random
+import copy
+import math
 
 import carla
 from agents.navigation.controller import VehiclePIDController
 from agents.navigation.route_tracking import RouteTracker
 from agents.tools.misc import draw_waypoints, get_speed
+from common.navigation_command import navigation_command_from_route
 
 
 class RoadOption(IntEnum):
@@ -74,6 +77,8 @@ class LocalPlanner(object):
 
         self._waypoints_queue = deque(maxlen=10000)
         self._route_tracker = None
+        self._initial_route = None
+        self._initial_commands = {}
         self._continuous_route_tracking = bool(opt_dict.get("continuous_route_tracking", False))
         self._min_waypoint_queue_length = 100
         self._stop_waypoint_creation = False
@@ -217,6 +222,20 @@ class LocalPlanner(object):
 
         for elem in current_plan:
             self._waypoints_queue.append(elem)
+        # Capture values rather than live Waypoint handles. Only an explicit
+        # plan assignment creates a new immutable route; execution just pops
+        # the working queue, including while a temporary detour is active.
+        points, arc, options, keys = [], [], [], []
+        for waypoint, option in self._waypoints_queue:
+            p = waypoint.transform.location
+            point = [float(p.x), float(p.y), float(p.z)]
+            arc.append(0. if not points else arc[-1] + math.hypot(
+                point[0] - points[-1][0], point[1] - points[-1][1]))
+            points.append(point)
+            options.append(int(option))
+            keys.append([int(waypoint.road_id), int(waypoint.section_id), int(waypoint.lane_id)])
+        self._initial_route = dict(points=points, arc_m=arc, road_options=options, lane_keys=keys)
+        self._initial_commands.clear()
         if self._continuous_route_tracking and self._waypoints_queue:
             points = [
                 [waypoint.transform.location.x, waypoint.transform.location.y]
@@ -228,6 +247,30 @@ class LocalPlanner(object):
     def set_offset(self, offset):
         """Sets an offset for the vehicle"""
         self._vehicle_controller.set_offset(offset)
+
+    def get_initial_navigation(self, lookahead_m=25., turn_threshold_deg=20.):
+        """Detached full initial geometry and a fixed command at every waypoint."""
+        if self._initial_route is None:
+            return None
+        key = (float(lookahead_m), float(turn_threshold_deg))
+        if key not in self._initial_commands:
+            self._initial_commands[key] = [navigation_command_from_route(
+                self._initial_route, index, *key)
+                for index in range(len(self._initial_route['points']))]
+        result = copy.deepcopy(self._initial_route)
+        result.update(commands=list(self._initial_commands[key]), lookahead_m=key[0],
+                      turn_threshold_deg=key[1], source='initial_assigned_route')
+        return result
+
+    def get_navigation_command(self, lookahead_m=25., turn_threshold_deg=20.):
+        key = (float(lookahead_m), float(turn_threshold_deg))
+        if key not in self._initial_commands:
+            self.get_initial_navigation(*key)
+        commands = self._initial_commands.get(key, [])
+        if not commands:
+            return 0
+        index = min(len(commands) - 1, len(commands) - len(self._waypoints_queue))
+        return int(commands[max(index, 0)])
 
     def run_step(self, debug=False, target_location_override=None):
         """

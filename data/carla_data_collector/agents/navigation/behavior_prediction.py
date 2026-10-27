@@ -7,11 +7,12 @@ horizon and is consumed by ``risk_field``.
 """
 
 from dataclasses import dataclass
+from collections import deque
 import math
 
 import numpy as np
 from agents.navigation.intent_prediction import (
-    infer_intent_probabilities, predict_intent_modes)
+    infer_intent_probabilities, predict_intent_modes, motion_lane_context, IntentMode)
 
 
 @dataclass
@@ -24,6 +25,11 @@ class ActorPrediction:
     speed_mps: float
     extent_xy: tuple
     modes: tuple = ()
+    current_position: tuple = None
+    current_velocity: tuple = None
+    static_box: dict = None
+    observation_count: int = 0
+    current_heading_xy: tuple = None
 
     def for_mode(self, mode):
         """Return a legacy-shaped single hypothesis for risk calculations."""
@@ -31,7 +37,10 @@ class ActorPrediction:
             actor_id=self.actor_id, actor_type=self.actor_type,
             times=self.times, means=mode.means,
             covariances=mode.covariances,
-            speed_mps=mode.speed_mps, extent_xy=self.extent_xy)
+            speed_mps=mode.speed_mps, extent_xy=self.extent_xy,
+            current_position=self.current_position,
+            current_velocity=self.current_velocity, static_box=self.static_box,
+            observation_count=self.observation_count, current_heading_xy=self.current_heading_xy)
 
 
 class _Track:
@@ -55,6 +64,8 @@ class _Track:
         self.lateral_speed_mps = 0.0
         self.observation_count = 0
         self.initialized = False
+        self.position_history = deque(maxlen=11)
+        self.current_heading_xy = None
 
     @staticmethod
     def _transition(dt):
@@ -84,11 +95,15 @@ class _Track:
         out[np.ix_([1, 3, 5], [1, 3, 5])] = block
         return out
 
-    def update(self, position, velocity, timestamp, lane_context=None):
+    def update(self, position, velocity, timestamp, lane_context=None, heading_xy=None):
+        if heading_xy is not None:
+            self.current_heading_xy = tuple(heading_xy)
         position = np.asarray(position, dtype=np.float64)[:2]
         velocity = np.asarray(velocity, dtype=np.float64)[:2]
         timestamp = float(timestamp)
         if not self.initialized or self.timestamp is None or timestamp <= self.timestamp:
+            self.position_history.clear()
+            self.position_history.append((timestamp, position.copy()))
             self.x[:] = 0.0
             self.x[:2] = position
             self.x[2:4] = velocity
@@ -110,6 +125,7 @@ class _Track:
 
         dt = min(max(timestamp - self.timestamp, 1e-3), 1.0)
         if self.actor_type == "pedestrian" and self.last_observed_position is not None:
+            self.observation_count += 1
             # CARLA walkers can report near-zero actor velocity while their
             # controller moves them across the road. Consecutive ground-truth
             # positions are the reliable motion observation in that case.
@@ -157,8 +173,28 @@ class _Track:
         # Simulator positions are exact at the current tick. Anchor the mean
         # to the observation so an old velocity prior cannot leave it behind.
         self.x[:2] = position
+        self.x[2:4] = velocity
         if self.actor_type == "pedestrian":
-            self.x[2:4] = velocity
+            self.x[4:6] = 0.
+        else:
+            # Ground-truth simulator velocity is an exact current condition.
+            # A long stationary history must not leave a spurious CA transient
+            # after an oncoming actor starts moving. Retain the filtered
+            # covariance and history-derived acceleration/intent posterior.
+            self.position_history.append((timestamp, position.copy()))
+            # Fit ground-truth positions over the recent second. Reported
+            # physics velocities may oscillate every tick under target-velocity
+            # traffic control; differentiating that oscillation invents a
+            # sustained acceleration and repeatedly revokes a safe merge.
+            if len(self.position_history) >= 3:
+                history_times = np.asarray([item[0] - timestamp for item in self.position_history])
+                design = np.stack([.5 * history_times**2, history_times, np.ones_like(history_times)], axis=1)
+                positions = np.asarray([item[1] for item in self.position_history])
+                acceleration = np.linalg.lstsq(design, positions, rcond=None)[0][0]
+                norm = float(np.linalg.norm(acceleration))
+                self.x[4:6] = acceleration * min(1., 4. / max(norm, 1e-6))
+            else:
+                self.x[4:6] = 0.
         self.P = (np.eye(6) - gain.dot(H)).dot(self.P)
         self.P = 0.5 * (self.P + self.P.T)
         self.P[np.diag_indices(6)] = np.maximum(self.P[np.diag_indices(6)], 1e-6)
@@ -176,9 +212,21 @@ class _Track:
         count = max(1, int(math.ceil(horizon_s / step_s)))
         times = np.arange(1, count + 1, dtype=np.float64) * step_s
         means, covariances = [], []
+        acceleration = self.x[4:6].copy()
+        if self.actor_type == 'vehicle' and self.lane_context is not None:
+            direction = np.asarray(self.lane_context['direction'])
+            normal = np.array([-direction[1], direction[0]])
+            if abs(float(np.dot(self.x[2:4], normal))) < .15:
+                acceleration -= normal * float(np.dot(acceleration, normal))
+        speed = float(np.linalg.norm(self.x[2:4]))
+        along_acceleration = float(np.dot(acceleration, self.x[2:4] / max(speed, .01)))
+        stopping_time = speed / -along_acceleration if along_acceleration < -.01 else float('inf')
         for time_s in times:
             F = self._transition(time_s)
-            means.append(F.dot(self.x)[:2].copy())
+            moving_time = min(float(time_s), stopping_time)
+            displacement = (self.x[2:4] * moving_time + .5 * acceleration * moving_time**2
+                            if speed > .15 else np.zeros(2))
+            means.append(self.x[:2] + displacement)
             cov = F.dot(self.P).dot(F.T)[:2, :2] + self._process_covariance(time_s)[:2, :2]
             cov = 0.5 * (cov + cov.T)
             cov[np.diag_indices(2)] = np.maximum(cov[np.diag_indices(2)], 1e-4)
@@ -197,6 +245,19 @@ class _Track:
                 brake_mps2=brake_mps2,
                 accelerate_mps2=accelerate_mps2,
                 lane_change_s=lane_change_s)
+        elif multi_intent_enabled and self.actor_type == 'pedestrian':
+            # Preserve alternatives to constant acceleration, especially after
+            # an abrupt stop/turn. All hypotheses are conditioned on observed
+            # motion; the base posterior remains in the safety calculation.
+            velocity = np.asarray(self.last_observed_velocity)
+            position = self.x[:2]
+            t = times[:, None]
+            scenarios = [('walk_continue', .60, 1.), ('walk_stop', .25, 0.),
+                         ('walk_faster', .10, 1.4), ('walk_reverse', .05, -.7)]
+            modes = tuple(IntentMode(name, weight,
+                (position + t * velocity * scale).astype(np.float32),
+                covariances.copy(), float(np.linalg.norm(velocity) * abs(scale)))
+                for name, weight, scale in scenarios)
         return ActorPrediction(
             actor_id=self.actor_id,
             actor_type=self.actor_type,
@@ -206,6 +267,13 @@ class _Track:
             speed_mps=float(np.linalg.norm(self.x[2:4])),
             extent_xy=self.extent_xy,
             modes=modes,
+            current_position=tuple(self.x[:2]),
+            # Current gaps use the measured simulator velocity. Keep the KF
+            # posterior for future means/modes instead of presenting its lag
+            # as an observed catch-up by an already yielding follower.
+            current_velocity=tuple(self.last_observed_velocity),
+            observation_count=self.observation_count,
+            current_heading_xy=self.current_heading_xy,
         )
 
 
@@ -298,8 +366,13 @@ class BayesianActorTracker:
                 lane_context = self._lane_context(road_map, location)
             track.extent_xy = extent
             track.intent_active = bool(nearby)
-            track.update(position, self._xy(actor.get_velocity()),
-                         timestamp, lane_context=lane_context)
+            velocity = self._xy(actor.get_velocity())
+            heading = None
+            if hasattr(actor, 'get_transform'):
+                forward = actor.get_transform().get_forward_vector()
+                heading = self._xy(forward)
+            track.update(position, velocity, timestamp,
+                         lane_context=motion_lane_context(lane_context, velocity), heading_xy=heading)
             seen.add(actor_id)
         for actor_id in list(self._tracks):
             track = self._tracks[actor_id]

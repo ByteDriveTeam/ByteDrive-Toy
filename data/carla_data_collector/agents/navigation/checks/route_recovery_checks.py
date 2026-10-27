@@ -5,10 +5,25 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from agents.navigation.route_recovery import project_route, temporary_route
+from agents.navigation.route_recovery import project_route, temporary_route, minimum_recovery_distance
 
 
 class RouteRecoveryChecks(unittest.TestCase):
+    def test_partial_return_does_not_restart_at_full_fourteen_metres(self):
+        full = minimum_recovery_distance(3.5, 2.4, 14., .18)
+        partial = minimum_recovery_distance(1., 2.4, 14., .18)
+        self.assertLess(partial, full)
+        self.assertLess(partial, 7.)
+        self.assertGreaterEqual(partial, 2. * 2.4 + 1.)
+        self.assertLessEqual(6. / partial ** 2, .8 * .18 + 1e-8)
+
+    def test_replanned_bypass_starts_from_measured_offset_without_a_jump(self):
+        plan = temporary_route([[float(x), 0.] for x in range(0, 101)],
+                               [18., -1.85], 1, 3.5, obstacle_position=[25., 0.], ego_heading=0.)
+        self.assertLess(abs(plan['points'][1][1] + 1.85), .3)
+        at_obstacle = min(plan['points'], key=lambda point: abs(point[0] - 25.))
+        self.assertGreater(-at_obstacle[1], 2.5)
+
     def setUp(self):
         self.route = [[float(x), 0.0] for x in range(0, 81, 5)]
 
