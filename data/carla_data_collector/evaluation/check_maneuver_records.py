@@ -74,7 +74,8 @@ def audit(path):
             if not safety.get('waiting_for_gap'):
                 executed.append(index)
                 assert safety.get("ready"), (path, index, safety)
-        assert frame["navigation_command"] == frame["raw_navigation_command"] == 0
+        assert frame["navigation_command"] == frame["raw_navigation_command"]
+        assert 0 <= frame['raw_navigation_command'] < 5
         if initial_navigation is not None:
             commands = initial_navigation['commands']
             route_index = expert['navigation']['assigned_route_index']

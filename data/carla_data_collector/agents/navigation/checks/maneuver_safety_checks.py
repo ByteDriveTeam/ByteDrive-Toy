@@ -10,7 +10,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 from agents.navigation.behavior_prediction import ActorPrediction
 from agents.navigation.maneuver_safety import assess_maneuver, parallel_hold_path, choose_candidate, waiting_annotation
-from agents.navigation.route_recovery import temporary_route
+from agents.navigation.route_recovery import temporary_route, sample_route
 
 
 class ManeuverSafetyChecks(unittest.TestCase):
@@ -45,6 +45,7 @@ class ManeuverSafetyChecks(unittest.TestCase):
         safety = {'safe': False, 'blocking_actors': [], 'candidates': [{'safe': True}]}
         self.assertEqual(waiting_annotation(safety, 'AVOID_LEFT', 'obstacle_avoid_left'),
                          ('YIELD', 'comfortable_braking'))
+
 
     def setUp(self):
         self.route = [[float(x), 0.] for x in range(-10, 91, 2)]
@@ -164,6 +165,22 @@ class ManeuverSafetyChecks(unittest.TestCase):
             actor = self.actor([-8., -3.5], velocity)
             actor.covariances[:] = np.eye(2) * 4.
             self.assertFalse(self.assess([actor], path, [0., -3.1], 0., 3.)['safe'])
+
+    def test_departure_can_finish_before_faster_source_follower_catches_up(self):
+        position = [0., -1.5]
+        path = temporary_route(self.route, position, -1, 3.5, recovery_m=8.)['points']
+        actor = self.actor([-10., -3.5], [3.8, 0.])
+        actor.covariances[:, 1, 1] = 4.
+        result = self.assess([actor], path, position, 0., 2.5)
+        self.assertTrue(result['safe'])
+        self.assertIn(actor.actor_id, result['clearing_source_follower_ids'])
+        # A supported inward cut retains the full forecast check.
+        actor.modes = (SimpleNamespace(name='change_right', probability=.8,
+            means=np.asarray([sample_route(path, 2.5*t)[0] for t in actor.times]),
+            covariances=np.tile(np.eye(2)[None] * .05, (len(actor.times),1,1))),)
+        result = self.assess([actor], path, position, 0., 2.5)
+        self.assertFalse(result['safe'])
+        self.assertEqual(result['clearing_source_follower_ids'], [])
 
     def test_distant_passed_actor_is_not_clamped_into_receiving_gap(self):
         self.route = [[float(x), 0.] for x in range(-4, 91, 2)]

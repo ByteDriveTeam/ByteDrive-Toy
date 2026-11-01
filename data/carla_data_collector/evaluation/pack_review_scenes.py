@@ -39,6 +39,8 @@ def pack(source, target, index, validation=None):
         "opendrive_xml": recording.get("opendrive_xml"),
         "initial_body_margin_m": recording.get("initial_body_margin_m"),
         "static_scenario": recording.get('static_scenario'),
+        "defensive_scenario": recording.get('defensive_scenario'),
+        "control_override": recording.get('control_override'),
         "constructed_obstacle_type": recording.get('constructed_obstacle_type'),
         "constructed_obstacle_id": recording.get('constructed_obstacle_id'),
         "goal_reached": goal_reached, "expected_outcome": "wait" if expected_wait else "goal",

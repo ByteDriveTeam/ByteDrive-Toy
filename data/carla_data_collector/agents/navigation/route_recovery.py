@@ -74,6 +74,22 @@ def minimum_recovery_distance(lateral_m, ego_half_length_m, maximum_m, curvature
     return min(float(maximum_m), max(physical_minimum, curved_minimum))
 
 
+def bounded_recovery_distance(lateral_m, available_m, requested_m,
+                              ego_half_length_m, maximum_m, curvature_limit):
+    """Keep a recovery target from receding below its curvature requirement.
+
+    ``requested_m`` may be the remaining distance to a previously committed
+    goal. As the ego advances that value shrinks, but the lateral error still
+    needs enough distance for a smooth return. If the endpoint is closer than
+    the requirement, the available endpoint remains the hard upper bound.
+    """
+    available = max(float(available_m), 0.)
+    requested = max(float(requested_m), 3.)
+    required = minimum_recovery_distance(
+        lateral_m, ego_half_length_m, maximum_m, curvature_limit)
+    return min(available, max(3., requested, required))
+
+
 def _bypass_offset(arc, side, width, obstacle_arc, approach, clear, recovery, entry):
     begin = obstacle_arc - max(float(approach), 4.)
     full = obstacle_arc - max(float(entry), 4.)

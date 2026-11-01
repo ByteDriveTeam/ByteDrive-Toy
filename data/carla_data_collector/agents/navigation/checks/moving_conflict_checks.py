@@ -23,6 +23,17 @@ def prediction(kind='vehicle', position=(30., 0.), velocity=(-2., 0.), actor_id=
 
 
 class MovingConflictChecks(unittest.TestCase):
+    def test_missing_or_degenerate_path_never_certifies_motion(self):
+        for path in (None, [], [[0., 0.]], [[0., 0.], [0., 0.]]):
+            check = swept_motion_check(path, [], .6, (2., .9), 0.)
+            self.assertFalse(check['safe'])
+            self.assertTrue(check['invalid_path'])
+
+    def test_valid_empty_traffic_path_still_certifies_motion(self):
+        check = swept_motion_check([[0., 0.], [10., 0.]], [], .6, (2., .9), 0.)
+        self.assertTrue(check['safe'])
+        self.assertNotIn('invalid_path', check)
+
     def test_wheelbase_is_independent_of_world_heading(self):
         for yaw in (0., np.pi * .5, np.pi * .77):
             rotation = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])

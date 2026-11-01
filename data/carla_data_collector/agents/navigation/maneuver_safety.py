@@ -109,6 +109,7 @@ def assess_maneuver(centerline, path, predictions, ego_position, ego_speed,
                              float(receiving_width_m) * .5 - .1)
     blockers = []
     settled_followers = []
+    clearing_source_followers = []
     max_probability = 0.
     minimum_observed_gap = float("inf")
     future_samples = {}
@@ -134,6 +135,7 @@ def assess_maneuver(centerline, path, predictions, ego_position, ego_speed,
         # the swept corridor and can deadlock a car safely moving away.
         half_width = float(ego_extent[1]) + float(prediction.extent_xy[1]) + lateral_margin_m
         delta = arc - ego_arc
+        clearing_source_lane = False
         # Reserve the entire time needed to leave a rear follower's lane,
         # including the tail beyond the short probabilistic forecast. This
         # applies to paths that keep moving away and never return to that lane.
@@ -156,6 +158,14 @@ def assess_maneuver(centerline, path, predictions, ego_position, ego_speed,
                         blockers.append({'actor_id': prediction.actor_id, 'kind': 'source_lane_clearance',
                                          'catch_time_s': float(catch_s), 'required_s': clearance_s})
                         continue
+                    conservative_clearance_s = float(distances[clear[0]]) / max(
+                        .8 * min(float(ego_speed), nominal_speed), .5) + .5
+                    clearing_source_lane = (catch_s >= conservative_clearance_s and
+                        lateral_speed < .3 and sum(
+                        mode.probability for mode in prediction.modes
+                        if mode.name.startswith('change_')) < probability_threshold)
+                    if clearing_source_lane:
+                        clearing_source_followers.append(prediction.actor_id)
         body_in_receiving_corridor = abs(target_offset - ego_lateral) < (
             receiving_width_m * .5 + float(current_half_width) - .2)
         settling_ahead_of_follower = (body_in_receiving_corridor and
@@ -271,8 +281,17 @@ def assess_maneuver(centerline, path, predictions, ego_position, ego_speed,
                 lateral_distance = float(np.dot(difference, normal))
                 longitudinal_variance = float(tangent.dot(covariance).dot(tangent))
                 lateral_variance = float(normal.dot(covariance).dot(normal))
+                # A following car in the lane we are safely leaving does not
+                # require the same headway as a car whose lane we are entering.
+                # Its catch-up must already leave time for the complete lane
+                # exit above. Keep Bayesian body-conflict checks (all modes,
+                # covariance and a longitudinal buffer), without inflating the
+                # following car into a front headway obstacle. Braking here
+                # would reduce the very clearance time that made departure safe.
+                longitudinal_reserve = (min(minimum_gap_m, .5) if clearing_source_lane
+                                        else minimum_gap_m)
                 probability = (_interval_probability(longitudinal, longitudinal_variance,
-                                                      half_length if physical_probability else half_length + minimum_gap_m) *
+                                                      half_length if physical_probability else half_length + longitudinal_reserve) *
                                _interval_probability(lateral_distance, lateral_variance,
                                    half_width - lateral_margin_m if physical_probability else half_width))
                 peak = max(peak, probability)
@@ -287,6 +306,7 @@ def assess_maneuver(centerline, path, predictions, ego_position, ego_speed,
                              "probability": float(actor_probability)})
     return {"safe": not blockers, "blocking_actors": blockers,
             "settled_follower_ids": settled_followers,
+            "clearing_source_follower_ids": clearing_source_followers,
             "max_conflict_probability": float(max_probability),
             "min_gap_m": float(minimum_observed_gap) if math.isfinite(minimum_observed_gap) else None,
             "reservation_s": float(reservation_s),

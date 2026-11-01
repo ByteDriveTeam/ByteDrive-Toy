@@ -13,6 +13,25 @@ from agents.navigation.local_planner import RoadOption
 
 
 class PedestrianAvoidanceChecks(unittest.TestCase):
+    def test_moving_steering_ramp_uses_last_issued_control_when_server_echo_lags(self):
+        import carla
+        agent = BehaviorAgent.__new__(BehaviorAgent)
+        agent._last_snapshot = {'applied_control': {'steer': .2},
+                                'decision_sim_time': 0., 'state': 'RECOVER_LEFT'}
+        agent._moving_event = {}
+        agent._active_maneuver = {'phase': 'recover', 'points': [[0.,0.],[3.,10.],[20.,10.]]}
+        agent._moving_vehicle_geometry = (2.8, 1.22, [])
+        agent._moving_evasion_tracking_reserve_m = .4
+        agent._vehicle = SimpleNamespace(get_transform=lambda: carla.Transform(),
+            get_control=lambda: carla.VehicleControl(steer=0.))
+        agent._speed = 10.8
+        agent._state, agent._state_since = 'RECOVER_LEFT', 0.
+        agent._local_planner = SimpleNamespace(_vehicle_controller=SimpleNamespace(past_steering=0.))
+        agent._build_snapshot = Mock()
+        control = agent._finish_control(carla.VehicleControl(), 'route_recover_left', .1, 10.8)
+        self.assertAlmostEqual(control.steer, .3)
+        self.assertAlmostEqual(agent._local_planner._vehicle_controller.past_steering, .3)
+
     def test_navigation_goal_distance_follows_route_instead_of_shortcut(self):
         import carla
         agent = BehaviorAgent.__new__(BehaviorAgent)
@@ -34,7 +53,7 @@ class PedestrianAvoidanceChecks(unittest.TestCase):
         agent._local_planner=SimpleNamespace(_stop_waypoint_creation=True,get_plan=lambda:plan)
         self.assertAlmostEqual(agent._navigation_goal_distance(),10.)
 
-    def test_committed_partial_recovery_resumes_only_if_current_checks_are_safe(self):
+    def recovery_agent(self):
         import carla
         agent = BehaviorAgent.__new__(BehaviorAgent)
         waypoint = SimpleNamespace(transform=carla.Transform(), lane_width=3.5,
@@ -51,8 +70,14 @@ class PedestrianAvoidanceChecks(unittest.TestCase):
             '_maneuver_rear_ttc_s': 4., '_maneuver_conflict_probability': .2,
             '_risk_lateral_margin_m': .35, '_maneuver_oncoming_speed_mps': 15.,
             '_maneuver_max_curvature': .18, '_maneuver_last_check': {},
+            '_maneuver_curvature_tolerance': .05, '_corner_lateral_accel_mps2': 2.,
             '_maneuver_clear_since': {}, '_maneuver_clear_time_s': .5}.items():
             setattr(agent,name,value)
+        agent._recovery_committed = True
+        return agent
+
+    def test_committed_partial_recovery_resumes_only_if_current_checks_are_safe(self):
+        agent = self.recovery_agent()
         path = {'phase': 'recover', 'points': [[0.,-1.],[14.,0.]], 'return_distance_m':14.}
         with patch('agents.navigation.behavior_agent.check_path_geometry',
                    return_value={'safe':True,'max_curvature':0.}), patch(
@@ -63,6 +88,28 @@ class PedestrianAvoidanceChecks(unittest.TestCase):
                 result=agent._maneuver_gap([[0.,0.],[50.,0.]],path,[0.,-1.],0.,('recover',-1,None),0.)
                 self.assertEqual(result['ready'], expected)
                 json.dumps(result)  # NumPy boolean decisions must be plain JSON booleans.
+
+    def test_curvature_advisory_preserves_actor_and_road_rejection(self):
+        path = {'phase': 'recover', 'points': [[0.,-1.],[14.,0.]], 'return_distance_m':14.}
+        cases = [
+            ({'safe': True, 'max_curvature': .185}, [], True, 'curvature_advisory'),
+            ({'safe': True, 'max_curvature': .20}, [], False, 'curvature_limit'),
+            ({'safe': False, 'kind': 'road_boundary', 'max_curvature': .185}, [], False, 'road_boundary'),
+            ({'safe': True, 'max_curvature': .185}, [{'actor_id': 2, 'kind': 'forecast_conflict'}],
+             False, 'curvature_limit'),
+        ]
+        for geometry, blockers, safe, kind in cases:
+            with self.subTest(kind=kind, blockers=blockers):
+                agent = self.recovery_agent()
+                with patch('agents.navigation.behavior_agent.check_path_geometry', return_value=geometry), patch(
+                        'agents.navigation.behavior_agent.assess_maneuver', return_value={
+                            'safe': not blockers, 'blocking_actors': blockers,
+                            'max_conflict_probability': 0., 'min_gap_m': None}):
+                    result = agent._maneuver_gap([[0.,0.],[50.,0.]],path,[0.,-1.],0.,('recover',-1,None),0.)
+                self.assertEqual(result['safe'], safe)
+                self.assertEqual(result['geometry']['kind'], kind)
+                if kind == 'curvature_advisory':
+                    self.assertAlmostEqual(result['geometry']['speed_cap_mps'] ** 2 * .185, 2.)
 
     def test_vehicle_detector_distance_is_normalized_to_centers_once(self):
         import carla

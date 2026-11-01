@@ -5,10 +5,26 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from agents.navigation.route_recovery import project_route, temporary_route, minimum_recovery_distance
+from agents.navigation.route_recovery import (project_route, temporary_route,
+                                               minimum_recovery_distance,
+                                               bounded_recovery_distance)
 
 
 class RouteRecoveryChecks(unittest.TestCase):
+    def test_committed_goal_cannot_shrink_below_curvature_distance(self):
+        required = minimum_recovery_distance(3.268, 2.4, 14., .18)
+        distance = bounded_recovery_distance(3.268, 20., 10.32, 2.4, 14., .18)
+        self.assertGreaterEqual(distance, required)
+        self.assertAlmostEqual(distance, required)
+
+    def test_short_endpoint_remains_the_hard_upper_bound(self):
+        self.assertEqual(bounded_recovery_distance(3.5, 8., 4., 2.4, 14., .18), 8.)
+
+    def test_new_partial_return_uses_shortest_smooth_distance(self):
+        distance = bounded_recovery_distance(1., 30., 3., 2.4, 14., .18)
+        self.assertEqual(distance, minimum_recovery_distance(1., 2.4, 14., .18))
+        self.assertLess(distance, 7.)
+
     def test_partial_return_does_not_restart_at_full_fourteen_metres(self):
         full = minimum_recovery_distance(3.5, 2.4, 14., .18)
         partial = minimum_recovery_distance(1., 2.4, 14., .18)

@@ -69,6 +69,22 @@ class WeatherCfg:
 
 @dataclass
 class BehaviorAgentCfg:
+    defensive_enabled: bool
+    defensive_response_s: float
+    defensive_headway_s: float
+    defensive_lead_brake_mps2: float
+    defensive_intent_probability: float
+    defensive_inward_speed_mps: float
+    defensive_preview_s: float
+    defensive_uncertainty_margin_m: float
+    defensive_clear_time_s: float
+    defensive_release_accel_mps2: float
+    defensive_junction_enabled: bool
+    defensive_road_preview_m: float
+    defensive_junction_sight_m: float
+    defensive_blind_junction_speed_mps: float
+    defensive_visibility_interval_s: float
+    defensive_turn_lateral_accel_mps2: float
     predictive_enabled: bool
     prediction_horizon_s: float
     prediction_step_s: float
@@ -112,12 +128,16 @@ class BehaviorAgentCfg:
     maneuver_oncoming_speed_mps: float
     maneuver_return_buffer_s: float
     maneuver_max_curvature: float
+    maneuver_curvature_tolerance: float
     control_longitudinal_kp: float
     control_longitudinal_ki: float
     control_coast_speed_mps: float
     control_coast_decel_mps2: float
     control_launch_throttle_rate: float
     control_launch_throttle_max: float
+    control_launch_stall_after_s: float
+    control_launch_stall_throttle_max: float
+    control_launch_stall_integral_gain: float
     navigation_goal_approach_s: float
     navigation_goal_stop_buffer_m: float
     route_recovery_m: float
@@ -1322,6 +1342,21 @@ def validate_config(cfg):
     assert cc.ego.controller in ("behavior_agent", "model"), \
         "ego.controller 仅支持 behavior_agent/model"
     ba = cc.ego.behavior_agent
+    assert isinstance(ba.defensive_enabled, bool) and isinstance(ba.defensive_junction_enabled, bool)
+    assert .1 <= ba.defensive_response_s <= 3.
+    assert .5 <= ba.defensive_headway_s <= 4.
+    assert ba.defensive_lead_brake_mps2 >= ba.comfort_decel_mps2
+    assert 0 < ba.defensive_intent_probability <= 1.
+    assert 0 < ba.defensive_inward_speed_mps <= 2.
+    assert .5 <= ba.defensive_preview_s <= ba.prediction_horizon_s
+    assert 0 <= ba.defensive_uncertainty_margin_m <= 5.
+    assert 0 <= ba.defensive_clear_time_s <= 3.
+    assert 0 < ba.defensive_release_accel_mps2 <= ba.max_accel_mps2
+    assert 5. <= ba.defensive_road_preview_m <= ba.route_plan_horizon_m
+    assert 5. <= ba.defensive_junction_sight_m <= 60.
+    assert .5 <= ba.defensive_blind_junction_speed_mps <= 5.
+    assert .1 <= ba.defensive_visibility_interval_s <= 1.
+    assert 0 < ba.defensive_turn_lateral_accel_mps2 <= ba.corner_lateral_accel_mps2
     assert ba.prediction_horizon_s > 0 and 0 < ba.prediction_step_s <= ba.prediction_horizon_s
     assert ba.prediction_process_noise > 0 and ba.prediction_measurement_noise > 0
     assert ba.prediction_max_stale_s > 0 and ba.reaction_time_s >= 0
@@ -1357,11 +1392,15 @@ def validate_config(cfg):
     assert isinstance(ba.maneuver_allow_opposite, bool)
     assert ba.maneuver_return_buffer_s >= 2
     assert 0 < ba.maneuver_max_curvature <= .3
+    assert 0 <= ba.maneuver_curvature_tolerance <= .2
     assert ba.control_longitudinal_kp > 0 and ba.control_longitudinal_ki >= 0
     assert 0 < ba.control_coast_speed_mps <= 4.
     assert 0 < ba.control_coast_decel_mps2 <= 1.
     assert ba.control_launch_throttle_rate > 0
     assert 0 < ba.control_launch_throttle_max <= 1.
+    assert ba.control_launch_stall_after_s > 0.
+    assert ba.control_launch_throttle_max <= ba.control_launch_stall_throttle_max <= 1.
+    assert ba.control_launch_stall_integral_gain > 0.
     assert ba.navigation_goal_approach_s > 0
     assert 0 <= ba.navigation_goal_stop_buffer_m < 1.
     assert ba.route_recovery_m > 0 and ba.route_recovery_trigger_m > 0

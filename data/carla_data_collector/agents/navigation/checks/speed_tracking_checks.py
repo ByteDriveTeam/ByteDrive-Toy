@@ -4,10 +4,64 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
-from agents.navigation.speed_tracking import allow_coasting, limit_launch_throttle, waiting_coast_speed
+from agents.navigation.speed_tracking import allow_coasting, limit_launch_throttle, LaunchAssist, waiting_coast_speed, terminal_front_clear
 
 
 class SpeedTrackingChecks(unittest.TestCase):
+    def test_requested_stall_gradually_unlocks_and_retains_assist_until_rolling(self):
+        assist = LaunchAssist(maximum=.35)
+        throttle = 0.
+        for _ in range(19):
+            throttle = assist.limit(.8, throttle, .1, 0.)
+            self.assertLessEqual(throttle, .15)
+        for _ in range(10):
+            previous = throttle
+            throttle = assist.limit(.8, throttle, .1, 0.)
+            self.assertLessEqual(throttle - previous, .060001)
+        self.assertTrue(assist.active)
+        self.assertAlmostEqual(throttle, .35)
+        self.assertEqual(assist.limit(.8, throttle, .1, .4), .35)
+        assist.limit(.8, throttle, .1, .8, target_speed=.8)
+        self.assertFalse(assist.active)
+
+    def test_stall_compensation_requires_speed_error_and_retains_rate_and_ceiling(self):
+        assist = LaunchAssist(delay_s=.1)
+        throttle = .15
+        for _ in range(100):
+            previous = throttle
+            throttle = assist.limit(.28, throttle, .1, .1, target_speed=1.)
+            self.assertLessEqual(throttle-previous, .060001)
+            self.assertLessEqual(throttle, .45)
+        self.assertGreater(throttle, .4)
+        self.assertGreater(assist.bias, 0.)
+        self.assertGreater(assist.limit(.28, throttle, .1, 1., target_speed=2.), .28)
+        self.assertLessEqual(assist.limit(.1, throttle, .1, 1., target_speed=1.), .1)
+        self.assertEqual(assist.bias, 0.)
+
+    def test_braking_stopping_and_normal_launch_do_not_gain_power(self):
+        for allowed, requested in ((False, .8), (True, 0.)):
+            assist = LaunchAssist()
+            assist.active = True
+            self.assertLessEqual(assist.limit(requested, .35, .1, 0., allowed), .15)
+            self.assertFalse(assist.active)
+        assist = LaunchAssist()
+        throttle = 0.
+        for speed in (0., .05, .1, .2, .3, .4, .6, .8, 1.):
+            expected = limit_launch_throttle(.8, throttle, .1, speed)
+            throttle = assist.limit(.8, throttle, .1, speed)
+            self.assertEqual(throttle, expected)
+            self.assertFalse(assist.active)
+
+    def test_far_nonbinding_lead_can_enter_terminal_forecast_check(self):
+        self.assertTrue(terminal_front_clear(dict(kind='following', speed_cap_mps=12., gap_m=28.), .63))
+        self.assertFalse(terminal_front_clear(dict(kind='following', speed_cap_mps=.4, gap_m=28.), .63))
+        self.assertFalse(terminal_front_clear(dict(kind='following', speed_cap_mps=12., gap_m=4.), .63))
+
+    def test_static_crossing_and_emergency_never_gain_terminal_exception(self):
+        for kind in ('static', 'crossing'):
+            self.assertFalse(terminal_front_clear(dict(kind=kind, speed_cap_mps=12., gap_m=28.), .63))
+        self.assertFalse(terminal_front_clear(dict(kind=None, emergency=True), .63))
+
     def test_waiting_speed_retains_more_than_two_metres_of_coasting_margin(self):
         for distance in [3., 5., 15., 30.]:
             speed = waiting_coast_speed(distance)

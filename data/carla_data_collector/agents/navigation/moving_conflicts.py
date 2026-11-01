@@ -96,7 +96,11 @@ def swept_motion_check(path, predictions, ego_speed, ego_extent, target_speed,
     # Sample all timing envelopes once, rather than rebuilding path geometry
     # for every actor/hypothesis/time. This runs in the collector's tick loop.
     from agents.navigation.route_recovery import _geometry
-    points, segments, lengths, arcs = _geometry(path)
+    geometry = _geometry(path) if path is not None and len(path) >= 2 else None
+    if geometry is None:
+        return dict(safe=False, invalid_path=True, blocking_actors=[],
+                    minimum_swept_clearance_m=None, horizon_s=float(horizon_s), target_speed_mps=target)
+    points, segments, lengths, arcs = geometry
     stations = np.asarray(distances)[None] * np.array([.8, 1., 1.2])[:, None]
     indices = np.clip(np.searchsorted(arcs, stations, side='right') - 1, 0, len(lengths) - 1)
     fractions = np.clip((stations - arcs[indices]) / lengths[indices], 0., 1.)

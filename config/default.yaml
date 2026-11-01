@@ -110,6 +110,22 @@ carla_collector:
     vehicle_filter: vehicle.lincoln.mkz_2020
     behavior_agent:
       predictive_enabled: true
+      defensive_enabled: true
+      defensive_response_s: 1.0
+      defensive_headway_s: 1.4
+      defensive_lead_brake_mps2: 6.0
+      defensive_intent_probability: 0.15
+      defensive_inward_speed_mps: 0.2
+      defensive_preview_s: 3.0
+      defensive_uncertainty_margin_m: 2.0
+      defensive_clear_time_s: 0.6
+      defensive_release_accel_mps2: 0.8
+      defensive_junction_enabled: true
+      defensive_road_preview_m: 40.0
+      defensive_junction_sight_m: 25.0
+      defensive_blind_junction_speed_mps: 2.5
+      defensive_visibility_interval_s: 0.3
+      defensive_turn_lateral_accel_mps2: 1.5
       prediction_horizon_s: 3.0
       prediction_step_s: 0.25
       prediction_process_noise: 1.5
@@ -152,12 +168,16 @@ carla_collector:
       maneuver_oncoming_speed_mps: 15.0
       maneuver_return_buffer_s: 4.0
       maneuver_max_curvature: 0.18
+      maneuver_curvature_tolerance: 0.05
       control_longitudinal_kp: 0.12
       control_longitudinal_ki: 0.02
       control_coast_speed_mps: 3.0
       control_coast_decel_mps2: 0.25
       control_launch_throttle_rate: 0.6
       control_launch_throttle_max: 0.15
+      control_launch_stall_after_s: 2.0
+      control_launch_stall_throttle_max: 0.45
+      control_launch_stall_integral_gain: 0.08
       navigation_goal_approach_s: 3.0
       navigation_goal_stop_buffer_m: 0.5
       route_recovery_m: 14.0

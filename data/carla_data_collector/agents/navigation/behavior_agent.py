@@ -21,13 +21,16 @@ from agents.navigation.static_obstacles import StaticObstacleIndex
 from common.obstacle_geometry import projected_extents
 from agents.navigation.risk_field import evaluate_route_risk, plan_front_vehicle_speed
 from agents.navigation.longitudinal_planner import plan_longitudinal_speed
-from agents.navigation.speed_tracking import allow_coasting, limit_launch_throttle, waiting_coast_speed
+from agents.navigation.speed_tracking import allow_coasting, LaunchAssist, waiting_coast_speed, terminal_front_clear
 from agents.navigation.maneuver_safety import waiting_annotation
-from agents.navigation.route_recovery import project_route, sample_route, temporary_route, minimum_recovery_distance
+from agents.navigation.route_recovery import (project_route, sample_route, temporary_route,
+    minimum_recovery_distance, bounded_recovery_distance)
 from agents.navigation.route_recovery import moving_escape_route
 from agents.navigation.maneuver_safety import assess_maneuver, parallel_hold_path, choose_candidate
 from agents.navigation.moving_conflicts import moving_threats, swept_motion_check, pedestrian_blocks_route
 from agents.navigation.maneuver_tracking import pursuit_steering, track_committed_path, wheelbase_from_positions
+from agents.navigation.defensive_driving import DefensivePlanner
+from agents.navigation.defensive_visibility import JunctionVisibility, defensive_road_constraints
 from agents.navigation.maneuver_lanes import adjacent_candidates, check_path_geometry, check_opposing_sight
 
 from agents.tools.misc import get_speed, positive, compute_distance
@@ -72,6 +75,11 @@ class BehaviorAgent(BasicAgent):
         """
 
         config = dict(behavior_config or {})
+        self._defensive_config = config
+        self._defensive = DefensivePlanner(config)
+        self._junction_visibility = JunctionVisibility(config)
+        self._last_defensive_plan = None
+        self._terminal_coast_reference = []
         planner_options = dict(opt_dict or {})
         control_dt = (vehicle.get_world().get_settings().fixed_delta_seconds or .05)
         planner_options.setdefault("longitudinal_control_dict", {
@@ -176,10 +184,14 @@ class BehaviorAgent(BasicAgent):
         self._maneuver_oncoming_speed_mps = float(config.get("maneuver_oncoming_speed_mps", 15.0))
         self._maneuver_return_buffer_s = float(config.get("maneuver_return_buffer_s", 4.0))
         self._maneuver_max_curvature = float(config.get("maneuver_max_curvature", .18))
+        self._maneuver_curvature_tolerance = float(config.get("maneuver_curvature_tolerance", .05))
         self._control_coast_speed_mps = float(config.get("control_coast_speed_mps", 3.))
         self._control_coast_decel_mps2 = float(config.get("control_coast_decel_mps2", .25))
         self._control_launch_throttle_rate = float(config.get("control_launch_throttle_rate", .6))
         self._control_launch_throttle_max = float(config.get("control_launch_throttle_max", .15))
+        self._launch_assist = LaunchAssist(float(config.get('control_launch_stall_after_s', 2.)),
+            float(config.get('control_launch_stall_throttle_max', .45)),
+            float(config.get('control_launch_stall_integral_gain', .08)))
         self._navigation_goal_approach_s = float(config.get('navigation_goal_approach_s', 3.))
         self._navigation_goal_stop_buffer_m = float(config.get('navigation_goal_stop_buffer_m', .5))
         self._stationary_since = {}
@@ -435,8 +447,20 @@ class BehaviorAgent(BasicAgent):
                     source_lane = adjacent
                     break
         geometry = check_path_geometry(self._map, centerline, path, source_lane, receiving, bounds)
-        if geometry.get("max_curvature", 0.) > self._maneuver_max_curvature:
-            geometry.update(safe=False, kind="curvature_limit")
+        if geometry["safe"] and geometry.get("max_curvature", 0.) > self._maneuver_max_curvature:
+            curvature = float(geometry["max_curvature"])
+            allowed = self._maneuver_max_curvature * (1. + self._maneuver_curvature_tolerance)
+            if (curvature <= allowed and not result.get("blocking_actors")):
+                # The sampled polyline can overshoot the limit slightly at a
+                # connector join. Keep the checked path, but reduce speed by
+                # the same lateral-acceleration envelope used for moving
+                # admissions; do not turn this geometric advisory into a
+                # fictitious actor collision.
+                geometry.update(safe=True, kind="curvature_advisory",
+                    speed_cap_mps=math.sqrt(self._corner_lateral_accel_mps2 /
+                                             max(curvature, .001)))
+            else:
+                geometry.update(safe=False, kind="curvature_limit")
         result["geometry"] = geometry
         result["same_direction"] = same_direction
         result['in_lane'] = bool(in_lane)
@@ -730,12 +754,24 @@ class BehaviorAgent(BasicAgent):
         # Navigation endpoints are not physical road boundaries. Reserving
         # three metres inside an already short final segment can make an
         # otherwise feasible return exceed the curvature limit indefinitely.
-        recovery_distance = min(self._route_recovery_m, max(3., end_arc - ego_arc - .5))
+        available_recovery = max(3., end_arc - ego_arc - .5)
+        recovery_distance = min(self._route_recovery_m, available_recovery)
         if obstacle is None:
-            recovery_distance = min(recovery_distance, minimum_recovery_distance(
-                lateral, bounds.extent.x, self._route_recovery_m, self._maneuver_max_curvature))
+            recovery_distance = bounded_recovery_distance(
+                lateral, available_recovery, 3., bounds.extent.x,
+                self._route_recovery_m, self._maneuver_max_curvature)
         if obstacle is None and self._recovery_goal_world is not None:
-            recovery_distance = max(3., project_route(centerline, self._recovery_goal_world)[0] - ego_arc)
+            requested_recovery = max(3., project_route(
+                centerline, self._recovery_goal_world)[0] - ego_arc)
+            recovery_distance = bounded_recovery_distance(
+                lateral, available_recovery, requested_recovery, bounds.extent.x,
+                self._route_recovery_m, self._maneuver_max_curvature)
+            # A fixed goal can become too close after the ego advances. Move
+            # that internal recovery goal forward rather than rebuilding a
+            # sharper path and reporting a fictitious collision wait.
+            if requested_recovery < recovery_distance:
+                self._recovery_goal_world = sample_route(
+                    centerline, ego_arc + recovery_distance)[0].tolist()
         path = temporary_route(
             centerline, ego_xy, side, self._maneuver_lane_offset_m if obstacle is not None else lane_width,
             obstacle_position=obstacle,
@@ -1008,6 +1044,7 @@ class BehaviorAgent(BasicAgent):
             },
             "longitudinal_plan": self._last_longitudinal_plan,
             "pedestrian_braking_plan": getattr(self, '_pedestrian_braking_plan', None),
+            "defensive_plan": copy.deepcopy(getattr(self, '_last_defensive_plan', None)),
             "maneuver_plan": copy.deepcopy(self._active_maneuver),
             "maneuver_safety": copy.deepcopy(self._maneuver_safety),
         })
@@ -1038,6 +1075,7 @@ class BehaviorAgent(BasicAgent):
         return snapshot
 
     def _finish_control(self, control, reason, timestamp, target_speed_kmh=None):
+        previous = getattr(self, '_last_snapshot', {})
         if getattr(self, '_pedestrian_braking_plan', None) is not None:
             self._pedestrian_braking_plan['yield_actor_ids'] = sorted(self._pedestrian_yield_ids)
             self._pedestrian_braking_plan['corridor_clear_since_sim_time'] = self._pedestrian_clear_since
@@ -1058,9 +1096,12 @@ class BehaviorAgent(BasicAgent):
             wheelbase, angle, curve = self._moving_vehicle_geometry
             multiplier = float(np.interp(self._speed, [p[0] for p in curve], [p[1] for p in curve])) if curve else 1.
             pose = self._vehicle.get_transform()
+            issued = previous.get('applied_control') or {}
+            previous_steer = (float(issued['steer']) if 'steer' in issued
+                              else self._vehicle.get_control().steer)
             control.steer = pursuit_steering(self._active_maneuver['points'],
                 [pose.location.x, pose.location.y], math.radians(pose.rotation.yaw),
-                self._speed / 3.6, wheelbase, angle, multiplier, self._vehicle.get_control().steer)
+                self._speed / 3.6, wheelbase, angle, multiplier, previous_steer)
             self._active_maneuver['tracking'] = dict(controller='curvature_pursuit',
                 wheelbase_m=wheelbase, maximum_wheel_angle_rad=angle, steering_multiplier=multiplier,
                 assumed_tracking_reserve_m=self._moving_evasion_tracking_reserve_m)
@@ -1070,7 +1111,6 @@ class BehaviorAgent(BasicAgent):
         # Only final committed states advance the exported state timer.
         # Intermediate FOLLOW/CRUISE assignments within this tick must not
         # reset a continuous avoidance/recovery episode on every frame.
-        previous = getattr(self, '_last_snapshot', {})
         if previous.get('decision_sim_time') is None:
             self._state_since = timestamp
         elif previous.get('state') == self._state:
@@ -1402,6 +1442,21 @@ class BehaviorAgent(BasicAgent):
         front_plan = self._front_vehicle_plan()
         self._last_front_plan = dict(front_plan)
         target, reason = self._predictive_target_speed(risk)
+        bounds = self._vehicle.bounding_box.extent
+        location = self._vehicle.get_location()
+        suspended = self._active_maneuver is not None or bool((self._maneuver_safety or {}).get('waiting_for_gap'))
+        self._last_defensive_plan = self._defensive.update(self._route_points(), self._last_predictions,
+            [location.x, location.y], self._speed/3.6, (bounds.x, bounds.y), timestamp,
+            min(self._behavior.max_speed, max(0., self._speed_limit-self._behavior.speed_lim_dist))/3.6,
+            suspended=suspended)
+        road_constraints, road_sources = [], []
+        if self._defensive.enabled and not suspended:
+            visibility = self._junction_visibility.update(self._world, list(self._local_planner.get_plan()),
+                self._vehicle.get_transform(), bounds, timestamp)
+            road_constraints, road_sources = defensive_road_constraints(
+                self._decision_route_plan, visibility, self._speed/3.6, self._defensive_config)
+            self._last_defensive_plan['junction_visibility'] = visibility
+        self._last_defensive_plan['road_constraints'] = road_sources
         light_target, light_reason = self._traffic_light_target(ego_waypoint)
         if light_target is not None:
             speed_mps = self._speed / 3.6
@@ -1601,7 +1656,27 @@ class BehaviorAgent(BasicAgent):
         if self._incoming_waypoint is not None and self._incoming_waypoint.is_junction \
                 and self._incoming_direction in (RoadOption.LEFT, RoadOption.RIGHT):
             target = min(target, max(0.0, self._speed_limit - 5.0))
-        speed_constraints = []
+        speed_constraints = list(road_constraints)
+        defense = self._last_defensive_plan
+        defense_cap = defense.get('speed_cap_mps')
+        if defense_cap is not None and defense_cap*3.6 < target:
+            target = defense_cap*3.6
+            defense['applied'] = True
+            if light_target is None and self._active_maneuver is None and reason in ('cruise', 'comfortable_braking'):
+                reason = 'follow_vehicle' if defense['kind'] == 'lead_reserve' else 'predicted_conflict'
+                self._set_state('FOLLOW' if defense['kind'] == 'lead_reserve' else 'YIELD', timestamp)
+        if road_constraints:
+            binding = min(road_sources, key=lambda source:
+                source['speed_limit_mps']**2 + 2.*self._comfort_decel_mps2*source['distance_m'])
+            road_cap = math.sqrt(binding['speed_limit_mps']**2 + 2.*self._comfort_decel_mps2*binding['distance_m'])
+            defense['road_speed_cap_mps'] = road_cap
+            defense['binding_road_constraint'] = binding
+            if road_cap*3.6 < target:
+                target = road_cap*3.6
+                defense['road_applied'] = True
+                if light_target is None and reason in ('cruise', 'comfortable_braking', 'curve_speed'):
+                    reason = 'curve_speed' if binding['kind'] == 'turn_reserve' else 'comfortable_braking'
+                    self._set_state('APPROACH_STOP', timestamp)
         pedestrian_coast_safe = False
         if soft_pedestrian_stop:
             target = 0.
@@ -1647,6 +1722,9 @@ class BehaviorAgent(BasicAgent):
         if self._active_maneuver is not None:
             target = min(target, (self._maneuver_safety or {}).get(
                 'execution_speed_mps', self._maneuver_speed_mps) * 3.6)
+            geometry_cap = ((self._maneuver_safety or {}).get('geometry') or {}).get('speed_cap_mps')
+            if geometry_cap is not None:
+                target = min(target, float(geometry_cap) * 3.6)
         if tracking_target < target:
             target = tracking_target
             if reason in ("cruise", "curve_speed"):
@@ -1696,7 +1774,7 @@ class BehaviorAgent(BasicAgent):
             if goal_limit * 3.6 < target:
                 goal_approach_active = True
                 target = goal_limit * 3.6
-                if reason in ('cruise', 'curve_speed') and self._speed / 3.6 >= goal_limit - .1:
+                if reason in ('cruise', 'curve_speed', 'follow_vehicle') and self._speed / 3.6 >= goal_limit - .1:
                     reason = 'comfortable_braking'
                     self._set_state('APPROACH_STOP' if goal_limit > 0. else 'STOPPING', timestamp)
         if target <= 0.0 and self._speed / 3.6 < 0.5:
@@ -1708,7 +1786,15 @@ class BehaviorAgent(BasicAgent):
             return self._finish_control(self.emergency_stop(), reason, timestamp, 0.0)
         stop_for_conflict = reason == "predicted_conflict" and target <= 0.0
         policy_speed = target / 3.6
+        defensive_braking = bool(defense.get('applied') and
+                                 (policy_speed < speed_mps or defense.get('stopping_committed')))
+        if defensive_braking:
+            self._last_target_accel_mps2 = min(self._last_target_accel_mps2, 0.)
+            self._last_target_speed_mps = min(self._last_target_speed_mps, speed_mps)
         target = self._plan_target_speed(target, speed_constraints, dt)
+        if goal_limit is not None and self._decision_route_plan['points']:
+            self._terminal_coast_reference = [p['location_world'][:2]
+                                              for p in self._decision_route_plan['points']]
         if moving_ready:
             ceiling = max(speed_mps, self._maneuver_safety['execution_speed_mps'])
             target = min(target, ceiling * 3.6)
@@ -1720,7 +1806,7 @@ class BehaviorAgent(BasicAgent):
             target_location_override=(
                 self._active_maneuver["target_world_xy"]
                 if self._active_maneuver is not None else None))
-        if self._state == "STOPPING" or stop_for_conflict or soft_pedestrian_stop:
+        if self._state == "STOPPING" or stop_for_conflict or soft_pedestrian_stop or defensive_braking:
             control.throttle = 0.0
         if waiting_coast_limit is not None and self._speed / 3.6 >= waiting_coast_limit:
             # The jerk-limited issued target may lag this approaching stop.
@@ -1728,7 +1814,29 @@ class BehaviorAgent(BasicAgent):
             control.throttle = 0.
         if goal_limit is not None and self._speed / 3.6 >= goal_limit:
             control.throttle = 0.
-        soft_terminal_stop = (goal_limit is not None and front_plan['kind'] is None and
+        terminal_coast_check = None
+        terminal_clear = terminal_front_clear(front_plan, speed_mps, self._front_min_gap_m,
+                                               self._control_coast_decel_mps2)
+        if (goal_limit is not None and terminal_clear and front_plan['kind'] == 'following' and
+                .3 < speed_mps <= self._control_coast_speed_mps and not vehicle_state and
+                not walker_state and light_target is None and self._active_maneuver is None):
+            terminal_path = [[location.x, location.y]] + self._terminal_coast_reference
+            forward = self._vehicle.get_transform().get_forward_vector()
+            path_ahead = (len(terminal_path) > 1 and
+                (terminal_path[-1][0]-location.x)*forward.x +
+                (terminal_path[-1][1]-location.y)*forward.y > .05)
+            terminal_coast_check = swept_motion_check(terminal_path, self._last_predictions,
+                speed_mps, (bounds.x, bounds.y), 0., decel_mps2=self._control_coast_decel_mps2,
+                horizon_s=max(self._moving_evasion_horizon_s, speed_mps/self._control_coast_decel_mps2+1.),
+                margin_m=self._moving_evasion_margin_m,
+                ego_heading=math.radians(self._vehicle.get_transform().rotation.yaw),
+                hard_mode_probability=self._moving_evasion_hard_mode_probability) if path_ahead else dict(
+                    safe=False, invalid_remaining_path=True)
+            terminal_coast_check['reference_path_world_xy'] = terminal_path
+            terminal_clear = terminal_coast_check['safe']
+        elif front_plan['kind'] is not None:
+            terminal_clear = False
+        soft_terminal_stop = (goal_limit is not None and terminal_clear and
                               not vehicle_state and light_target is None and
                               self._active_maneuver is None and
                               float(risk.get('max_risk', 0.)) < self._risk_slow_threshold and
@@ -1739,6 +1847,17 @@ class BehaviorAgent(BasicAgent):
                                   light_target is None and
                                   float(risk.get('max_risk', 0.)) < self._risk_slow_threshold)
         moving_wait_coast = False
+        defensive_coast = False
+        if (defense.get('stopping_committed') and .3 < speed_mps <= self._control_coast_speed_mps and
+                light_target is None and not walker_state and self._active_maneuver is None):
+            coast_check = swept_motion_check(self._route_points(), self._last_predictions,
+                speed_mps, (bounds.x, bounds.y), 0., decel_mps2=self._control_coast_decel_mps2,
+                horizon_s=max(self._moving_evasion_horizon_s, speed_mps/self._control_coast_decel_mps2+1.),
+                margin_m=self._moving_evasion_margin_m,
+                ego_heading=math.radians(self._vehicle.get_transform().rotation.yaw),
+                hard_mode_probability=self._moving_evasion_hard_mode_probability)
+            defense['coasting_stop_check'] = coast_check
+            defensive_coast = coast_check['safe']
         if blocked_moving_stop and .3 < self._speed / 3.6 <= self._control_coast_speed_mps:
             stop_check = swept_motion_check(self._route_points(), self._last_predictions,
                 self._speed / 3.6, (self._vehicle.bounding_box.extent.x, self._vehicle.bounding_box.extent.y),
@@ -1755,16 +1874,26 @@ class BehaviorAgent(BasicAgent):
                 coast_speed_mps=self._control_coast_speed_mps,
                 coast_decel_mps2=self._control_coast_decel_mps2,
                 soft_navigation_goal=soft_terminal_stop,
-                safe_maneuver_tracking=safe_maneuver_tracking or pedestrian_coast_safe or moving_wait_coast):
+                safe_maneuver_tracking=safe_maneuver_tracking or pedestrian_coast_safe or moving_wait_coast or defensive_coast):
             control.brake = 0.
-        if (moving_ready and 0. < control.brake < .1 and
+        confirming_safe_recovery = bool(self._active_maneuver is not None and
+            self._active_maneuver['phase'] == 'recover' and
+            (self._maneuver_safety or {}).get('safe') and
+            self._maneuver_safety.get('admission_status') == 'confirming')
+        if ((moving_ready or confirming_safe_recovery) and 0. < control.brake < .1 and
                 light_target is None and not vehicle_state and front_plan['kind'] is None and
-                speed_mps - target / 3.6 < 1.):
+                speed_mps - target / 3.6 < 1. and
+                (moving_ready or (not walker_state and
+                allow_coasting(speed_mps, target/3.6, policy_speed, traffic_constraints,
+                    stop_for_conflict=stop_for_conflict, wait_distance=self._maneuver_wait_distance_m,
+                    coast_speed_mps=self._control_coast_speed_mps,
+                    coast_decel_mps2=self._control_coast_decel_mps2, safe_maneuver_tracking=True)))):
             # Tiny PID tracking brakes can produce a large transient in CARLA
             # during steering. Release only after proving the slower natural
             # deceleration envelope against every actor on the admitted path.
             coast_check = swept_motion_check(self._active_maneuver['points'], self._last_predictions,
-                speed_mps, (bounds.x, bounds.y), self._maneuver_safety['execution_speed_mps'],
+                speed_mps, (bounds.x, bounds.y),
+                self._maneuver_safety.get('execution_speed_mps', speed_mps) if moving_ready else 0.,
                 decel_mps2=self._control_coast_decel_mps2,
                 horizon_s=self._moving_evasion_horizon_s, margin_m=self._moving_evasion_margin_m,
                 tracking_margin_m=self._moving_evasion_tracking_reserve_m,
@@ -1774,9 +1903,12 @@ class BehaviorAgent(BasicAgent):
             self._maneuver_safety['tracking_coast_check'] = coast_check
             if coast_check['safe']:
                 control.brake = 0.
-        control.throttle = limit_launch_throttle(
+        control.throttle = self._launch_assist.limit(
             control.throttle, self._vehicle.get_control().throttle, dt,
-            self._speed / 3.6, rate_per_s=self._control_launch_throttle_rate,
+            self._speed / 3.6, allowed=(control.brake == 0. and policy_speed > .75 and
+                waiting_coast_limit is None and not defense.get('stopping_committed')),
+            target_speed=target/3.6,
+            rate_per_s=self._control_launch_throttle_rate,
             low_speed_mps=self._control_coast_speed_mps,
             launch_throttle_max=self._control_launch_throttle_max)
         if waiting_coast_limit is not None:
@@ -1791,6 +1923,9 @@ class BehaviorAgent(BasicAgent):
                 control.brake = 0. if self._speed / 3.6 > .3 else self._max_brake
                 control.steer = self._vehicle.get_control().steer
         if self._last_longitudinal_plan is not None:
+            self._last_longitudinal_plan['launch_assist_active'] = self._launch_assist.active
+            self._last_longitudinal_plan['launch_assist_bias'] = self._launch_assist.bias
+            self._last_longitudinal_plan['navigation_coasting_check'] = terminal_coast_check
             self._last_longitudinal_plan['navigation_goal_distance_m'] = goal_distance
             self._last_longitudinal_plan['navigation_goal_speed_mps'] = goal_limit
             self._last_longitudinal_plan['navigation_goal_active'] = goal_approach_active

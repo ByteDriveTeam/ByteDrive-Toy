@@ -53,7 +53,8 @@ def run_case(world, start, config, case, steps, recovery_offset,
              obstacle_height_m=0., extra_static_distance_m=-1., moving_type=None,
              moving_speed_mps=2., moving_distance_m=40., activation_step=60,
              pedestrian_start_lateral_m=-4., reverse_after_s=-1.,
-             oncoming_stop_station_m=None, stop_on_collision=False, spawn_at_activation=False):
+             oncoming_stop_station_m=None, stop_on_collision=False, spawn_at_activation=False,
+             scenario_driver=None, assigned_plan=None):
     blueprint = world.get_blueprint_library()
     ego_bp = blueprint.find("vehicle.tesla.model3")
     obstacle_bp = blueprint.find(obstacle_type)
@@ -109,9 +110,11 @@ def run_case(world, start, config, case, steps, recovery_offset,
         # CARLA reports a just-spawned actor at the origin until the first
         # synchronous tick.  The planner must see the actual spawn location.
         world.tick()
-        destination = start.next(70.0)[0]
+        destination = assigned_plan[-1][0] if assigned_plan else start.next(70.0)[0]
         agent = BehaviorAgent(ego, behavior="normal", behavior_config=config)
-        if explicit_plan:
+        if assigned_plan:
+            agent.set_global_plan(assigned_plan)
+        elif explicit_plan:
             # Generated isolated roads may lack router graph entry edges.
             # Assign the unique native lane route directly for these tests.
             agent.set_global_plan([(start, RoadOption.LANEFOLLOW)] +
@@ -128,6 +131,8 @@ def run_case(world, start, config, case, steps, recovery_offset,
             ego.set_transform(pose)
             world.tick()
         traffic = ScenarioTraffic(world, start, actors, case, traffic_mode, density, release_step)
+        if scenario_driver is not None:
+            scenario_driver.setup(world, start, ego, actors)
         traffic.update(0, ego)
         world.tick()
         ego.apply_control(carla.VehicleControl(brake=1.))
@@ -140,6 +145,8 @@ def run_case(world, start, config, case, steps, recovery_offset,
         static = static_bboxes(world)
         for index in range(steps):
             traffic.update(index, ego)
+            if scenario_driver is not None:
+                scenario_driver.update(index, ego)
             if moving_type and index >= activation_step and obstacle is not None:
                 elapsed = (index - activation_step) * .1
                 transform = lifted(obstacle_wp)
@@ -263,6 +270,7 @@ def run_case(world, start, config, case, steps, recovery_offset,
                 'reverse_after_s': reverse_after_s,
                 'oncoming_stop_station_m': oncoming_stop_station_m,
                 'spawn_at_activation': spawn_at_activation,
+                'defensive_scenario': getattr(scenario_driver, 'name', None),
                 'expected_outcome': 'wait' if traffic_mode == 'occupied' and release_step < 0 else 'goal'}
     finally:
         for actor in reversed(actors):
